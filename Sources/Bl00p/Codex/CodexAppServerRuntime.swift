@@ -1,9 +1,42 @@
 import Foundation
 
+enum CodexApprovalResponse: Sendable {
+    case decision
+    case mcpElicitation
+    case permissions(JSONValue)
+
+    func result(approved: Bool) -> JSONValue {
+        switch self {
+        case .decision:
+            .object([
+                "decision": .string(approved ? "accept" : "decline")
+            ])
+        case .mcpElicitation:
+            .object([
+                "action": .string(approved ? "accept" : "decline")
+            ])
+        case .permissions(let requested):
+            .object([
+                "permissions": approved
+                    ? Self.nonNullPermissionSubset(from: requested)
+                    : .object([:]),
+                "scope": .string("session")
+            ])
+        }
+    }
+
+    private static func nonNullPermissionSubset(from requested: JSONValue) -> JSONValue {
+        guard let fields = requested.objectValue else {
+            return .object([:])
+        }
+        return .object(fields.filter { $0.value != .null })
+    }
+}
+
 actor CodexAppServerRuntime: AgentRuntime {
     private struct PendingApproval: Sendable {
         let requestID: JSONValue
-        let method: String
+        let response: CodexApprovalResponse
     }
 
     private struct CodexQuestion: Sendable {
@@ -119,7 +152,7 @@ actor CodexAppServerRuntime: AgentRuntime {
                         text: resumeThreadID == threadID
                             ? "Resumed Codex session"
                             : "Connected to Codex app-server",
-                        detail: "\(userAgent) · Read-only · \(workingDirectory)"
+                        detail: "\(userAgent) · Workspace write · \(workingDirectory)"
                     )
                 )
             )
@@ -310,9 +343,7 @@ actor CodexAppServerRuntime: AgentRuntime {
         do {
             try await session.client.respond(
                 to: pending.requestID,
-                result: .object([
-                    "decision": .string(approved ? "accept" : "decline")
-                ])
+                result: pending.response.result(approved: approved)
             )
             guard var connectedSession = sessions[profile.id],
                   connectedSession.pendingApprovals[entryID] != nil else {
@@ -494,7 +525,7 @@ actor CodexAppServerRuntime: AgentRuntime {
             let entryID = UUID()
             session.pendingApprovals[entryID] = PendingApproval(
                 requestID: requestID,
-                method: method
+                response: .decision
             )
             session.currentContinuation?.yield(
                 .entry(
@@ -530,7 +561,7 @@ actor CodexAppServerRuntime: AgentRuntime {
             let entryID = UUID()
             session.pendingApprovals[entryID] = PendingApproval(
                 requestID: requestID,
-                method: method
+                response: .decision
             )
             session.currentContinuation?.yield(
                 .entry(
@@ -540,6 +571,104 @@ actor CodexAppServerRuntime: AgentRuntime {
                         title: "File change approval",
                         text: reason,
                         detail: params["grantRoot"]?.stringValue,
+                        approvalState: .pending
+                    )
+                )
+            )
+            session.currentContinuation?.yield(.status(.needsApproval))
+
+        case "mcpServer/elicitation/request":
+            let approvalKind = params["_meta"]?["codex_approval_kind"]?.stringValue
+            guard approvalKind == "mcp_tool_call" else {
+                do {
+                    try await session.client.respond(
+                        to: requestID,
+                        result: .object(["action": .string("decline")])
+                    )
+                    yield(
+                        .entry(
+                            .init(
+                                kind: .system,
+                                text: "Codex requested an unsupported MCP form",
+                                detail: params["message"]?.stringValue
+                                    ?? params.compactDescription
+                            )
+                        ),
+                        profileID: profileID
+                    )
+                } catch {
+                    yieldTransportError(error, profileID: profileID)
+                }
+                return
+            }
+
+            let serverName = params["serverName"]?.stringValue ?? "Connected app"
+            let message = params["message"]?.stringValue
+                ?? "\(serverName) wants to run a tool."
+            let detail = params["_meta"]?.compactDescription
+
+            if session.approvalMode == .auto {
+                await autoApprove(
+                    requestID: requestID,
+                    result: CodexApprovalResponse.mcpElicitation.result(approved: true),
+                    logText: "Auto-approved \(serverName) action",
+                    logDetail: message,
+                    session: session,
+                    profileID: profileID
+                )
+                return
+            }
+
+            let entryID = UUID()
+            session.pendingApprovals[entryID] = PendingApproval(
+                requestID: requestID,
+                response: .mcpElicitation
+            )
+            session.currentContinuation?.yield(
+                .entry(
+                    .init(
+                        id: entryID,
+                        kind: .approval,
+                        title: "\(serverName) requests approval",
+                        text: message,
+                        detail: detail,
+                        approvalState: .pending
+                    )
+                )
+            )
+            session.currentContinuation?.yield(.status(.needsApproval))
+
+        case "item/permissions/requestApproval":
+            let requested = params["permissions"] ?? .object([:])
+            let reason = params["reason"]?.stringValue
+                ?? "Codex requested additional workspace permissions."
+            let detail = requested.compactDescription
+
+            if session.approvalMode == .auto {
+                await autoApprove(
+                    requestID: requestID,
+                    result: CodexApprovalResponse.permissions(requested).result(approved: true),
+                    logText: "Auto-approved additional permissions",
+                    logDetail: detail,
+                    session: session,
+                    profileID: profileID
+                )
+                return
+            }
+
+            let entryID = UUID()
+            session.pendingApprovals[entryID] = PendingApproval(
+                requestID: requestID,
+                response: .permissions(requested)
+            )
+            session.currentContinuation?.yield(
+                .entry(
+                    .init(
+                        id: entryID,
+                        kind: .approval,
+                        title: "Codex requests additional access",
+                        text: reason,
+                        detail: detail,
                         approvalState: .pending
                     )
                 )
@@ -777,6 +906,7 @@ actor CodexAppServerRuntime: AgentRuntime {
 
     private func autoApprove(
         requestID: JSONValue,
+        result: JSONValue = CodexApprovalResponse.decision.result(approved: true),
         logText: String,
         logDetail: String,
         session: Session,
@@ -785,7 +915,7 @@ actor CodexAppServerRuntime: AgentRuntime {
         do {
             try await session.client.respond(
                 to: requestID,
-                result: .object(["decision": .string("accept")])
+                result: result
             )
         } catch {
             yieldTransportError(error, profileID: profileID)
@@ -900,7 +1030,17 @@ struct CodexTurnRequest {
 }
 
 enum CodexThreadConfiguration {
-    static let turnModeVersion = 1
+    // Increment whenever the execution boundary changes. Persisted threads from
+    // an older boundary must start fresh because app-server can retain their
+    // original sandbox and environment across process restarts.
+    static let turnModeVersion = 2
+
+    private static let runtimeInstructions = """
+    bl00p runtime capabilities:
+    - Workspace file writes are enabled for the selected working directory.
+    - If Git metadata, network access, or another necessary operation is blocked, request elevated permission through Codex instead of asking the user to run the command in Terminal.
+    - Prefer the authenticated GitHub connected app for pull-request and repository mutations. A failing `gh auth status` is not a blocker when the connected app can perform the action.
+    """
 
     static func parameters(
         profile: BotProfile,
@@ -909,10 +1049,17 @@ enum CodexThreadConfiguration {
         var parameters: [String: JSONValue] = [
             "cwd": .string(workingDirectory),
             "runtimeWorkspaceRoots": .array([.string(workingDirectory)]),
-            "approvalPolicy": .string(profile.approvalMode == .auto ? "never" : "on-request"),
+            // Auto mode still needs Codex to emit approval requests for actions
+            // outside the workspace sandbox (including writes to .git). bl00p
+            // answers those requests automatically in handleServerRequest.
+            "approvalPolicy": .string("on-request"),
             "approvalsReviewer": .string("user"),
-            "sandbox": .string("read-only"),
-            "developerInstructions": .string(profile.instructions)
+            "sandbox": .string("workspace-write"),
+            "developerInstructions": .string(
+                [profile.instructions, runtimeInstructions]
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n\n")
+            )
         ]
         if let modelID = profile.modelID, !modelID.isEmpty {
             parameters["model"] = .string(modelID)

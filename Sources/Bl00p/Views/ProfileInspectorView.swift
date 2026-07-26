@@ -75,8 +75,8 @@ struct ProfileInspectorView: View {
 
                         Text(
                             profile.approvalMode == .auto
-                                ? "Codex runs commands and file changes without asking. Only takes effect the next time this bot connects."
-                                : "Codex asks before running commands or changing files outside its read-only sandbox."
+                                ? "Codex can edit this workspace and runs approved actions without asking. Only takes effect the next time this bot connects."
+                                : "Codex can edit this workspace and asks before actions that need extra access, including GitHub changes."
                         )
                             .font(.bl00p(.caption1))
                             .foregroundStyle(.secondary)
