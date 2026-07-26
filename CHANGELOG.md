@@ -49,6 +49,9 @@ All notable changes to bl00p are documented in this file.
 - Stage Claude image attachments in an isolated temporary directory and remove them after each turn.
 - Keep Manager sessions plan-only and read-only, prevent hidden delegation,
   and reserve team dispatch for bl00p's visible managed workflow.
+- Quarantine unreadable saved state instead of letting the next autosave
+  overwrite it with defaults, and rotate a `state.json.bak` backup on every
+  save so one bad write can't destroy the only copy of prior state.
 
 ### Tests
 

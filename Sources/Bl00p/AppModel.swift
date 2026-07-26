@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SwiftUI
+import os
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -1521,6 +1522,7 @@ final class AppModel: ObservableObject {
 
 struct AppStateStore: Sendable {
     private let fileURL: URL?
+    private let logger = Logger(subsystem: "dev.bl00p.app", category: "persistence")
 
     init(fileURL: URL? = nil) {
         if let fileURL {
@@ -1537,25 +1539,62 @@ struct AppStateStore: Sendable {
             .appendingPathComponent("state.json", isDirectory: false)
     }
 
+    /// A previously-saved state that fails to decode (e.g. after a schema change) is
+    /// moved aside instead of silently discarded, so a decode bug can't cascade into an
+    /// autosave permanently overwriting the user's real profiles and sessions with defaults.
     func load() -> PersistedAppState? {
         guard let fileURL,
               let data = try? Data(contentsOf: fileURL) else { return nil }
-        return try? JSONDecoder.iso8601.decode(PersistedAppState.self, from: data)
+
+        do {
+            return try JSONDecoder.iso8601.decode(PersistedAppState.self, from: data)
+        } catch {
+            logger.error("Failed to decode saved state, quarantining it: \(error)")
+            quarantineUnreadableState(at: fileURL)
+            return nil
+        }
     }
 
+    /// Writes go through a temp file and rotate the previous state into `state.json.bak`,
+    /// so a single bad write (e.g. saving freshly-reset defaults) doesn't destroy the only
+    /// copy of the prior good state on disk.
     func save(_ state: PersistedAppState) {
         guard let fileURL,
               let data = try? JSONEncoder.pretty.encode(state) else { return }
 
+        let fileManager = FileManager.default
+        let directory = fileURL.deletingLastPathComponent()
+        let tempURL = directory.appendingPathComponent(
+            "\(fileURL.lastPathComponent).tmp-\(UUID().uuidString)"
+        )
+        let backupURL = directory.appendingPathComponent("\(fileURL.lastPathComponent).bak")
+
         do {
-            try FileManager.default.createDirectory(
-                at: fileURL.deletingLastPathComponent(),
+            try fileManager.createDirectory(
+                at: directory,
                 withIntermediateDirectories: true
             )
-            try data.write(to: fileURL, options: .atomic)
+            try data.write(to: tempURL, options: .atomic)
+
+            if fileManager.fileExists(atPath: fileURL.path) {
+                try? fileManager.removeItem(at: backupURL)
+                try fileManager.moveItem(at: fileURL, to: backupURL)
+            }
+            try fileManager.moveItem(at: tempURL, to: fileURL)
         } catch {
             // Persistence failure should not interrupt an active coding session.
+            logger.error("Failed to save state: \(error)")
+            try? fileManager.removeItem(at: tempURL)
         }
+    }
+
+    private func quarantineUnreadableState(at fileURL: URL) {
+        let timestamp = ISO8601DateFormatter().string(from: .now)
+            .replacingOccurrences(of: ":", with: "-")
+        let quarantineURL = fileURL.deletingLastPathComponent()
+            .appendingPathComponent("state.corrupt-\(timestamp).json")
+        try? FileManager.default.removeItem(at: quarantineURL)
+        try? FileManager.default.moveItem(at: fileURL, to: quarantineURL)
     }
 }
 

@@ -1281,6 +1281,57 @@ func appStateStoreReadsWhatItWrites() throws {
 }
 
 @Test
+func appStateStoreRotatesPreviousStateIntoBackupOnSave() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-tests-\(UUID().uuidString)", isDirectory: true)
+    let fileURL = directory.appendingPathComponent("state.json")
+    let backupURL = directory.appendingPathComponent("state.json.bak")
+    let store = AppStateStore(fileURL: fileURL)
+    let first = BotProfile.defaults[0]
+    let second = BotProfile.defaults[1]
+
+    store.save(
+        PersistedAppState(profiles: [first], sessions: [:], selectedBotID: first.id)
+    )
+    store.save(
+        PersistedAppState(profiles: [second], sessions: [:], selectedBotID: second.id)
+    )
+
+    let backupData = try #require(FileManager.default.contents(atPath: backupURL.path))
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let backupState = try decoder.decode(PersistedAppState.self, from: backupData)
+    #expect(backupState.selectedBotID == first.id)
+
+    let current = try #require(store.load())
+    #expect(current.selectedBotID == second.id)
+
+    try? FileManager.default.removeItem(at: directory)
+}
+
+@Test
+func appStateStoreQuarantinesUndecodableStateInsteadOfDiscardingIt() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-tests-\(UUID().uuidString)", isDirectory: true)
+    let fileURL = directory.appendingPathComponent("state.json")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try Data("not valid json".utf8).write(to: fileURL)
+    let store = AppStateStore(fileURL: fileURL)
+
+    let loaded = store.load()
+
+    #expect(loaded == nil)
+    #expect(!FileManager.default.fileExists(atPath: fileURL.path))
+    let quarantined = try FileManager.default.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: nil
+    ).filter { $0.lastPathComponent.hasPrefix("state.corrupt-") }
+    #expect(quarantined.count == 1)
+
+    try? FileManager.default.removeItem(at: directory)
+}
+
+@Test
 func jsonValuePreservesRPCPayloads() throws {
     let source = """
     {"id":7,"result":{"thread":{"id":"thr_123"}},"ok":true}
