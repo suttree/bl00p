@@ -767,7 +767,13 @@ actor ClaudeRuntime: AgentRuntime {
             .init(
                 kind: .question,
                 title: "What should I prepare?",
-                text: "Share the review notes and branch or PR whose writing should be polished."
+                text: "Share the reviewed branch whose documentation and draft PR should be prepared."
+            )
+        case .manager:
+            .init(
+                kind: .question,
+                title: "What should the team work on?",
+                text: "Describe the outcome you want. I’ll prepare and coordinate the work when a team is configured."
             )
         }
     }

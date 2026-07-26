@@ -9,6 +9,8 @@ struct ConversationView: View {
     var body: some View {
         if let profile = model.selectedProfile {
             let session = model.session(for: profile.id)
+            let isAwaitingPlanApproval =
+                model.workflow(for: profile.id)?.planApprovalEntryID != nil
 
             VStack(spacing: 0) {
                 ConversationHeader(
@@ -24,6 +26,15 @@ struct ConversationView: View {
 
                 Divider()
 
+                if profile.role == .manager {
+                    ManagerWorkflowBanner(
+                        workflow: model.workflow(for: profile.id),
+                        isTeamReady: model.isManagerTeamReady(profile.id),
+                        profiles: model.profiles
+                    )
+                    Divider()
+                }
+
                 if session.entries.isEmpty {
                     Color.clear
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -31,6 +42,11 @@ struct ConversationView: View {
                     TranscriptView(
                         entries: session.entries,
                         profile: profile,
+                        canRetryFailedMessage:
+                            session.status.allowsFailedMessageRetry,
+                        retry: { entryID in
+                            model.retry(entryID, for: profile.id)
+                        },
                         resolveApproval: { entryID, approved in
                             model.resolveApproval(entryID, approved: approved, for: profile.id)
                         }
@@ -41,7 +57,9 @@ struct ConversationView: View {
                     profileID: profile.id,
                     draft: $draft,
                     attachments: $attachments,
-                    isEnabled: session.status != .launching && session.status != .working,
+                    isEnabled: session.status != .launching
+                        && session.status != .working
+                        && !isAwaitingPlanApproval,
                     send: {
                         let outgoing = draft
                         let outgoingAttachments = attachments
@@ -70,6 +88,105 @@ struct ConversationView: View {
     }
 }
 
+private struct ManagerWorkflowBanner: View {
+    let workflow: ManagerWorkflow?
+    let isTeamReady: Bool
+    let profiles: [BotProfile]
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(
+                systemName: workflow?.isPaused == true
+                    ? "pause.circle.fill"
+                    : "point.3.connected.trianglepath.dotted"
+            )
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(
+                    workflow?.isPaused == true
+                        ? Color.orange
+                        : Color.bl00pPinkText
+                )
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text(title)
+                        .font(.bl00p(.callout, weight: .semibold))
+                    if let workflow {
+                        Text(workflow.stage.label)
+                            .font(.bl00p(.caption1, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let workflow {
+                    ProgressView(
+                        value: Double(workflow.stage.progressIndex),
+                        total: Double(ManagerWorkflowStage.completed.progressIndex)
+                    )
+                    .tint(workflow.isPaused ? .orange : .bl00pPink)
+
+                    Text(detail(for: workflow))
+                        .font(.bl00p(.caption1))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                } else {
+                    Text(
+                        isTeamReady
+                            ? "Your next message will start a managed workflow."
+                            : "Assign a Builder, Reviewer, and Documenter in settings to enable optional orchestration."
+                    )
+                        .font(.bl00p(.caption1))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .background(Color.bl00pPinkSoft.opacity(0.45))
+    }
+
+    private var title: String {
+        guard let workflow else {
+            return isTeamReady ? "Managed workflow ready" : "Standalone Manager"
+        }
+        if workflow.stage == .completed {
+            return "Managed workflow complete"
+        }
+        return workflow.isPaused ? "Managed workflow paused" : "Managed workflow active"
+    }
+
+    private func detail(for workflow: ManagerWorkflow) -> String {
+        if let reason = workflow.pauseReason {
+            return reason
+        }
+        if workflow.stage == .completed, let url = workflow.pullRequestURL {
+            return url
+        }
+        guard let profileID = activeProfileID(for: workflow),
+              let profile = profiles.first(where: { $0.id == profileID }) else {
+            return workflow.request
+        }
+        return "\(profile.name) is handling \(workflow.stage.label.lowercased())."
+    }
+
+    private func activeProfileID(for workflow: ManagerWorkflow) -> UUID? {
+        switch workflow.stage {
+        case .planning, .reporting:
+            workflow.managerProfileID
+        case .building, .revising:
+            workflow.team.builderProfileID
+        case .reviewing, .verifying:
+            workflow.team.reviewerProfileID
+        case .publishing:
+            workflow.team.publisherProfileID
+        case .completed:
+            nil
+        }
+    }
+}
+
 private struct ConversationHeader: View {
     let profile: BotProfile
     let session: AgentSessionState
@@ -84,7 +201,12 @@ private struct ConversationHeader: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            BotAvatar(name: profile.name, provider: profile.provider, size: 38)
+            BotAvatar(
+                name: profile.name,
+                provider: profile.provider,
+                role: profile.role,
+                size: 38
+            )
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
@@ -155,6 +277,8 @@ private struct ConversationHeader: View {
 private struct TranscriptView: View {
     let entries: [TimelineEntry]
     let profile: BotProfile
+    let canRetryFailedMessage: Bool
+    let retry: (UUID) -> Void
     let resolveApproval: (UUID, Bool) -> Void
 
     var body: some View {
@@ -165,6 +289,8 @@ private struct TranscriptView: View {
                         TimelineEntryView(
                             entry: entry,
                             profile: profile,
+                            canRetryFailedMessage: canRetryFailedMessage,
+                            retry: retry,
                             resolveApproval: resolveApproval
                         )
                         .id(entry.id)
@@ -201,6 +327,8 @@ private struct TranscriptView: View {
 private struct TimelineEntryView: View {
     let entry: TimelineEntry
     let profile: BotProfile
+    let canRetryFailedMessage: Bool
+    let retry: (UUID) -> Void
     let resolveApproval: (UUID, Bool) -> Void
 
     var body: some View {
@@ -231,33 +359,55 @@ private struct TimelineEntryView: View {
     private var userMessage: some View {
         HStack {
             Spacer(minLength: 100)
-            VStack(alignment: .leading, spacing: 9) {
-                if !entry.text.isEmpty {
-                    Text(entry.text)
-                        .textSelection(.enabled)
-                }
+            VStack(alignment: .trailing, spacing: 6) {
+                VStack(alignment: .leading, spacing: 9) {
+                    if !entry.text.isEmpty {
+                        Text(entry.text)
+                            .textSelection(.enabled)
+                    }
 
-                if let attachments = entry.attachments, !attachments.isEmpty {
-                    HStack(spacing: 8) {
-                        ForEach(attachments) { attachment in
-                            AttachmentThumbnail(attachment: attachment)
+                    if let attachments = entry.attachments, !attachments.isEmpty {
+                        HStack(spacing: 8) {
+                            ForEach(attachments) { attachment in
+                                AttachmentThumbnail(attachment: attachment)
+                            }
                         }
                     }
                 }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(
+                        Color.bl00pUserBubble,
+                        in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    )
+                    .foregroundStyle(Color.bl00pUserBubbleText)
+
+                if entry.deliveryFailed == true {
+                    HStack(spacing: 7) {
+                        Label("Failed to send", systemImage: "exclamationmark.circle.fill")
+                            .foregroundStyle(.red)
+                        Button {
+                            retry(entry.id)
+                        } label: {
+                            Label("Retry", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!canRetryFailedMessage)
+                    }
+                    .font(.bl00p(.caption1, weight: .semibold))
+                }
             }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(
-                    Color.bl00pUserBubble,
-                    in: RoundedRectangle(cornerRadius: 15, style: .continuous)
-                )
-                .foregroundStyle(Color.bl00pUserBubbleText)
         }
     }
 
     private var assistantMessage: some View {
         HStack(alignment: .top, spacing: 10) {
-            BotAvatar(name: profile.name, provider: profile.provider, size: 28)
+            BotAvatar(
+                name: profile.name,
+                provider: profile.provider,
+                role: profile.role,
+                size: 28
+            )
             VStack(alignment: .leading, spacing: 4) {
                 Text(profile.name)
                     .font(.bl00p(.caption1, weight: .semibold))

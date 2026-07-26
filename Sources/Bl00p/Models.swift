@@ -108,6 +108,7 @@ enum AgentRole: String, Codable, CaseIterable, Identifiable, Sendable {
     case builder
     case reviewer
     case publisher
+    case manager
 
     var id: Self { self }
 
@@ -115,7 +116,8 @@ enum AgentRole: String, Codable, CaseIterable, Identifiable, Sendable {
         switch self {
         case .builder: "Builder"
         case .reviewer: "Reviewer"
-        case .publisher: "PR Writer"
+        case .publisher: "Documenter / PR Writer"
+        case .manager: "Manager"
         }
     }
 
@@ -124,6 +126,7 @@ enum AgentRole: String, Codable, CaseIterable, Identifiable, Sendable {
         case .builder: "Launch Build"
         case .reviewer: "Launch Review"
         case .publisher: "Launch PR Pass"
+        case .manager: "Launch Workflow"
         }
     }
 }
@@ -151,6 +154,10 @@ enum AgentStatus: String, Codable, Sendable {
 
     var needsAttention: Bool {
         self == .needsApproval || self == .needsAnswer || self == .failed
+    }
+
+    var allowsFailedMessageRetry: Bool {
+        self == .stopped || self == .completed || self == .failed
     }
 }
 
@@ -180,6 +187,7 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
     var approvalMode: ApprovalMode
     var modelID: String?
     var worktree: GitWorktreeOwnership?
+    var managerTeam: ManagerTeamConfiguration?
 
     init(
         id: UUID = UUID(),
@@ -192,7 +200,8 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
         requireApprovalBeforePush: Bool = true,
         approvalMode: ApprovalMode = .ask,
         modelID: String? = nil,
-        worktree: GitWorktreeOwnership? = nil
+        worktree: GitWorktreeOwnership? = nil,
+        managerTeam: ManagerTeamConfiguration? = nil
     ) {
         self.id = id
         self.name = name
@@ -205,6 +214,7 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
         self.approvalMode = approvalMode
         self.modelID = modelID
         self.worktree = worktree
+        self.managerTeam = managerTeam
     }
 
     init(from decoder: Decoder) throws {
@@ -222,6 +232,10 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
         worktree = try container.decodeIfPresent(
             GitWorktreeOwnership.self,
             forKey: .worktree
+        )
+        managerTeam = try container.decodeIfPresent(
+            ManagerTeamConfiguration.self,
+            forKey: .managerTeam
         )
     }
 
@@ -261,6 +275,28 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
             """
         )
     ]
+}
+
+struct ManagerTeamConfiguration: Codable, Hashable, Sendable {
+    var builderProfileID: UUID?
+    var reviewerProfileID: UUID?
+    var publisherProfileID: UUID?
+
+    init(
+        builderProfileID: UUID? = nil,
+        reviewerProfileID: UUID? = nil,
+        publisherProfileID: UUID? = nil
+    ) {
+        self.builderProfileID = builderProfileID
+        self.reviewerProfileID = reviewerProfileID
+        self.publisherProfileID = publisherProfileID
+    }
+
+    var isComplete: Bool {
+        builderProfileID != nil
+            && reviewerProfileID != nil
+            && publisherProfileID != nil
+    }
 }
 
 struct GitWorktreeOwnership: Codable, Hashable, Sendable {
@@ -353,6 +389,92 @@ struct GitHandoffPackage: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+enum ManagerWorkflowStage: String, Codable, CaseIterable, Sendable {
+    case planning
+    case building
+    case reviewing
+    case revising
+    case verifying
+    case publishing
+    case reporting
+    case completed
+
+    var label: String {
+        switch self {
+        case .planning: "Planning"
+        case .building: "Building"
+        case .reviewing: "Reviewing"
+        case .revising: "Fixing findings"
+        case .verifying: "Re-checking"
+        case .publishing: "Documenting & publishing"
+        case .reporting: "Reporting"
+        case .completed: "Complete"
+        }
+    }
+
+    var progressIndex: Int {
+        switch self {
+        case .planning: 0
+        case .building: 1
+        case .reviewing: 2
+        case .revising: 3
+        case .verifying: 4
+        case .publishing: 5
+        case .reporting: 6
+        case .completed: 7
+        }
+    }
+}
+
+struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
+    var id: UUID
+    var managerProfileID: UUID
+    var team: ManagerTeamConfiguration
+    var request: String
+    var implementationPlan: String?
+    var planApprovalEntryID: UUID?
+    var stage: ManagerWorkflowStage
+    var branch: String?
+    var pullRequestURL: String?
+    var latestHandoff: GitHandoffPackage?
+    var isPaused: Bool
+    var pauseReason: String?
+    var startedAt: Date
+    var updatedAt: Date
+
+    init(
+        id: UUID = UUID(),
+        managerProfileID: UUID,
+        team: ManagerTeamConfiguration,
+        request: String,
+        implementationPlan: String? = nil,
+        planApprovalEntryID: UUID? = nil,
+        stage: ManagerWorkflowStage = .planning,
+        branch: String? = nil,
+        pullRequestURL: String? = nil,
+        latestHandoff: GitHandoffPackage? = nil,
+        isPaused: Bool = false,
+        pauseReason: String? = nil,
+        startedAt: Date = .now,
+        updatedAt: Date = .now
+    ) {
+        self.id = id
+        self.managerProfileID = managerProfileID
+        self.team = team
+        self.request = request
+        self.implementationPlan = implementationPlan
+        self.planApprovalEntryID = planApprovalEntryID
+        self.stage = stage
+        self.branch = branch
+        self.pullRequestURL = pullRequestURL
+        self.latestHandoff = latestHandoff
+        self.isPaused = isPaused
+        self.pauseReason = pauseReason
+        self.startedAt = startedAt
+        self.updatedAt = updatedAt
+    }
+}
+
 struct ImageAttachment: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var path: String
@@ -393,6 +515,7 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
     var timestamp: Date
     var approvalState: ApprovalState?
     var attachments: [ImageAttachment]?
+    var deliveryFailed: Bool?
 
     init(
         id: UUID = UUID(),
@@ -402,7 +525,8 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
         detail: String? = nil,
         timestamp: Date = .now,
         approvalState: ApprovalState? = nil,
-        attachments: [ImageAttachment]? = nil
+        attachments: [ImageAttachment]? = nil,
+        deliveryFailed: Bool? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -412,6 +536,7 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
         self.timestamp = timestamp
         self.approvalState = approvalState
         self.attachments = attachments
+        self.deliveryFailed = deliveryFailed
     }
 }
 
@@ -422,10 +547,41 @@ struct AgentSessionState: Codable, Sendable {
     var sessionID: String?
     var codexTurnModeVersion: Int?
     var pendingHandoff: GitHandoffPackage? = nil
+    var worktreeSeedID: UUID? = nil
 }
 
 struct PersistedAppState: Codable, Sendable {
     var profiles: [BotProfile]
     var sessions: [UUID: AgentSessionState]
     var selectedBotID: UUID?
+    var managerWorkflows: [UUID: ManagerWorkflow]
+
+    init(
+        profiles: [BotProfile],
+        sessions: [UUID: AgentSessionState],
+        selectedBotID: UUID?,
+        managerWorkflows: [UUID: ManagerWorkflow] = [:]
+    ) {
+        self.profiles = profiles
+        self.sessions = sessions
+        self.selectedBotID = selectedBotID
+        self.managerWorkflows = managerWorkflows
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        profiles = try container.decode([BotProfile].self, forKey: .profiles)
+        sessions = try container.decode(
+            [UUID: AgentSessionState].self,
+            forKey: .sessions
+        )
+        selectedBotID = try container.decodeIfPresent(
+            UUID.self,
+            forKey: .selectedBotID
+        )
+        managerWorkflows = try container.decodeIfPresent(
+            [UUID: ManagerWorkflow].self,
+            forKey: .managerWorkflows
+        ) ?? [:]
+    }
 }

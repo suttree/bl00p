@@ -16,6 +16,8 @@ All notable changes to bl00p are documented in this file.
 - Add image attachments through drag and drop, with previews in the composer and conversation timeline.
 - Add macOS notifications and a Dock badge when a bot finishes, fails, asks a question, or needs approval.
 - Add bot renaming from the sidebar.
+- Add managed Manager workflows with an explicit user approval gate between
+  planning and the Builder handoff.
 
 ### Changed
 
@@ -29,6 +31,8 @@ All notable changes to bl00p are documented in this file.
 - Refresh the conversation, composer, sidebar, avatars, typography, and app icon.
 - Present tool activity in compact, expandable cards and use clearer status text throughout the app.
 - Increase the app build number from 2 to 6.
+- Use hot pink avatars for Manager bots across the sidebar, conversation,
+  settings, and bot-creation surfaces.
 
 ### Fixed
 
@@ -37,10 +41,17 @@ All notable changes to bl00p are documented in this file.
 - Keep loading saved profiles and sessions when a bot profile gains new fields, instead of silently discarding all persisted state on decode failure.
 - Recover from stale Claude conversation identifiers by continuing in a fresh session without discarding the local transcript.
 - Keep Codex lifecycle events connected so idle disconnects are reported correctly.
+- Let failed chat messages retry in place with their original text and attachments
+  without marking completed messages as failed after idle disconnects.
 - Show blocked Claude actions as a readable question that the user can respond to.
 - Prevent duplicate sends while a bot is launching or working.
 - Migrate legacy bot names, starter cards, permission messages, and Codex review sessions when restoring saved state.
 - Stage Claude image attachments in an isolated temporary directory and remove them after each turn.
+- Keep Manager sessions plan-only and read-only, prevent hidden delegation,
+  and reserve team dispatch for bl00p's visible managed workflow.
+- Quarantine unreadable saved state instead of letting the next autosave
+  overwrite it with defaults, and rotate a `state.json.bak` backup on every
+  save so one bad write can't destroy the only copy of prior state.
 
 ### Tests
 
@@ -48,3 +59,5 @@ All notable changes to bl00p are documented in this file.
   updates.
 - Expand coverage for notifications, Dock badges, model and prompt isolation, image attachments, session recovery, state migration, composer sizing, automatic reconnects, and long-lived runtime streams.
 - Cover the Codex approval mode toggle and backward-compatible decoding of bot profiles missing newer fields.
+- Cover Manager plan approval, visible team dispatch, restart persistence,
+  read-only Codex configuration, and role-specific avatar colors.

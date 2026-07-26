@@ -12,6 +12,8 @@ The current prototype includes:
 - Signed automatic updates through GitHub Releases, with install and relaunch
 - Consistent, legible typography across conversations, settings, and bot creation
 - Structured messages, commands, findings, and approval cards
+- Optional Manager bots that coordinate a persistent Builder → Reviewer →
+  Builder fixes → Reviewer re-check → Documenter / PR Writer workflow
 - Isolated managed Git worktrees for implementation bots, with handoff packages
   that carry branch, task, working-tree, and test context to the next bot
 - Real Codex sessions powered by `codex app-server`, with workspace-scoped writes and in-app approvals for commands, file changes, extra permissions, and connected-app mutations
@@ -60,16 +62,41 @@ profile:
 claude auth login
 ```
 
+## Optional managed workflows
+
+Every bot can still be used independently. To enable orchestration, add or edit
+a bot with the **Manager** role, then assign one existing Builder, Reviewer, and
+Documenter / PR Writer in its settings. The Manager's next request starts a
+persisted workflow with this sequence:
+
+1. The Manager prepares the implementation brief.
+2. You approve the implementation plan before it is handed to the team.
+3. The Builder works in an isolated branch and commits a tested change locally.
+4. The Reviewer performs a read-only review.
+5. The Builder addresses the findings and commits the fixes.
+6. The Reviewer verifies the updated implementation.
+7. The Documenter updates documentation, commits, pushes, and opens a draft PR.
+8. The Manager reports the draft PR link and delivery summary.
+
+Questions, failures, and approval requests pause the workflow for the user.
+Leaving any team assignment unset keeps that Manager in standalone chat mode.
+
 ## Runtime boundary
 
-`AgentRuntime` is intentionally provider-neutral. Codex profiles use the desktop-bundled or plugin-bundled `codex app-server` runtime. Threads can write within their selected workspace, route elevated and connected-app actions through bl00p's approval cards, and resume from their saved thread ID when possible.
+`AgentRuntime` is intentionally provider-neutral. Codex profiles use the
+desktop-bundled or plugin-bundled `codex app-server` runtime. Builder,
+Reviewer, and Documenter threads use workspace-scoped execution and route
+elevated and connected-app actions through bl00p's approval cards. Manager
+threads are non-escalatable and read-only so bl00p alone owns delegation to
+the configured team. Threads resume from their saved thread ID when possible.
 
 Claude profiles use the installed `claude` executable's `stream-json` mode.
 They inherit Claude's user and project settings, including configured MCP
 servers. The current allowlist supports repository inspection, file edits for
-non-reviewer roles, common test commands, and read-only Linear tools. Actions
-outside that allowlist pause in the conversation, where the user can approve
-or decline the exact tool call before Claude continues.
+Builder and Documenter roles, common test commands, and read-only Linear tools.
+Manager and Reviewer roles cannot edit files. Actions outside that allowlist
+pause in the conversation, where the user can approve or decline the exact
+tool call before Claude continues.
 
 ## Roadmap
 

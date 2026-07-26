@@ -64,6 +64,10 @@ enum Bl00pTheme {
         colorScheme == .dark ? sidebarDarkTop : sidebarLightTop
     }
 
+    static func avatarBackground(for role: AgentRole) -> NSColor {
+        role == .manager ? hotPink : mint
+    }
+
     private static func adaptive(light: NSColor, dark: NSColor) -> NSColor {
         NSColor(name: nil) { appearance in
             appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
@@ -100,6 +104,7 @@ extension Font {
 struct BotAvatar: View {
     let name: String
     let provider: AgentProvider
+    let role: AgentRole
     var size: CGFloat = 34
 
     private var initial: String {
@@ -111,7 +116,7 @@ struct BotAvatar: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-                .fill(Color.bl00pMint)
+                .fill(Color(nsColor: Bl00pTheme.avatarBackground(for: role)))
 
             Text(initial)
                 .font(.system(size: size * 0.42, weight: .heavy, design: .rounded))

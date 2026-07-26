@@ -102,7 +102,7 @@ struct DemoAgentRuntime: AgentRuntime {
                 (.status(.working), 0),
                 (.entry(.init(
                     kind: .assistant,
-                    text: "I’ve tightened the wording and prepared a concise draft PR description. Publishing remains behind your approval gate."
+                    text: "I’ve updated the documentation and prepared a concise draft PR description. Publishing remains behind your approval gate."
                 )), 320),
                 (.entry(.init(
                     kind: .approval,
@@ -112,6 +112,16 @@ struct DemoAgentRuntime: AgentRuntime {
                     approvalState: .pending
                 )), 460),
                 (.status(.needsApproval), 80)
+            ])
+
+        case .manager:
+            stream([
+                (.status(.working), 0),
+                (.entry(.init(
+                    kind: .assistant,
+                    text: "I’ve turned the request into a focused implementation brief with acceptance criteria and verification expectations."
+                )), 320),
+                (.status(.completed), 120)
             ])
         }
     }
@@ -177,7 +187,9 @@ struct DemoAgentRuntime: AgentRuntime {
         case .reviewer:
             "Ready to review independently. I’ll report actionable findings without taking over the implementation."
         case .publisher:
-            "Ready for the final readability and git pass. Nothing will be pushed without your confirmation."
+            "Ready for the documentation, readability, and git pass. Nothing will be pushed without your confirmation."
+        case .manager:
+            "Ready to coordinate an optional delivery workflow while keeping you in control."
         }
     }
 
@@ -186,6 +198,7 @@ struct DemoAgentRuntime: AgentRuntime {
         case .builder: "What should I build?"
         case .reviewer: "What should I review?"
         case .publisher: "What should I prepare?"
+        case .manager: "What should the team work on?"
         }
     }
 
@@ -194,6 +207,7 @@ struct DemoAgentRuntime: AgentRuntime {
         case .builder: "Paste a ticket, describe the task, or provide a Linear issue reference."
         case .reviewer: "Paste the PR URL, branch name, or review handoff from the builder."
         case .publisher: "Share the resolved review notes and the PR or branch you want polished."
+        case .manager: "Describe the outcome you want. I’ll prepare and coordinate the work when a team is configured."
         }
     }
 }

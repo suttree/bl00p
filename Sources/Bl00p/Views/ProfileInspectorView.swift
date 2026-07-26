@@ -2,13 +2,19 @@ import SwiftUI
 
 struct ProfileInspectorView: View {
     @Binding var profile: BotProfile
+    let profiles: [BotProfile]
     let chooseDirectory: () -> Void
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 HStack(spacing: 10) {
-                    BotAvatar(name: profile.name, provider: profile.provider, size: 38)
+                    BotAvatar(
+                        name: profile.name,
+                        provider: profile.provider,
+                        role: profile.role,
+                        size: 38
+                    )
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Bot settings")
                             .font(.bl00p(.headline, weight: .semibold))
@@ -87,6 +93,42 @@ struct ProfileInspectorView: View {
                     }
                 }
 
+                if profile.role == .manager {
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("MANAGED WORKFLOW")
+                            .font(.bl00p(.caption2, weight: .bold))
+                            .tracking(1.1)
+                            .foregroundStyle(.secondary)
+
+                        teamPicker(
+                            "Builder",
+                            role: .builder,
+                            selection: teamSelection(\.builderProfileID)
+                        )
+                        teamPicker(
+                            "Reviewer",
+                            role: .reviewer,
+                            selection: teamSelection(\.reviewerProfileID)
+                        )
+                        teamPicker(
+                            "Documenter",
+                            role: .publisher,
+                            selection: teamSelection(\.publisherProfileID)
+                        )
+
+                        Text(
+                            profile.managerTeam?.isComplete == true
+                                ? "Messages to this Manager start the delivery workflow. Other bots remain available for ordinary standalone chats."
+                                : "Optional orchestration is off until all three roles are assigned. This Manager still works as a normal standalone bot."
+                        )
+                            .font(.bl00p(.caption1))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
                 if profile.provider == .codex {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("APPROVALS")
@@ -153,5 +195,42 @@ struct ProfileInspectorView: View {
             get: { profile.modelID ?? "" },
             set: { profile.modelID = $0.isEmpty ? nil : $0 }
         )
+    }
+
+    private func teamSelection(
+        _ keyPath: WritableKeyPath<ManagerTeamConfiguration, UUID?>
+    ) -> Binding<UUID?> {
+        Binding(
+            get: {
+                profile.managerTeam?[keyPath: keyPath]
+            },
+            set: { newValue in
+                var team = profile.managerTeam ?? ManagerTeamConfiguration()
+                team[keyPath: keyPath] = newValue
+                profile.managerTeam = team
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func teamPicker(
+        _ label: String,
+        role: AgentRole,
+        selection: Binding<UUID?>
+    ) -> some View {
+        LabeledContent(label) {
+            Picker(label, selection: selection) {
+                Text("Choose…").tag(nil as UUID?)
+                ForEach(
+                    profiles.filter {
+                        $0.id != profile.id && $0.role == role
+                    }
+                ) { candidate in
+                    Text(candidate.name).tag(Optional(candidate.id))
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: 180)
+        }
     }
 }

@@ -119,7 +119,12 @@ private struct BotRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            BotAvatar(name: profile.name, provider: profile.provider, size: 32)
+            BotAvatar(
+                name: profile.name,
+                provider: profile.provider,
+                role: profile.role,
+                size: 32
+            )
                 .overlay(alignment: .topTrailing) {
                     if showsAttention {
                         Circle()
