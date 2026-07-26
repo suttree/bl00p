@@ -76,6 +76,7 @@ final class AppModel: ObservableObject {
     private var inFlightUserEntryIDs: [UUID: UUID] = [:]
     private var planningTurnAssistantEntryIDs: [UUID: Set<UUID>] = [:]
     private var draftSaveTasks: [UUID: Task<Void, Never>] = [:]
+    private var workflowDispatchesInFlight: Set<UUID> = []
     private var notificationsArePrepared = false
     private var persistenceRevision: UInt64 = 0
     private var launchedProfileIDs: Set<UUID> = []
@@ -273,10 +274,48 @@ final class AppModel: ObservableObject {
                     restored.revisionStartedAt = workflow.updatedAt
                 }
                 restored.isPaused = true
-                restored.pauseReason =
-                    workflow.planApprovalEntryID == nil
-                        ? "Ready to resume after the app restart."
-                        : "Waiting for your approval of the implementation plan."
+
+                if workflow.planApprovalEntryID != nil {
+                    restored.pauseReason =
+                        "Waiting for your approval of the implementation plan."
+                    restored.resumeAvailableAfterRestart = false
+                    return restored
+                }
+
+                if workflow.stage == .building,
+                   workflow.implementationPlan != nil,
+                   workflow.pendingDispatch == nil,
+                   workflow.deliveredDispatchID == nil,
+                   let builderID = workflow.team.builderProfileID {
+                    let builderSessionID =
+                        workflow.participantSessionIDs[.builder] ?? builderID
+                    if let deliveredEntry = sessions[
+                        builderSessionID
+                    ]?.entries.first(
+                        where: {
+                            $0.kind == .handoff
+                                && $0.title == "Implementation brief"
+                        }
+                    ) {
+                        restored.deliveredDispatchID = deliveredEntry.id
+                    } else {
+                        restored.pendingDispatch = ManagerWorkflowDispatch(
+                            kind: .initialBuild,
+                            sourceProfileID: workflow.managerProfileID,
+                            targetProfileID: builderID,
+                            summary: workflow.implementationPlan ?? ""
+                        )
+                    }
+                }
+
+                if restored.pendingDispatch != nil {
+                    restored.pauseReason =
+                        "Preparing the persisted workflow handoff."
+                    restored.resumeAvailableAfterRestart = false
+                } else {
+                    restored.pauseReason = "Ready to resume after the app restart."
+                    restored.resumeAvailableAfterRestart = true
+                }
                 return restored
             }
             var recoveredPublishingWorkflow = false
@@ -369,6 +408,12 @@ final class AppModel: ObservableObject {
                     ?? "Delivery prepared by the Documenter / PR Writer.",
                 draftURL: draftURL
             )
+        }
+
+        save()
+        Task { [weak self] in
+            await Task.yield()
+            self?.recoverPendingWorkflowDispatches()
         }
     }
 
@@ -1167,17 +1212,19 @@ final class AppModel: ObservableObject {
             workflow.stage = .building
             workflow.isPaused = false
             workflow.pauseReason = nil
+            workflow.resumeAvailableAfterRestart = false
+            workflow.pendingDispatch =
+                workflow.pendingDispatch
+                    ?? ManagerWorkflowDispatch(
+                        kind: .initialBuild,
+                        sourceProfileID: workflow.managerProfileID,
+                        targetProfileID: builderID,
+                        summary: handoff.approvedPlan
+                    )
             sessions[managerID] = state
             managerWorkflows[managerID] = workflow
             save(immediately: true)
-
-            Task { [weak self] in
-                await self?.dispatchInitialBuild(
-                    workflow: workflow,
-                    handoff: handoff,
-                    to: builderID
-                )
-            }
+            beginPendingWorkflowDispatch(for: managerID)
         } else {
             state.status = .needsAnswer
             workflow.approvedPlanEntryID = nil
@@ -1188,6 +1235,73 @@ final class AppModel: ObservableObject {
             managerWorkflows[managerID] = workflow
             save(immediately: true)
         }
+    }
+
+    func recoverPendingWorkflowDispatches() {
+        let managerIDs = managerWorkflows.compactMap { managerID, workflow in
+            workflow.pendingDispatch != nil
+                ? managerID
+                : nil
+        }
+        for managerID in managerIDs {
+            beginPendingWorkflowDispatch(for: managerID)
+        }
+    }
+
+    func resumeWorkflow(_ managerID: UUID) {
+        guard var workflow = managerWorkflows[managerID],
+              workflow.stage != .completed,
+              workflow.planApprovalEntryID == nil,
+              workflow.resumeAvailableAfterRestart == true,
+              let activeProfileID = expectedProfileID(for: workflow),
+              profiles.contains(where: { $0.id == activeProfileID }) else {
+            return
+        }
+
+        if workflow.stage == .reviewing
+            || workflow.stage == .verifying
+            || workflow.stage == .publishing {
+            let activeRole: AgentRole =
+                workflow.stage == .publishing ? .publisher : .reviewer
+            guard let handoff = workflow.latestHandoff,
+                  let activeSessionID = participantSessionID(
+                      activeRole,
+                      in: workflow
+                  ),
+                  prepareWorkflowHandoff(
+                      handoff,
+                      for: sessions[activeSessionID]?.ownerProfileID
+                          ?? activeProfileID,
+                      sessionID: activeSessionID
+                  ) else {
+                pauseWorkflow(
+                    managerID,
+                    reason: "The persisted workflow handoff could not be restored."
+                )
+                return
+            }
+        }
+
+        workflow.isPaused = false
+        workflow.pauseReason = nil
+        workflow.resumeAvailableAfterRestart = false
+        workflow.updatedAt = .now
+        managerWorkflows[managerID] = workflow
+        save()
+        append(
+            .init(
+                kind: .system,
+                text: "Managed workflow resumed",
+                detail: "\(profileName(activeProfileID)) is continuing \(workflow.stage.label.lowercased())."
+            ),
+            to: managerID
+        )
+        performSend(
+            resumeInstruction(for: workflow),
+            to: sessions[activeProfileID]?.ownerProfileID
+                ?? activeProfileID,
+            sessionID: activeProfileID
+        )
     }
 
     func markViewed(_ profileID: UUID) {
@@ -1634,6 +1748,7 @@ final class AppModel: ObservableObject {
               workflow.isPaused else { return }
         workflow.isPaused = false
         workflow.pauseReason = nil
+        workflow.resumeAvailableAfterRestart = false
         workflow.updatedAt = .now
         managerWorkflows[managerID] = workflow
         save(immediately: true)
@@ -1676,6 +1791,7 @@ final class AppModel: ObservableObject {
         workflow.stage = stage
         workflow.isPaused = false
         workflow.pauseReason = nil
+        workflow.resumeAvailableAfterRestart = false
         workflow.updatedAt = .now
         managerWorkflows[managerID] = workflow
         workflowStageStartedAt[managerID] = now
@@ -1724,22 +1840,22 @@ final class AppModel: ObservableObject {
         case .planning:
             break
         case .building:
-            guard let next = transitionWorkflow(managerID, to: .reviewing),
-                  let reviewerID = next.team.reviewerProfileID,
-                  let reviewerSessionID = participantSessionID(.reviewer, in: next) else {
+            guard let builderProfileID =
+                    sessions[profileID]?.ownerProfileID,
+                  let reviewerID = workflow.team.reviewerProfileID,
+                  participantSessionID(.reviewer, in: workflow) != nil else {
                 return
             }
-            Task { [weak self] in
-                await self?.dispatchBuilderHandoff(
-                    workflow: next,
-                    builderSessionID: profileID,
-                    reviewerProfileID: reviewerID,
-                    reviewerSessionID: reviewerSessionID,
-                    instruction: Self.initialReviewInstruction,
-                    pass: .initial,
-                    resetRecipient: true
-                )
-            }
+            queueWorkflowDispatch(
+                .init(
+                    kind: .initialReview,
+                    sourceProfileID: builderProfileID,
+                    targetProfileID: reviewerID,
+                    summary: workflow.implementationPlan
+                        ?? workflow.request
+                ),
+                for: managerID
+            )
 
         case .reviewing:
             if reviewOutput?.disposition == .clean {
@@ -1757,22 +1873,22 @@ final class AppModel: ObservableObject {
             }
 
         case .revising:
-            guard let next = transitionWorkflow(managerID, to: .verifying),
-                  let reviewerID = next.team.reviewerProfileID,
-                  let reviewerSessionID = participantSessionID(.reviewer, in: next) else {
+            guard let builderProfileID =
+                    sessions[profileID]?.ownerProfileID,
+                  let reviewerID = workflow.team.reviewerProfileID,
+                  participantSessionID(.reviewer, in: workflow) != nil else {
                 return
             }
-            Task { [weak self] in
-                await self?.dispatchBuilderHandoff(
-                    workflow: next,
-                    builderSessionID: profileID,
-                    reviewerProfileID: reviewerID,
-                    reviewerSessionID: reviewerSessionID,
-                    instruction: Self.verificationInstruction,
-                    pass: .revision,
-                    resetRecipient: false
-                )
-            }
+            queueWorkflowDispatch(
+                .init(
+                    kind: .verification,
+                    sourceProfileID: builderProfileID,
+                    targetProfileID: reviewerID,
+                    summary: workflow.implementationPlan
+                        ?? workflow.request
+                ),
+                for: managerID
+            )
 
         case .verifying:
             if reviewOutput?.disposition == .clean {
@@ -1787,6 +1903,7 @@ final class AppModel: ObservableObject {
                     reviewSummary: summary,
                     reviewerID: profileID
                 )
+                return
             }
 
         case .publishing:
@@ -2106,10 +2223,10 @@ final class AppModel: ObservableObject {
     ) {
         guard var workflow = managerWorkflows[managerID],
               let builderID = workflow.team.builderProfileID,
-              let builderSessionID = participantSessionID(
+              participantSessionID(
                   .builder,
                   in: workflow
-              ),
+              ) != nil,
               profiles.contains(where: {
                   $0.id == builderID && $0.role == .builder
               }) else {
@@ -2142,22 +2259,15 @@ final class AppModel: ObservableObject {
         workflow.revisionStartedAt = .now
         workflow.updatedAt = .now
         managerWorkflows[managerID] = workflow
-        guard transitionWorkflow(managerID, to: .revising) != nil else {
-            return
-        }
-        dispatchWorkflowMessage(
-            from: reviewerID,
-            to: builderID,
-            targetSessionID: builderSessionID,
-            title: "Review findings",
-            visibleText: reviewSummary,
-            runtimeMessage: """
-            The reviewer requested changes, or did not return a valid structured disposition. Treat this conservatively as changes requested.
-
-            \(reviewSummary)
-
-            Address every actionable finding in your existing worktree. If the disposition was missing or malformed, inspect the review carefully and verify the implementation again. Run the relevant tests, commit any fixes locally, and finish with a concise summary. Do not push or open a pull request.
-            """
+        queueWorkflowDispatch(
+            .init(
+                kind: .revision,
+                sourceProfileID:
+                    sessions[reviewerID]?.ownerProfileID ?? reviewerID,
+                targetProfileID: builderID,
+                summary: reviewSummary
+            ),
+            for: managerID
         )
     }
 
@@ -2166,12 +2276,9 @@ final class AppModel: ObservableObject {
         reviewSummary: String,
         reviewerID: UUID
     ) {
-        guard let workflow = managerWorkflows[managerID],
+        guard var workflow = managerWorkflows[managerID],
               let publisherID = workflow.team.publisherProfileID,
-              let publisherSessionID = participantSessionID(
-                  .publisher,
-                  in: workflow
-              ),
+              participantSessionID(.publisher, in: workflow) != nil,
               profiles.contains(where: {
                   $0.id == publisherID && $0.role == .publisher
               }) else {
@@ -2181,24 +2288,27 @@ final class AppModel: ObservableObject {
             )
             return
         }
-        guard var next = transitionWorkflow(
-            managerID,
-            to: .publishing,
-            persist: false
-        ) else { return }
-        next.verificationSummary = reviewSummary
-        next.updatedAt = .now
-        managerWorkflows[managerID] = next
-        save(immediately: true)
-        Task { [weak self] in
-            await self?.dispatchPublishing(
-                workflow: next,
-                reviewSummary: reviewSummary,
-                reviewerSessionID: reviewerID,
-                publisherProfileID: publisherID,
-                publisherSessionID: publisherSessionID
+        guard let package = workflow.latestHandoff else {
+            pauseWorkflow(
+                managerID,
+                reason: "The verified Builder handoff is missing."
             )
+            return
         }
+        workflow.verificationSummary = reviewSummary
+        workflow.updatedAt = .now
+        managerWorkflows[managerID] = workflow
+        queueWorkflowDispatch(
+            .init(
+                kind: .publishing,
+                sourceProfileID:
+                    sessions[reviewerID]?.ownerProfileID ?? reviewerID,
+                targetProfileID: publisherID,
+                summary: reviewSummary,
+                handoff: package
+            ),
+            for: managerID
+        )
     }
 
     private func completeWorkflow(
@@ -2484,7 +2594,506 @@ final class AppModel: ObservableObject {
                 managerSessionID,
                 reason: "Could not prepare the Builder handoff: \(error.localizedDescription)"
             )
+        }
+    }
+
+    private func queueWorkflowDispatch(
+        _ dispatch: ManagerWorkflowDispatch,
+        for managerID: UUID,
+        pullRequestURL: String? = nil
+    ) {
+        guard var workflow = managerWorkflows[managerID],
+              workflow.pendingDispatch == nil else {
             return
+        }
+
+        workflow.stage = dispatch.kind.stage
+        workflow.pendingDispatch = dispatch
+        workflow.isPaused = false
+        workflow.pauseReason = nil
+        workflow.resumeAvailableAfterRestart = false
+        workflow.pullRequestURL = pullRequestURL ?? workflow.pullRequestURL
+        workflow.updatedAt = .now
+        managerWorkflows[managerID] = workflow
+        save()
+        beginPendingWorkflowDispatch(for: managerID)
+    }
+
+    private func beginPendingWorkflowDispatch(for managerID: UUID) {
+        guard let workflow = managerWorkflows[managerID],
+              let dispatch = workflow.pendingDispatch,
+              workflow.stage == dispatch.kind.stage,
+              workflow.deliveredDispatchID != dispatch.id,
+              !workflowDispatchesInFlight.contains(dispatch.id) else {
+            return
+        }
+
+        workflowDispatchesInFlight.insert(dispatch.id)
+        Task { [weak self] in
+            guard let self else { return }
+            await processPendingWorkflowDispatch(
+                managerID: managerID,
+                dispatchID: dispatch.id
+            )
+            workflowDispatchesInFlight.remove(dispatch.id)
+        }
+    }
+
+    private func processPendingWorkflowDispatch(
+        managerID: UUID,
+        dispatchID: UUID
+    ) async {
+        guard var workflow = managerWorkflows[managerID],
+              var dispatch = workflow.pendingDispatch,
+              dispatch.id == dispatchID,
+              workflow.stage == dispatch.kind.stage,
+              let targetSessionID = workflowDispatchTargetSessionID(
+                  for: dispatch,
+                  workflow: workflow
+              ) else {
+            return
+        }
+
+        do {
+            switch dispatch.kind {
+            case .initialBuild:
+                guard let approvalEntryID = workflow.approvedPlanEntryID,
+                      let approvedPlan = workflow.implementationPlan,
+                      sessions[managerID]?.entries.contains(where: {
+                          $0.id == approvalEntryID
+                              && $0.kind == .approval
+                              && $0.approvalState == .approved
+                              && $0.text == approvedPlan
+                      }) == true else {
+                    pauseWorkflow(
+                        managerID,
+                        reason: "The approved implementation plan is missing or inconsistent. The Builder was not dispatched."
+                    )
+                    return
+                }
+                guard await resetWorkflowRecipient(
+                    dispatch.targetProfileID,
+                    sessionID: targetSessionID,
+                    worktreeSeedID: workflow.id
+                ) else {
+                    pauseWorkflow(
+                        managerID,
+                        reason: "The assigned Builder is no longer available."
+                    )
+                    return
+                }
+
+            case .initialReview, .verification:
+                if dispatch.handoff == nil {
+                    guard let builderSessionID = participantSessionID(
+                        .builder,
+                        in: workflow
+                    ),
+                    let builderProfileID =
+                        sessions[builderSessionID]?.ownerProfileID,
+                    var builder = profiles.first(where: {
+                        $0.id == builderProfileID
+                    }),
+                    let builderSession = sessions[builderSessionID] else {
+                        pauseWorkflow(
+                            managerID,
+                            reason: "The assigned Builder is no longer available."
+                        )
+                        return
+                    }
+                    builder.worktree = builderSession.worktree
+                    var package = try await worktrees.makeHandoff(
+                        from: builder,
+                        session: builderSession
+                    )
+                    package.taskContext =
+                        workflow.implementationPlan ?? workflow.request
+                    guard validate(
+                        package,
+                        for: dispatch,
+                        workflow: workflow,
+                        managerID: managerID
+                    ) else {
+                        return
+                    }
+                    guard persist(
+                        package,
+                        for: managerID,
+                        dispatchID: dispatchID
+                    ) else {
+                        return
+                    }
+                    dispatch.handoff = package
+                    workflow = managerWorkflows[managerID] ?? workflow
+                }
+
+                guard let package = dispatch.handoff else { return }
+                if dispatch.kind == .initialReview {
+                    guard await resetWorkflowRecipient(
+                        dispatch.targetProfileID,
+                        sessionID: targetSessionID,
+                        handoff: package
+                    ) else {
+                        pauseWorkflow(
+                            managerID,
+                            reason: "The assigned Reviewer is no longer available."
+                        )
+                        return
+                    }
+                } else {
+                    guard prepareWorkflowHandoff(
+                        package,
+                        for: dispatch.targetProfileID,
+                        sessionID: targetSessionID
+                    ) else {
+                        pauseWorkflow(
+                            managerID,
+                            reason: "The assigned Reviewer is no longer available."
+                        )
+                        return
+                    }
+                }
+
+            case .publishing:
+                guard let package = dispatch.handoff,
+                      await resetWorkflowRecipient(
+                          dispatch.targetProfileID,
+                          sessionID: targetSessionID,
+                          handoff: package
+                      ) else {
+                    pauseWorkflow(
+                        managerID,
+                        reason: "The assigned Documenter / PR Writer is no longer available."
+                    )
+                    return
+                }
+
+            case .revision, .reporting:
+                guard profiles.contains(where: {
+                    $0.id == dispatch.targetProfileID
+                }) else {
+                    pauseWorkflow(
+                        managerID,
+                        reason: "The assigned workflow recipient is no longer available."
+                    )
+                    return
+                }
+            }
+        } catch {
+            pauseWorkflow(
+                managerID,
+                reason: "Could not prepare the workflow handoff: \(error.localizedDescription)"
+            )
+            return
+        }
+
+        guard var currentWorkflow = managerWorkflows[managerID],
+              let currentDispatch = currentWorkflow.pendingDispatch,
+              currentDispatch.id == dispatchID,
+              currentWorkflow.stage == currentDispatch.kind.stage,
+              currentWorkflow.deliveredDispatchID != dispatchID else {
+            return
+        }
+
+        guard let currentTargetSessionID = workflowDispatchTargetSessionID(
+            for: currentDispatch,
+            workflow: currentWorkflow
+        ) else {
+            pauseWorkflow(
+                managerID,
+                reason: "The assigned workflow recipient session is no longer available."
+            )
+            return
+        }
+        var targetState =
+            sessions[currentTargetSessionID]
+                ?? AgentSessionState(
+                    id: currentTargetSessionID,
+                    ownerProfileID: currentDispatch.targetProfileID
+                )
+        if !targetState.entries.contains(where: { $0.id == dispatchID }) {
+            targetState.entries.append(
+                timelineEntry(
+                    for: currentDispatch,
+                    workflow: currentWorkflow
+                )
+            )
+        }
+        currentWorkflow.pendingDispatch = nil
+        currentWorkflow.deliveredDispatchID = dispatchID
+        currentWorkflow.resumeAvailableAfterRestart = false
+        currentWorkflow.isPaused = false
+        currentWorkflow.pauseReason = nil
+        currentWorkflow.updatedAt = .now
+        sessions[currentTargetSessionID] = targetState
+        managerWorkflows[managerID] = currentWorkflow
+        save(immediately: true)
+
+        performSend(
+            runtimeInstruction(
+                for: currentDispatch,
+                workflow: currentWorkflow
+            ),
+            to: currentDispatch.targetProfileID,
+            sessionID: currentTargetSessionID
+        )
+    }
+
+    private func workflowDispatchTargetSessionID(
+        for dispatch: ManagerWorkflowDispatch,
+        workflow: ManagerWorkflow
+    ) -> UUID? {
+        let role: AgentRole
+        switch dispatch.kind {
+        case .initialBuild, .revision:
+            role = .builder
+        case .initialReview, .verification:
+            role = .reviewer
+        case .publishing:
+            role = .publisher
+        case .reporting:
+            role = .manager
+        }
+        guard let sessionID = participantSessionID(role, in: workflow),
+              sessions[sessionID]?.ownerProfileID
+                == dispatch.targetProfileID
+                || sessionID == dispatch.targetProfileID else {
+            return nil
+        }
+        return sessionID
+    }
+
+    private func initialBuilderInstruction(
+        for workflow: ManagerWorkflow
+    ) -> String {
+        """
+        You are the Builder in a managed bl00p workflow.
+
+        Original request:
+        \(workflow.request)
+
+        Manager brief:
+        \(workflow.implementationPlan ?? "No implementation plan was captured.")
+
+        Implement the requested change in your isolated worktree. Keep the change focused, run the relevant tests, and create a local commit before finishing so the Reviewer can inspect an immutable HEAD. Do not push or open a pull request.
+        """
+    }
+
+    private func resumeInstruction(for workflow: ManagerWorkflow) -> String {
+        switch workflow.stage {
+        case .planning:
+            return "Resume the read-only planning work for this request and present an updated implementation plan."
+        case .building:
+            return """
+            Resume the managed Builder task after the app restart.
+
+            \(initialBuilderInstruction(for: workflow))
+
+            Inspect the existing worktree first and continue from any work already present. Do not start over or duplicate completed changes.
+            """
+        case .reviewing:
+            return "Resume the read-only review of the committed implementation for “\(workflow.request)”. Do not edit code."
+        case .revising:
+            return "Resume addressing the review findings for “\(workflow.request)” in the existing worktree. Run tests and commit the finished fixes locally; do not push."
+        case .verifying:
+            return "Resume the read-only verification pass for “\(workflow.request)”. Confirm the earlier findings are resolved; do not edit code."
+        case .publishing:
+            return "Resume documentation, final verification, and draft pull-request preparation for “\(workflow.request)”. Respect every approval request surfaced by bl00p."
+        case .reporting:
+            return "Resume the final read-only delivery report for “\(workflow.request)”. Report the branch, verification, draft pull-request URL, and remaining caveats without modifying the repository."
+        case .completed:
+            return ""
+        }
+    }
+
+    private func validate(
+        _ package: GitHandoffPackage,
+        for dispatch: ManagerWorkflowDispatch,
+        workflow: ManagerWorkflow,
+        managerID: UUID
+    ) -> Bool {
+        let previousRevision =
+            workflow.latestHandoff?.headRevision ?? package.baseRevision
+        let lacksRequiredCommit =
+            package.headRevision == previousRevision
+        let hasUncommittedChanges = package.workingTreeSummary != "Clean"
+        let hasInvalidTests: Bool
+        if dispatch.kind == .verification {
+            if let testEvidenceAt = package.testEvidenceAt,
+               let revisionStartedAt = workflow.revisionStartedAt {
+                hasInvalidTests =
+                    package.testStatus != .passed
+                        || testEvidenceAt < revisionStartedAt
+            } else {
+                hasInvalidTests = true
+            }
+        } else {
+            hasInvalidTests = package.testStatus == .failed
+        }
+        guard !lacksRequiredCommit,
+              !hasUncommittedChanges,
+              !hasInvalidTests else {
+            let fallbackStage: ManagerWorkflowStage =
+                dispatch.kind == .initialReview ? .building : .revising
+            let reason: String
+            if lacksRequiredCommit {
+                reason =
+                    dispatch.kind == .initialReview
+                        ? "The Builder handoff has no local commit."
+                        : "The Builder revision pass has no new local commit."
+            } else if hasUncommittedChanges {
+                reason = "The Builder handoff still has uncommitted changes."
+            } else if dispatch.kind == .initialReview {
+                reason = "The Builder reported failing tests."
+            } else {
+                reason =
+                    "The Builder handoff does not report passing tests from the revision pass."
+            }
+            return rejectWorkflowHandoff(
+                dispatch: dispatch,
+                managerID: managerID,
+                fallbackStage: fallbackStage,
+                reason: reason
+            )
+        }
+        return true
+    }
+
+    private func rejectWorkflowHandoff(
+        dispatch: ManagerWorkflowDispatch,
+        managerID: UUID,
+        fallbackStage: ManagerWorkflowStage,
+        reason: String
+    ) -> Bool {
+        guard var current = managerWorkflows[managerID],
+              current.pendingDispatch?.id == dispatch.id else {
+            return false
+        }
+        current.pendingDispatch = nil
+        current.stage = fallbackStage
+        current.updatedAt = .now
+        managerWorkflows[managerID] = current
+        save()
+        pauseWorkflow(managerID, reason: reason)
+        append(
+            .init(
+                kind: .question,
+                title: "Builder handoff is not ready",
+                text: "\(reason) Ask this bot to finish the work, run the required tests, and create a local commit."
+            ),
+            to: participantSessionID(.builder, in: current)
+                ?? dispatch.sourceProfileID
+        )
+        return false
+    }
+
+    private func persist(
+        _ package: GitHandoffPackage,
+        for managerID: UUID,
+        dispatchID: UUID
+    ) -> Bool {
+        guard var workflow = managerWorkflows[managerID],
+              var dispatch = workflow.pendingDispatch,
+              dispatch.id == dispatchID else {
+            return false
+        }
+        dispatch.handoff = package
+        workflow.pendingDispatch = dispatch
+        workflow.latestHandoff = package
+        workflow.branch = package.branch
+        workflow.updatedAt = .now
+        managerWorkflows[managerID] = workflow
+        save()
+        return true
+    }
+
+    private func prepareWorkflowHandoff(
+        _ package: GitHandoffPackage,
+        for profileID: UUID,
+        sessionID: UUID
+    ) -> Bool {
+        guard let index = profiles.firstIndex(where: { $0.id == profileID }),
+              sessions[sessionID]?.ownerProfileID == profileID
+                || sessionID == profileID else {
+            return false
+        }
+        profiles[index].workingDirectory =
+            profiles[index].role == .builder
+                ? package.repositoryPath
+                : package.worktreePath
+        if profiles[index].role == .builder {
+            profiles[index].worktree = nil
+        }
+        var state =
+            sessions[sessionID]
+                ?? AgentSessionState(
+                    id: sessionID,
+                    ownerProfileID: profileID
+                )
+        state.pendingHandoff = package
+        sessions[sessionID] = state
+        save()
+        return true
+    }
+
+    private func timelineEntry(
+        for dispatch: ManagerWorkflowDispatch,
+        workflow: ManagerWorkflow
+    ) -> TimelineEntry {
+        switch dispatch.kind {
+        case .initialBuild:
+            return .init(
+                id: dispatch.id,
+                kind: .handoff,
+                title: "Implementation brief",
+                text: workflow.implementationPlan ?? dispatch.summary,
+                detail: """
+                Original request:
+                \(workflow.request)
+
+                From \(profileName(dispatch.sourceProfileID))
+                """
+            )
+        case .initialReview:
+            return .init(
+                id: dispatch.id,
+                kind: .handoff,
+                title: "Workflow handoff from \(profileName(dispatch.sourceProfileID))",
+                text: workflow.request,
+                detail: dispatch.handoff?.timelineDetail
+            )
+        case .revision:
+            return .init(
+                id: dispatch.id,
+                kind: .handoff,
+                title: "Review findings",
+                text: dispatch.summary,
+                detail: "From \(profileName(dispatch.sourceProfileID))"
+            )
+        case .verification:
+            return .init(
+                id: dispatch.id,
+                kind: .handoff,
+                title: "Updated implementation",
+                text: "From \(profileName(dispatch.sourceProfileID))",
+                detail: dispatch.handoff?.timelineDetail
+            )
+        case .publishing:
+            return .init(
+                id: dispatch.id,
+                kind: .handoff,
+                title: "Workflow handoff from \(profileName(dispatch.sourceProfileID))",
+                text: workflow.request,
+                detail: dispatch.handoff?.timelineDetail
+            )
+        case .reporting:
+            return .init(
+                id: dispatch.id,
+                kind: .handoff,
+                title: "Delivery prepared",
+                text: dispatch.summary,
+                detail: "From \(profileName(dispatch.sourceProfileID))"
+            )
         }
     }
 
@@ -2530,6 +3139,54 @@ final class AppModel: ObservableObject {
             to: publisherProfileID,
             sessionID: publisherSessionID
         )
+    }
+
+    private func runtimeInstruction(
+        for dispatch: ManagerWorkflowDispatch,
+        workflow: ManagerWorkflow
+    ) -> String {
+        switch dispatch.kind {
+        case .initialBuild:
+            if let approvalEntryID = workflow.approvedPlanEntryID,
+               let approvedPlan = workflow.implementationPlan {
+                BuilderImplementationHandoff(
+                    approvalEntryID: approvalEntryID,
+                    originalRequest: workflow.request,
+                    approvedPlan: approvedPlan
+                ).runtimeMessage
+            } else {
+                initialBuilderInstruction(for: workflow)
+            }
+        case .initialReview:
+            Self.initialReviewInstruction
+        case .revision:
+            """
+            The reviewer requested changes, or did not return a valid structured disposition. Treat this conservatively as changes requested.
+
+            \(dispatch.summary)
+
+            Address every actionable finding in your existing worktree. If the disposition was missing or malformed, inspect the review carefully and verify the implementation again. Run the relevant tests, commit any fixes locally, and finish with a concise summary. Do not push or open a pull request.
+            """
+        case .verification:
+            Self.verificationInstruction
+        case .publishing:
+            """
+            You are the Documenter / PR Writer in a managed bl00p workflow.
+
+            Final reviewer result:
+            \(dispatch.summary)
+
+            Update the relevant user-facing and developer documentation for the completed change. Run final verification, commit all completed work on the current branch, push that branch, and create a draft pull request. Respect every approval request surfaced by bl00p. Finish with a concise summary containing the branch, tests, and the full draft PR URL.
+            """
+        case .reporting:
+            """
+            The documenter and PR writer completed the delivery pass.
+
+            \(dispatch.summary)
+
+            Notify the user that the workflow is complete. Include the clickable draft pull-request URL, the branch, verification performed, and any remaining caveats. Do not modify the repository.
+            """
+        }
     }
 
     private func resetWorkflowRecipient(

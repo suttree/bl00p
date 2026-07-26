@@ -44,7 +44,8 @@ struct ConversationView: View {
                     ManagerWorkflowBanner(
                         workflow: model.workflow(for: profile.id),
                         isTeamReady: model.isManagerTeamReady(profile.id),
-                        profiles: model.profiles
+                        profiles: model.profiles,
+                        resume: { model.resumeWorkflow(profile.id) }
                     )
                     Divider()
                 }
@@ -269,6 +270,7 @@ private struct ManagerWorkflowBanner: View {
     let workflow: ManagerWorkflow?
     let isTeamReady: Bool
     let profiles: [BotProfile]
+    let resume: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -296,11 +298,7 @@ private struct ManagerWorkflowBanner: View {
                 }
 
                 if let workflow {
-                    ProgressView(
-                        value: Double(workflow.stage.progressIndex),
-                        total: Double(ManagerWorkflowStage.completed.progressIndex)
-                    )
-                    .tint(workflow.isPaused ? .orange : .bl00pPink)
+                    WorkflowStageIndicator(workflow: workflow)
 
                     Text(detail(for: workflow))
                         .font(.bl00p(.caption1))
@@ -318,6 +316,13 @@ private struct ManagerWorkflowBanner: View {
             }
 
             Spacer()
+
+            if workflow?.resumeAvailableAfterRestart == true {
+                Button("Resume", action: resume)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.bl00pPink)
+                    .accessibilityHint("Continues the restored managed workflow")
+            }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
@@ -363,6 +368,84 @@ private struct ManagerWorkflowBanner: View {
         case .completed:
             nil
         }
+    }
+}
+
+private struct WorkflowStageIndicator: View {
+    let workflow: ManagerWorkflow
+
+    private let stages = ManagerWorkflowStage.allCases
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(Array(stages.enumerated()), id: \.offset) { index, _ in
+                if index > 0 {
+                    Capsule()
+                        .fill(connectorColor(before: index))
+                        .frame(width: 14, height: 2)
+                }
+
+                stageMarker(at: index)
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Managed workflow progress")
+        .accessibilityValue(accessibilityValue)
+    }
+
+    @ViewBuilder
+    private func stageMarker(at index: Int) -> some View {
+        let currentIndex = workflow.stage.progressIndex
+
+        if index < currentIndex || workflow.stage == .completed {
+            Image(systemName: "checkmark")
+                .font(.system(size: 7, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 14, height: 14)
+                .background(Color.bl00pPink, in: Circle())
+        } else if index == currentIndex, workflow.isPaused {
+            Image(systemName: "pause.fill")
+                .font(.system(size: 6, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 14, height: 14)
+                .background(Color.orange, in: Circle())
+        } else if index == currentIndex {
+            Circle()
+                .fill(Color.bl00pPink)
+                .frame(width: 14, height: 14)
+                .overlay {
+                    Circle()
+                        .fill(.white)
+                        .frame(width: 5, height: 5)
+                }
+        } else {
+            Circle()
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .frame(width: 14, height: 14)
+                .overlay {
+                    Circle()
+                        .stroke(.tertiary, lineWidth: 1)
+                }
+        }
+    }
+
+    private func connectorColor(before index: Int) -> Color {
+        index <= workflow.stage.progressIndex
+            ? .bl00pPink.opacity(0.65)
+            : Color.secondary.opacity(0.2)
+    }
+
+    private var accessibilityValue: String {
+        let state: String
+        if workflow.stage == .completed {
+            state = "completed"
+        } else if workflow.isPaused {
+            state = "paused"
+        } else {
+            state = "active"
+        }
+        return "\(workflow.stage.label), \(state), stage \(workflow.stage.progressIndex + 1) of \(stages.count)"
     }
 }
 

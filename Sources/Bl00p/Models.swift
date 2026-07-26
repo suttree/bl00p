@@ -515,6 +515,51 @@ enum ReviewDisposition: String, Sendable {
     }
 }
 
+enum ManagerWorkflowDispatchKind: String, Codable, Hashable, Sendable {
+    case initialBuild
+    case initialReview
+    case revision
+    case verification
+    case publishing
+    case reporting
+
+    var stage: ManagerWorkflowStage {
+        switch self {
+        case .initialBuild: .building
+        case .initialReview: .reviewing
+        case .revision: .revising
+        case .verification: .verifying
+        case .publishing: .publishing
+        case .reporting: .reporting
+        }
+    }
+}
+
+struct ManagerWorkflowDispatch: Identifiable, Codable, Hashable, Sendable {
+    var id: UUID
+    var kind: ManagerWorkflowDispatchKind
+    var sourceProfileID: UUID
+    var targetProfileID: UUID
+    var summary: String
+    var handoff: GitHandoffPackage?
+
+    init(
+        id: UUID = UUID(),
+        kind: ManagerWorkflowDispatchKind,
+        sourceProfileID: UUID,
+        targetProfileID: UUID,
+        summary: String,
+        handoff: GitHandoffPackage? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.sourceProfileID = sourceProfileID
+        self.targetProfileID = targetProfileID
+        self.summary = summary
+        self.handoff = handoff
+    }
+}
+
 struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var managerProfileID: UUID
@@ -523,6 +568,9 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     var implementationPlan: String?
     var planApprovalEntryID: UUID?
     var approvedPlanEntryID: UUID?
+    var pendingDispatch: ManagerWorkflowDispatch?
+    var deliveredDispatchID: UUID?
+    var resumeAvailableAfterRestart: Bool?
     var stage: ManagerWorkflowStage
     var branch: String?
     var pullRequestURL: String?
@@ -546,6 +594,9 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         implementationPlan: String? = nil,
         planApprovalEntryID: UUID? = nil,
         approvedPlanEntryID: UUID? = nil,
+        pendingDispatch: ManagerWorkflowDispatch? = nil,
+        deliveredDispatchID: UUID? = nil,
+        resumeAvailableAfterRestart: Bool? = nil,
         stage: ManagerWorkflowStage = .planning,
         branch: String? = nil,
         pullRequestURL: String? = nil,
@@ -568,6 +619,9 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         self.implementationPlan = implementationPlan
         self.planApprovalEntryID = planApprovalEntryID
         self.approvedPlanEntryID = approvedPlanEntryID
+        self.pendingDispatch = pendingDispatch
+        self.deliveredDispatchID = deliveredDispatchID
+        self.resumeAvailableAfterRestart = resumeAvailableAfterRestart
         self.stage = stage
         self.branch = branch
         self.pullRequestURL = pullRequestURL
@@ -586,7 +640,8 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case id, managerProfileID, team, request, implementationPlan
-        case planApprovalEntryID, approvedPlanEntryID
+        case planApprovalEntryID, approvedPlanEntryID, pendingDispatch
+        case deliveredDispatchID, resumeAvailableAfterRestart
         case stage, branch, pullRequestURL
         case verificationSummary, publisherSummary, revisionRounds
         case latestHandoff, reviewSummary, revisionStartedAt
@@ -604,6 +659,18 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         approvedPlanEntryID = try container.decodeIfPresent(
             UUID.self,
             forKey: .approvedPlanEntryID
+        )
+        pendingDispatch = try container.decodeIfPresent(
+            ManagerWorkflowDispatch.self,
+            forKey: .pendingDispatch
+        )
+        deliveredDispatchID = try container.decodeIfPresent(
+            UUID.self,
+            forKey: .deliveredDispatchID
+        )
+        resumeAvailableAfterRestart = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .resumeAvailableAfterRestart
         )
         stage = try container.decode(ManagerWorkflowStage.self, forKey: .stage)
         branch = try container.decodeIfPresent(String.self, forKey: .branch)
