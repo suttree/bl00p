@@ -217,7 +217,7 @@ private struct TimelineEntryView: View {
                     Color.bl00pUserBubble,
                     in: RoundedRectangle(cornerRadius: 15, style: .continuous)
                 )
-                .foregroundStyle(Color.bl00pAvatarInk)
+                .foregroundStyle(Color.bl00pUserBubbleText)
         }
     }
 
@@ -486,8 +486,9 @@ private struct ComposerView: View {
                     .font(.bl00p(.body))
                     .scrollContentBackground(.hidden)
                     .frame(height: editorHeight)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 11)
+                    .padding(.bottom, 5)
                     .background {
                         GeometryReader { geometry in
                             Color.clear
@@ -540,8 +541,8 @@ private struct ComposerView: View {
             .font(.bl00p(.caption1))
             .foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 14)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
         .background(.bar)
         .overlay {
             if isDropTargeted {
@@ -800,7 +801,7 @@ enum ComposerTextMetrics {
         let font = NSFont.systemFont(
             ofSize: NSFont.preferredFont(forTextStyle: .body).pointSize + 2
         )
-        let availableWidth = max(80, width - 28)
+        let availableWidth = max(80, width - 36)
         let measuredText = (text.isEmpty ? " " : text) + "\u{200B}"
         let bounds = (measuredText as NSString).boundingRect(
             with: NSSize(

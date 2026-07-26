@@ -10,6 +10,7 @@ enum Bl00pTheme {
     )
     static let accent = hotPink
     static let userBubble = hotPink
+    static let userBubbleText = NSColor.white
     static let accentText = adaptive(
         light: NSColor(srgbRed: 0.69, green: 0.00, blue: 0.35, alpha: 1),
         dark: NSColor(srgbRed: 1.00, green: 0.48, blue: 0.74, alpha: 1)
@@ -76,6 +77,7 @@ extension Color {
     static let bl00pPink = Color(nsColor: Bl00pTheme.accent)
     static let bl00pPinkText = Color(nsColor: Bl00pTheme.accentText)
     static let bl00pUserBubble = Color(nsColor: Bl00pTheme.userBubble)
+    static let bl00pUserBubbleText = Color(nsColor: Bl00pTheme.userBubbleText)
     static let bl00pMint = Color(nsColor: Bl00pTheme.mint)
     static let bl00pAvatarInk = Color(nsColor: Bl00pTheme.avatarInk)
     static let bl00pPinkSoft = Color(nsColor: Bl00pTheme.approvalBackground)

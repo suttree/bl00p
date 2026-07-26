@@ -41,6 +41,8 @@ func themeAdaptsToSystemAppearanceWithLegibleBrandSurfaces() throws {
     let darkAccentText = resolved(Bl00pTheme.accentText, for: dark)
     let lightBubble = resolved(Bl00pTheme.userBubble, for: light)
     let darkBubble = resolved(Bl00pTheme.userBubble, for: dark)
+    let lightBubbleText = resolved(Bl00pTheme.userBubbleText, for: light)
+    let darkBubbleText = resolved(Bl00pTheme.userBubbleText, for: dark)
     let lightApproval = resolved(Bl00pTheme.approvalBackground, for: light)
     let darkApproval = resolved(Bl00pTheme.approvalBackground, for: dark)
 
@@ -48,6 +50,11 @@ func themeAdaptsToSystemAppearanceWithLegibleBrandSurfaces() throws {
         #expect(abs(surface.redComponent - 1.00) < 0.001)
         #expect(abs(surface.greenComponent - 105.0 / 255.0) < 0.001)
         #expect(abs(surface.blueComponent - 180.0 / 255.0) < 0.001)
+    }
+    for textColor in [lightBubbleText, darkBubbleText] {
+        #expect(abs(textColor.redComponent - 1.00) < 0.001)
+        #expect(abs(textColor.greenComponent - 1.00) < 0.001)
+        #expect(abs(textColor.blueComponent - 1.00) < 0.001)
     }
     #expect(lightApproval != darkApproval)
     #expect(
