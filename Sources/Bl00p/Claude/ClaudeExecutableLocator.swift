@@ -1,25 +1,33 @@
 import Foundation
 
 struct ClaudeExecutableLocator: Sendable {
+    private let candidateURLs: [URL]?
+
+    init(candidateURLs: [URL]? = nil) {
+        self.candidateURLs = candidateURLs
+    }
+
     func locate() -> URL? {
         let fileManager = FileManager.default
         let home = fileManager.homeDirectoryForCurrentUser.path
-        var candidates = [
-            "\(home)/.local/bin/claude",
-            "/opt/homebrew/bin/claude",
-            "/usr/local/bin/claude"
+        var candidates = candidateURLs ?? [
+            URL(fileURLWithPath: "\(home)/.local/bin/claude"),
+            URL(fileURLWithPath: "/opt/homebrew/bin/claude"),
+            URL(fileURLWithPath: "/usr/local/bin/claude")
         ]
 
-        if let path = ProcessInfo.processInfo.environment["PATH"] {
+        if candidateURLs == nil,
+            let path = ProcessInfo.processInfo.environment["PATH"] {
             candidates.append(
                 contentsOf: path
                     .split(separator: ":")
-                    .map { "\($0)/claude" }
+                    .map {
+                        URL(fileURLWithPath: "\($0)/claude")
+                    }
             )
         }
 
         return candidates
-            .map(URL.init(fileURLWithPath:))
             .first { fileManager.isExecutableFile(atPath: $0.path) }
     }
 }

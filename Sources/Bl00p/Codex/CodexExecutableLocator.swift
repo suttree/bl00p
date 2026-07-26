@@ -1,18 +1,23 @@
 import Foundation
 
 struct CodexExecutableLocator: Sendable {
+    private let candidateURLs: [URL]?
+
+    init(candidateURLs: [URL]? = nil) {
+        self.candidateURLs = candidateURLs
+    }
+
     func locate() -> URL? {
         let fileManager = FileManager.default
         let home = fileManager.homeDirectoryForCurrentUser.path
-        let candidates = [
-            "/Applications/ChatGPT.app/Contents/Resources/codex",
-            "\(home)/.codex/plugins/.plugin-appserver/codex",
-            "/opt/homebrew/bin/codex",
-            "/usr/local/bin/codex"
+        let candidates = candidateURLs ?? [
+            URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex"),
+            URL(fileURLWithPath: "\(home)/.codex/plugins/.plugin-appserver/codex"),
+            URL(fileURLWithPath: "/opt/homebrew/bin/codex"),
+            URL(fileURLWithPath: "/usr/local/bin/codex")
         ]
 
         return candidates
-            .map(URL.init(fileURLWithPath:))
             .first {
                 fileManager.isExecutableFile(atPath: $0.path)
                     && isUsable($0, fileManager: fileManager)

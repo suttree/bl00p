@@ -524,18 +524,46 @@ func jsonValueAcceptsFoundationJSONObjects() throws {
 
 @Test
 func locatesBundledCodexBeforeBrokenShellShims() throws {
-    let url = try #require(CodexExecutableLocator().locate())
-    #expect(
-        url.path == "/Applications/ChatGPT.app/Contents/Resources/codex"
-            || url.path.contains("/.codex/plugins/.plugin-appserver/")
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-codex-locator-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let bundled = directory
+        .appendingPathComponent("ChatGPT.app/Contents/Resources/codex")
+    let shellShim = directory.appendingPathComponent("bin/codex")
+    try makeExecutable(at: bundled)
+    try makeExecutable(at: shellShim)
+
+    let url = try #require(
+        CodexExecutableLocator(candidateURLs: [bundled, shellShim]).locate()
     )
+    #expect(url == bundled)
 }
 
 @Test
 func locatesInstalledClaudeCLI() throws {
-    let url = try #require(ClaudeExecutableLocator().locate())
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-claude-locator-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let executable = directory.appendingPathComponent("bin/claude")
+    try makeExecutable(at: executable)
+
+    let url = try #require(
+        ClaudeExecutableLocator(candidateURLs: [executable]).locate()
+    )
     #expect(url.lastPathComponent == "claude")
     #expect(FileManager.default.isExecutableFile(atPath: url.path))
+}
+
+private func makeExecutable(at url: URL) throws {
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try Data("#!/bin/sh\nexit 0\n".utf8).write(to: url)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: url.path
+    )
 }
 
 @Test
