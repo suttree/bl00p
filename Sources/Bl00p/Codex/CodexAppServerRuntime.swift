@@ -23,7 +23,6 @@ actor CodexAppServerRuntime: AgentRuntime {
     private struct Session {
         let client: CodexAppServerClient
         var threadID: String
-        var hasStartedReview: Bool
         var currentTurnID: String?
         var lifecycleContinuation: AsyncStream<AgentEvent>.Continuation?
         var currentContinuation: AsyncStream<AgentEvent>.Continuation?
@@ -52,7 +51,7 @@ actor CodexAppServerRuntime: AgentRuntime {
                     .init(
                         kind: .system,
                         text: "Codex needs a working directory",
-                        detail: "Open Bot Settings and choose the repository this reviewer should inspect."
+                        detail: "Open Bot Settings and choose the repository this bot should use."
                     )
                 )
             )
@@ -67,7 +66,7 @@ actor CodexAppServerRuntime: AgentRuntime {
                     .init(
                         kind: .system,
                         text: "Codex runtime not found",
-                        detail: "Install Codex CLI or the ChatGPT desktop app, then launch the reviewer again."
+                        detail: "Install Codex CLI or the ChatGPT desktop app, then launch the bot again."
                     )
                 )
             )
@@ -90,7 +89,6 @@ actor CodexAppServerRuntime: AgentRuntime {
             sessions[profile.id] = Session(
                 client: client,
                 threadID: "",
-                hasStartedReview: resumeThreadID != nil,
                 lifecycleContinuation: pair.continuation,
                 listenerTask: listener
             )
@@ -108,7 +106,6 @@ actor CodexAppServerRuntime: AgentRuntime {
 
             if var session = sessions[profile.id] {
                 session.threadID = threadID
-                session.hasStartedReview = resumeThreadID != nil && threadID == resumeThreadID
                 sessions[profile.id] = session
             }
 
@@ -118,7 +115,7 @@ actor CodexAppServerRuntime: AgentRuntime {
                     .init(
                         kind: .system,
                         text: resumeThreadID == threadID
-                            ? "Resumed Codex review session"
+                            ? "Resumed Codex session"
                             : "Connected to Codex app-server",
                         detail: "\(userAgent) · Read-only · \(workingDirectory)"
                     )
@@ -128,12 +125,15 @@ actor CodexAppServerRuntime: AgentRuntime {
                 .entry(
                     .init(
                         kind: .question,
-                        title: "What should I review?",
-                        text: "Paste a PR URL, branch, commit, or review instructions. Codex can use the git and MCP connections already configured for this account."
+                        title: "What should I work on?",
+                        text: "Give this bot its next task. Codex can use the git and MCP connections already configured for this account."
                     )
                 )
             )
             pair.continuation.yield(.status(.needsAnswer))
+            // Keep `pair.continuation` open and attached to `lifecycleContinuation`
+            // so a later idle disconnect (no turn in progress) still has a
+            // continuation to report through; see `closeSession`.
         } catch {
             await client.stop()
             sessions[profile.id]?.listenerTask?.cancel()
@@ -142,22 +142,21 @@ actor CodexAppServerRuntime: AgentRuntime {
                 .entry(
                     .init(
                         kind: .system,
-                        text: "Could not launch Codex Reviewer",
+                        text: "Could not launch Codex",
                         detail: error.localizedDescription
                     )
                 )
             )
             pair.continuation.yield(.status(.failed))
-        }
-
-        if sessions[profile.id] == nil {
             pair.continuation.finish()
         }
+
         return pair.stream
     }
 
     func respond(
         to message: String,
+        attachments: [ImageAttachment],
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent> {
         guard var session = sessions[profile.id] else {
@@ -165,7 +164,7 @@ actor CodexAppServerRuntime: AgentRuntime {
                 .entry(
                     .init(
                         kind: .system,
-                        text: "Codex Reviewer is not connected. Launch it before sending work."
+                        text: "Codex is not connected. Launch it before sending work."
                     )
                 ),
                 finalStatus: .failed
@@ -173,6 +172,19 @@ actor CodexAppServerRuntime: AgentRuntime {
         }
 
         if let pendingQuestion = session.pendingQuestion {
+            guard attachments.isEmpty else {
+                return singleEventStream(
+                    .entry(
+                        .init(
+                            kind: .system,
+                            text: "Codex can't accept image attachments while answering a question.",
+                            detail: "Remove the attachment and resend your answer as text."
+                        )
+                    ),
+                    finalStatus: .needsAnswer
+                )
+            }
+
             var updatedQuestion = pendingQuestion
             let currentQuestion = updatedQuestion.questions[updatedQuestion.currentIndex]
             updatedQuestion.answers[currentQuestion.id] = message
@@ -232,7 +244,7 @@ actor CodexAppServerRuntime: AgentRuntime {
                 .entry(
                     .init(
                         kind: .system,
-                        text: "Codex is still working on the current review."
+                        text: "Codex is still working on the current task."
                     )
                 ),
                 finalStatus: nil
@@ -246,38 +258,16 @@ actor CodexAppServerRuntime: AgentRuntime {
         pair.continuation.yield(.status(.working))
 
         do {
-            let result: JSONValue
-            if session.hasStartedReview {
-                result = try await session.client.request(
-                    method: "turn/start",
-                    params: [
-                        "threadId": .string(session.threadID),
-                        "input": .array([
-                            .object([
-                                "type": .string("text"),
-                                "text": .string(message),
-                                "text_elements": .array([])
-                            ])
-                        ])
-                    ]
-                )
-            } else {
-                result = try await session.client.request(
-                    method: "review/start",
-                    params: [
-                        "threadId": .string(session.threadID),
-                        "delivery": .string("inline"),
-                        "target": .object([
-                            "type": .string("custom"),
-                            "instructions": .string(message)
-                        ])
-                    ]
-                )
-                if var updated = sessions[profile.id] {
-                    updated.hasStartedReview = true
-                    sessions[profile.id] = updated
-                }
-            }
+            let request = CodexTurnRequest.make(
+                threadID: session.threadID,
+                message: message,
+                attachments: attachments,
+                modelID: profile.modelID
+            )
+            let result = try await session.client.request(
+                method: request.method,
+                params: request.params
+            )
 
             if let turnID = result["turn"]?["id"]?.stringValue,
                var updated = sessions[profile.id] {
@@ -290,7 +280,7 @@ actor CodexAppServerRuntime: AgentRuntime {
                     .entry(
                         .init(
                             kind: .system,
-                            text: "Codex could not start the review",
+                            text: "Codex could not start the task",
                             detail: error.localizedDescription
                         )
                     )
@@ -381,14 +371,10 @@ actor CodexAppServerRuntime: AgentRuntime {
         workingDirectory: String,
         resumeThreadID: String?
     ) async throws -> JSONValue {
-        let shared: [String: JSONValue] = [
-            "cwd": .string(workingDirectory),
-            "runtimeWorkspaceRoots": .array([.string(workingDirectory)]),
-            "approvalPolicy": .string("on-request"),
-            "approvalsReviewer": .string("user"),
-            "sandbox": .string("read-only"),
-            "developerInstructions": .string(profile.instructions)
-        ]
+        let shared = CodexThreadConfiguration.parameters(
+            profile: profile,
+            workingDirectory: workingDirectory
+        )
 
         if let resumeThreadID {
             do {
@@ -397,7 +383,7 @@ actor CodexAppServerRuntime: AgentRuntime {
                 return try await client.request(method: "thread/resume", params: resume)
             } catch {
                 // A stale or incompatible local thread should not prevent the
-                // reviewer from launching; start a new one below.
+                // bot from launching; start a new one below.
             }
         }
 
@@ -713,7 +699,7 @@ actor CodexAppServerRuntime: AgentRuntime {
             finishTurn(profileID: profileID, status: .completed)
         } else if status == "interrupted" {
             yield(
-                .entry(.init(kind: .system, text: "Codex review interrupted.")),
+                .entry(.init(kind: .system, text: "Codex turn interrupted.")),
                 profileID: profileID
             )
             finishTurn(profileID: profileID, status: .stopped)
@@ -723,7 +709,7 @@ actor CodexAppServerRuntime: AgentRuntime {
                 .entry(
                     .init(
                         kind: .system,
-                        text: "Codex review failed",
+                        text: "Codex turn failed",
                         detail: detail
                     )
                 ),
@@ -815,6 +801,68 @@ actor CodexAppServerRuntime: AgentRuntime {
             }
             continuation.finish()
         }
+    }
+}
+
+struct CodexTurnRequest {
+    let method: String
+    let params: [String: JSONValue]
+
+    static func make(
+        threadID: String,
+        message: String,
+        attachments: [ImageAttachment],
+        modelID: String?
+    ) -> CodexTurnRequest {
+        var input: [JSONValue] = []
+        if !message.isEmpty {
+            input.append(
+                .object([
+                    "type": .string("text"),
+                    "text": .string(message),
+                    "text_elements": .array([])
+                ])
+            )
+        }
+        input.append(
+            contentsOf: attachments.map {
+                .object([
+                    "type": .string("localImage"),
+                    "path": .string($0.path)
+                ])
+            }
+        )
+
+        var params: [String: JSONValue] = [
+            "threadId": .string(threadID),
+            "input": .array(input)
+        ]
+        if let modelID, !modelID.isEmpty {
+            params["model"] = .string(modelID)
+        }
+        return CodexTurnRequest(method: "turn/start", params: params)
+    }
+}
+
+enum CodexThreadConfiguration {
+    static let turnModeVersion = 1
+
+    static func parameters(
+        profile: BotProfile,
+        workingDirectory: String
+    ) -> [String: JSONValue] {
+        var parameters: [String: JSONValue] = [
+            "cwd": .string(workingDirectory),
+            "runtimeWorkspaceRoots": .array([.string(workingDirectory)]),
+            "approvalPolicy": .string("on-request"),
+            "approvalsReviewer": .string("user"),
+            "sandbox": .string("read-only"),
+            "developerInstructions": .string(profile.instructions)
+        ]
+        if let modelID = profile.modelID, !modelID.isEmpty {
+            parameters["model"] = .string(modelID)
+        }
+        return parameters
     }
 }
 

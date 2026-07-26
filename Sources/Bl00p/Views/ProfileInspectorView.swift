@@ -8,7 +8,7 @@ struct ProfileInspectorView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 HStack(spacing: 10) {
-                    BotAvatar(provider: profile.provider, size: 38)
+                    BotAvatar(name: profile.name, provider: profile.provider, size: 38)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Bot settings")
                             .font(.bl00p(.headline, weight: .semibold))
@@ -24,16 +24,14 @@ struct ProfileInspectorView: View {
                         .frame(maxWidth: 180)
                 }
 
-                Picker("Provider", selection: $profile.provider) {
-                    ForEach(AgentProvider.allCases) { provider in
-                        Text(provider.displayName).tag(provider)
+                LabeledContent("Model") {
+                    Picker("Model", selection: modelSelection) {
+                        ForEach(profile.provider.modelOptions) { option in
+                            Text(option.displayName).tag(option.id)
+                        }
                     }
-                }
-
-                Picker("Role", selection: $profile.role) {
-                    ForEach(AgentRole.allCases) { role in
-                        Text(role.displayName).tag(role)
-                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 180)
                 }
 
                 Divider()
@@ -45,8 +43,12 @@ struct ProfileInspectorView: View {
                         .foregroundStyle(.secondary)
 
                     HStack(spacing: 8) {
-                        TextField("Repository path", text: $profile.workingDirectory)
+                        TextField(
+                            "Repository path",
+                            text: .constant(profile.workingDirectory)
+                        )
                             .textFieldStyle(.roundedBorder)
+                            .disabled(true)
 
                         Button(action: chooseDirectory) {
                             Image(systemName: "folder")
@@ -77,9 +79,6 @@ struct ProfileInspectorView: View {
                         }
                 }
 
-                Toggle("Load project instructions", isOn: $profile.loadProjectInstructions)
-                Toggle("Approve before pushing", isOn: $profile.requireApprovalBeforePush)
-
                 Text(
                     profile.provider == .codex
                         ? "Codex receives this prompt as developer instructions when the session launches."
@@ -92,5 +91,12 @@ struct ProfileInspectorView: View {
             .padding(18)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var modelSelection: Binding<String> {
+        Binding(
+            get: { profile.modelID ?? "" },
+            set: { profile.modelID = $0.isEmpty ? nil : $0 }
+        )
     }
 }

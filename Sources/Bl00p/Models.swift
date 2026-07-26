@@ -19,6 +19,89 @@ enum AgentProvider: String, Codable, CaseIterable, Identifiable, Sendable {
         case .codex: "X"
         }
     }
+
+    var defaultRole: AgentRole {
+        switch self {
+        case .claude: .builder
+        case .codex: .reviewer
+        }
+    }
+
+    var modelOptions: [AgentModelOption] {
+        switch self {
+        case .claude:
+            [
+                .init(id: "", displayName: "Default"),
+                .init(id: "opus", displayName: "Claude Opus"),
+                .init(id: "sonnet", displayName: "Claude Sonnet"),
+                .init(id: "haiku", displayName: "Claude Haiku"),
+                .init(id: "fable", displayName: "Claude Fable")
+            ]
+        case .codex:
+            AgentModelOption.codexOptions
+        }
+    }
+}
+
+struct AgentModelOption: Identifiable, Hashable, Sendable {
+    let id: String
+    let displayName: String
+
+    fileprivate static var codexOptions: [AgentModelOption] {
+        let fallback = [
+            AgentModelOption(id: "gpt-5.6-sol", displayName: "GPT-5.6-Sol"),
+            AgentModelOption(id: "gpt-5.6-terra", displayName: "GPT-5.6-Terra"),
+            AgentModelOption(id: "gpt-5.6-luna", displayName: "GPT-5.6-Luna"),
+            AgentModelOption(id: "gpt-5.5", displayName: "GPT-5.5"),
+            AgentModelOption(id: "gpt-5.4", displayName: "GPT-5.4"),
+            AgentModelOption(id: "gpt-5.4-mini", displayName: "GPT-5.4-Mini"),
+            AgentModelOption(
+                id: "gpt-5.3-codex-spark",
+                displayName: "GPT-5.3-Codex-Spark"
+            )
+        ]
+
+        let cacheURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/models_cache.json")
+        guard let data = try? Data(contentsOf: cacheURL),
+              let cache = try? JSONDecoder().decode(CodexModelCache.self, from: data) else {
+            return [.init(id: "", displayName: "Default")] + fallback
+        }
+
+        var seenDisplayNames = Set<String>()
+        let visible = cache.models
+            .filter { $0.visibility == nil || $0.visibility == "list" }
+            .sorted { ($0.priority ?? .max) < ($1.priority ?? .max) }
+            .compactMap { model -> AgentModelOption? in
+                guard !model.slug.hasPrefix("codex-auto-"),
+                      seenDisplayNames.insert(model.displayName).inserted else {
+                    return nil
+                }
+                return AgentModelOption(
+                    id: model.slug,
+                    displayName: model.displayName
+                )
+            }
+        return [.init(id: "", displayName: "Default")] + (visible.isEmpty ? fallback : visible)
+    }
+}
+
+private struct CodexModelCache: Decodable {
+    let models: [CodexCachedModel]
+}
+
+private struct CodexCachedModel: Decodable {
+    let slug: String
+    let displayName: String
+    let visibility: String?
+    let priority: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case slug
+        case displayName = "display_name"
+        case visibility
+        case priority
+    }
 }
 
 enum AgentRole: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -80,6 +163,7 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
     var workingDirectory: String
     var loadProjectInstructions: Bool
     var requireApprovalBeforePush: Bool
+    var modelID: String?
 
     init(
         id: UUID = UUID(),
@@ -89,7 +173,8 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
         instructions: String,
         workingDirectory: String = "",
         loadProjectInstructions: Bool = true,
-        requireApprovalBeforePush: Bool = true
+        requireApprovalBeforePush: Bool = true,
+        modelID: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -99,11 +184,18 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
         self.workingDirectory = workingDirectory
         self.loadProjectInstructions = loadProjectInstructions
         self.requireApprovalBeforePush = requireApprovalBeforePush
+        self.modelID = modelID
+    }
+
+    var modelDisplayName: String {
+        guard let modelID, !modelID.isEmpty else { return "Default model" }
+        return provider.modelOptions.first(where: { $0.id == modelID })?.displayName
+            ?? modelID
     }
 
     static let defaults: [BotProfile] = [
         BotProfile(
-            name: "Claude Builder",
+            name: "Claude",
             provider: .claude,
             role: .builder,
             instructions: """
@@ -111,7 +203,7 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
             """
         ),
         BotProfile(
-            name: "Codex Reviewer",
+            name: "Codex",
             provider: .codex,
             role: .reviewer,
             instructions: """
@@ -119,7 +211,7 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
             """
         ),
         BotProfile(
-            name: "Claude PR Writer",
+            name: "Claude",
             provider: .claude,
             role: .publisher,
             instructions: """
@@ -127,6 +219,20 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
             """
         )
     ]
+}
+
+struct ImageAttachment: Identifiable, Codable, Hashable, Sendable {
+    var id: UUID
+    var path: String
+
+    init(id: UUID = UUID(), path: String) {
+        self.id = id
+        self.path = path
+    }
+
+    var filename: String {
+        URL(fileURLWithPath: path).lastPathComponent
+    }
 }
 
 enum TimelineKind: String, Codable, Sendable {
@@ -153,6 +259,7 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
     var detail: String?
     var timestamp: Date
     var approvalState: ApprovalState?
+    var attachments: [ImageAttachment]?
 
     init(
         id: UUID = UUID(),
@@ -161,7 +268,8 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
         text: String,
         detail: String? = nil,
         timestamp: Date = .now,
-        approvalState: ApprovalState? = nil
+        approvalState: ApprovalState? = nil,
+        attachments: [ImageAttachment]? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -170,6 +278,7 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
         self.detail = detail
         self.timestamp = timestamp
         self.approvalState = approvalState
+        self.attachments = attachments
     }
 }
 
@@ -178,6 +287,7 @@ struct AgentSessionState: Codable, Sendable {
     var entries: [TimelineEntry] = []
     var hasUnreadCompletion = false
     var sessionID: String?
+    var codexTurnModeVersion: Int?
 }
 
 struct PersistedAppState: Codable, Sendable {

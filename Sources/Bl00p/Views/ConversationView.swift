@@ -1,8 +1,10 @@
+import AppKit
 import SwiftUI
 
 struct ConversationView: View {
     @ObservedObject var model: AppModel
     @State private var draft = ""
+    @State private var attachments: [ImageAttachment] = []
 
     var body: some View {
         if let profile = model.selectedProfile {
@@ -12,7 +14,6 @@ struct ConversationView: View {
                 ConversationHeader(
                     profile: profile,
                     session: session,
-                    launch: { model.launch(profile.id) },
                     stop: { model.stop(profile.id) },
                     showSettings: { model.isInspectorVisible.toggle() }
                 )
@@ -20,9 +21,8 @@ struct ConversationView: View {
                 Divider()
 
                 if session.entries.isEmpty {
-                    EmptySessionView(profile: profile) {
-                        model.launch(profile.id)
-                    }
+                    Color.clear
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     TranscriptView(
                         entries: session.entries,
@@ -33,19 +33,28 @@ struct ConversationView: View {
                     )
                 }
 
-                Divider()
-
                 ComposerView(
                     draft: $draft,
+                    attachments: $attachments,
                     isEnabled: session.status != .launching && session.status != .working,
                     send: {
                         let outgoing = draft
+                        let outgoingAttachments = attachments
                         draft = ""
-                        model.send(outgoing, to: profile.id)
+                        attachments = []
+                        model.send(
+                            outgoing,
+                            attachments: outgoingAttachments,
+                            to: profile.id
+                        )
                     }
                 )
             }
             .background(Color(nsColor: .textBackgroundColor))
+            .onChange(of: profile.id) { _, _ in
+                draft = ""
+                attachments = []
+            }
         } else {
             ContentUnavailableView(
                 "No Bot Selected",
@@ -59,7 +68,6 @@ struct ConversationView: View {
 private struct ConversationHeader: View {
     let profile: BotProfile
     let session: AgentSessionState
-    let launch: () -> Void
     let stop: () -> Void
     let showSettings: () -> Void
 
@@ -69,7 +77,7 @@ private struct ConversationHeader: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            BotAvatar(provider: profile.provider, size: 38)
+            BotAvatar(name: profile.name, provider: profile.provider, size: 38)
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
@@ -90,9 +98,6 @@ private struct ConversationHeader: View {
             if isRunning {
                 Button("Stop", systemImage: "stop.fill", action: stop)
                     .buttonStyle(.bordered)
-            } else {
-                Button(profile.role.launchLabel, systemImage: "play.fill", action: launch)
-                    .buttonStyle(.borderedProminent)
             }
 
             Button(action: showSettings) {
@@ -114,37 +119,6 @@ private struct ConversationHeader: View {
     }
 }
 
-private struct EmptySessionView: View {
-    let profile: BotProfile
-    let launch: () -> Void
-
-    var body: some View {
-        VStack(spacing: 18) {
-            Spacer()
-
-            BotAvatar(provider: profile.provider, size: 64)
-                .shadow(color: .bl00pPink.opacity(0.16), radius: 18, y: 8)
-
-            VStack(spacing: 7) {
-                Text("\(profile.role.displayName) is ready")
-                    .font(.bl00p(.title2, weight: .bold, design: .rounded))
-
-                Text("Launch the session, then give this bot its part of the loop.")
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-
-            Button(profile.role.launchLabel, systemImage: "play.fill", action: launch)
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
-    }
-}
-
 private struct TranscriptView: View {
     let entries: [TimelineEntry]
     let profile: BotProfile
@@ -162,17 +136,29 @@ private struct TranscriptView: View {
                         )
                         .id(entry.id)
                     }
+
+                    Color.clear
+                        .frame(height: 24)
+                        .id("transcript-bottom-\(profile.id.uuidString)")
                 }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 22)
-                .frame(maxWidth: 820)
+                .padding(.horizontal, 32)
+                .padding(.top, 24)
+                .frame(maxWidth: 884)
                 .frame(maxWidth: .infinity)
             }
+            .task(id: profile.id) {
+                try? await Task.sleep(for: .milliseconds(60))
+                proxy.scrollTo(
+                    "transcript-bottom-\(profile.id.uuidString)",
+                    anchor: .bottom
+                )
+            }
             .onChange(of: entries.count) { _, _ in
-                if let lastID = entries.last?.id {
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo(lastID, anchor: .bottom)
-                    }
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo(
+                        "transcript-bottom-\(profile.id.uuidString)",
+                        anchor: .bottom
+                    )
                 }
             }
         }
@@ -193,9 +179,13 @@ private struct TimelineEntryView: View {
         case .system:
             systemMessage
         case .command:
-            eventCard(icon: "terminal", tint: .bl00pInk)
+            ToolCallCard(entry: entry, icon: "terminal", tint: .bl00pInk)
         case .diff:
-            eventCard(icon: "doc.text.magnifyingglass", tint: .orange)
+            ToolCallCard(
+                entry: entry,
+                icon: "doc.text.magnifyingglass",
+                tint: .orange
+            )
         case .question:
             eventCard(icon: "questionmark.bubble.fill", tint: .bl00pPink)
         case .approval:
@@ -206,8 +196,20 @@ private struct TimelineEntryView: View {
     private var userMessage: some View {
         HStack {
             Spacer(minLength: 100)
-            Text(entry.text)
-                .textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 9) {
+                if !entry.text.isEmpty {
+                    Text(entry.text)
+                        .textSelection(.enabled)
+                }
+
+                if let attachments = entry.attachments, !attachments.isEmpty {
+                    HStack(spacing: 8) {
+                        ForEach(attachments) { attachment in
+                            AttachmentThumbnail(attachment: attachment)
+                        }
+                    }
+                }
+            }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 .background(Color.bl00pPink, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
@@ -217,7 +219,7 @@ private struct TimelineEntryView: View {
 
     private var assistantMessage: some View {
         HStack(alignment: .top, spacing: 10) {
-            BotAvatar(provider: profile.provider, size: 28)
+            BotAvatar(name: profile.name, provider: profile.provider, size: 28)
             VStack(alignment: .leading, spacing: 4) {
                 Text(profile.name)
                     .font(.bl00p(.caption1, weight: .semibold))
@@ -225,6 +227,7 @@ private struct TimelineEntryView: View {
                 Text(entry.text)
                     .textSelection(.enabled)
                     .lineSpacing(3)
+                    .padding(.vertical, 2)
             }
             Spacer(minLength: 60)
         }
@@ -338,20 +341,158 @@ private struct TimelineEntryView: View {
     }
 }
 
-private struct ComposerView: View {
-    @Binding var draft: String
-    let isEnabled: Bool
-    let send: () -> Void
+private struct ToolCallCard: View {
+    let entry: TimelineEntry
+    let icon: String
+    let tint: Color
+    @State private var isExpanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(alignment: .center, spacing: 12) {
+                    Image(systemName: icon)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(tint)
+                        .frame(width: 28, height: 28)
+                        .background(
+                            tint.opacity(0.10),
+                            in: RoundedRectangle(cornerRadius: 8)
+                        )
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(entry.title ?? "Tool call")
+                            .font(.bl00p(.callout, weight: .semibold))
+                        Text(entry.text)
+                            .font(
+                                entry.kind == .command
+                                    ? .bl00p(.caption1, design: .monospaced)
+                                    : .bl00p(.caption1)
+                            )
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                Divider()
+                    .padding(.vertical, 12)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(entry.text)
+                        .font(
+                            entry.kind == .command
+                                ? .bl00p(.callout, design: .monospaced)
+                                : .bl00p(.callout)
+                        )
+                        .textSelection(.enabled)
+
+                    if let detail = entry.detail, !detail.isEmpty {
+                        Text(detail)
+                            .font(.bl00p(.caption1, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(
+            Color(nsColor: .controlBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(.quaternary, lineWidth: 1)
+        }
+    }
+}
+
+private struct AttachmentThumbnail: View {
+    let attachment: ImageAttachment
+
+    var body: some View {
+        Group {
+            if let image = NSImage(contentsOfFile: attachment.path) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Image(systemName: "photo")
+                    .font(.system(size: 20))
+            }
+        }
+        .frame(width: 72, height: 58)
+        .background(.white.opacity(0.18))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(.white.opacity(0.35), lineWidth: 1)
+        }
+        .help(attachment.filename)
+    }
+}
+
+private struct ComposerView: View {
+    @Binding var draft: String
+    @Binding var attachments: [ImageAttachment]
+    let isEnabled: Bool
+    let send: () -> Void
+    @State private var isDropTargeted = false
+    @State private var editorWidth: CGFloat = 600
+
+    private var editorHeight: CGFloat {
+        ComposerTextMetrics.editorHeight(
+            for: draft,
+            width: editorWidth
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if !attachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(attachments) { attachment in
+                            attachmentChip(attachment)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+
             HStack(alignment: .bottom, spacing: 10) {
                 TextEditor(text: $draft)
                     .font(.bl00p(.body))
                     .scrollContentBackground(.hidden)
-                    .frame(minHeight: 44, maxHeight: 110)
+                    .frame(height: editorHeight)
                     .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
+                    .padding(.vertical, 4)
+                    .background {
+                        GeometryReader { geometry in
+                            Color.clear
+                                .onAppear {
+                                    editorWidth = geometry.size.width
+                                }
+                                .onChange(of: geometry.size.width) { _, width in
+                                    editorWidth = width
+                                }
+                        }
+                    }
                     .background(
                         Color(nsColor: .controlBackgroundColor),
                         in: RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -363,21 +504,113 @@ private struct ComposerView: View {
 
                 Button(action: send) {
                     Image(systemName: "arrow.up")
-                        .font(.system(size: 15, weight: .bold))
-                        .frame(width: 30, height: 30)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 36, height: 36)
+                        .background(Color.bl00pPink, in: Circle())
                 }
-                .buttonStyle(.borderedProminent)
-                .clipShape(Circle())
-                .disabled(!isEnabled || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .buttonStyle(.plain)
+                .disabled(!isEnabled || !hasContent)
+                .opacity(
+                    isEnabled && hasContent ? 1 : 0.35
+                )
                 .keyboardShortcut(.return, modifiers: [.command])
             }
 
-            Text(isEnabled ? "⌘↩ to send · You remain in control of approvals" : "The bot is working…")
+            Text(
+                isEnabled
+                    ? "Drop images here · ⌘↩ to send"
+                    : "Working…"
+            )
                 .font(.bl00p(.caption1))
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
         .background(.bar)
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.bl00pPink, style: .init(lineWidth: 2, dash: [6]))
+                    .padding(7)
+                    .allowsHitTesting(false)
+            }
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            addImages(urls)
+        } isTargeted: { targeted in
+            isDropTargeted = targeted
+        }
+    }
+
+    private var hasContent: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !attachments.isEmpty
+    }
+
+    private func attachmentChip(_ attachment: ImageAttachment) -> some View {
+        HStack(spacing: 7) {
+            if let image = NSImage(contentsOfFile: attachment.path) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 28, height: 28)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+            }
+
+            Text(attachment.filename)
+                .font(.bl00p(.caption1, weight: .medium))
+                .lineLimit(1)
+
+            Button {
+                attachments.removeAll { $0.id == attachment.id }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Remove image")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            Color(nsColor: .controlBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+        )
+    }
+
+    private func addImages(_ urls: [URL]) -> Bool {
+        let existingPaths = Set(attachments.map(\.path))
+        let additions = urls.compactMap { url -> ImageAttachment? in
+            let standardized = url.standardizedFileURL
+            guard standardized.isFileURL,
+                  !existingPaths.contains(standardized.path),
+                  NSImage(contentsOf: standardized) != nil else { return nil }
+            return ImageAttachment(path: standardized.path)
+        }
+        attachments.append(contentsOf: additions)
+        return !additions.isEmpty
+    }
+}
+
+enum ComposerTextMetrics {
+    static func editorHeight(
+        for text: String,
+        width: CGFloat
+    ) -> CGFloat {
+        let font = NSFont.systemFont(
+            ofSize: NSFont.preferredFont(forTextStyle: .body).pointSize + 2
+        )
+        let availableWidth = max(80, width - 28)
+        let measuredText = (text.isEmpty ? " " : text) + "\u{200B}"
+        let bounds = (measuredText as NSString).boundingRect(
+            with: NSSize(
+                width: availableWidth,
+                height: .greatestFiniteMagnitude
+            ),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font]
+        )
+        return min(116, max(24, ceil(bounds.height) + 6))
     }
 }

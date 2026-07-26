@@ -1,6 +1,13 @@
 import Foundation
 
 actor ClaudeRuntime: AgentRuntime {
+    private struct PendingTurn {
+        let message: String
+        let attachments: [ImageAttachment]
+        let profile: BotProfile
+        var didFallBackToFreshSession = false
+    }
+
     private struct Session {
         let executableURL: URL
         let workingDirectory: URL
@@ -9,9 +16,12 @@ actor ClaudeRuntime: AgentRuntime {
         var currentClient: ClaudeCLIClient?
         var currentContinuation: AsyncStream<AgentEvent>.Continuation?
         var listenerTask: Task<Void, Never>?
+        var currentAttemptID: UUID?
+        var pendingTurn: PendingTurn?
         var toolEntries: [String: TimelineEntry] = [:]
         var assistantTexts: Set<String> = []
         var receivedResult = false
+        var stagedAttachmentDirectory: URL?
     }
 
     private let locator = ClaudeExecutableLocator()
@@ -98,17 +108,6 @@ actor ClaudeRuntime: AgentRuntime {
         )
 
         pair.continuation.yield(.sessionID(sessionID))
-        pair.continuation.yield(
-            .entry(
-                .init(
-                    kind: .system,
-                    text: resumedID == nil
-                        ? "Connected to Claude Code"
-                        : "Ready to resume Claude Code",
-                    detail: "Human-supervised local tools · \(workingDirectory.path)"
-                )
-            )
-        )
         pair.continuation.yield(.entry(openingQuestion(for: profile.role)))
         pair.continuation.yield(.status(.needsAnswer))
         pair.continuation.finish()
@@ -117,6 +116,7 @@ actor ClaudeRuntime: AgentRuntime {
 
     func respond(
         to message: String,
+        attachments: [ImageAttachment],
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent> {
         guard var session = sessions[profile.id] else {
@@ -144,23 +144,12 @@ actor ClaudeRuntime: AgentRuntime {
         }
 
         let pair = AsyncStream.makeStream(of: AgentEvent.self)
-        let client = ClaudeCLIClient(executableURL: session.executableURL)
-        let invocation = ClaudeInvocation(
-            sessionID: session.sessionID,
-            resume: session.shouldResume,
-            profile: profile,
-            prompt: message
-        )
-        let listener = Task { [weak self] in
-            for await event in client.messages {
-                guard !Task.isCancelled else { break }
-                await self?.handle(event, profileID: profile.id)
-            }
-        }
-
-        session.currentClient = client
         session.currentContinuation = pair.continuation
-        session.listenerTask = listener
+        session.pendingTurn = PendingTurn(
+            message: message,
+            attachments: attachments,
+            profile: profile
+        )
         session.toolEntries.removeAll()
         session.assistantTexts.removeAll()
         session.receivedResult = false
@@ -168,29 +157,9 @@ actor ClaudeRuntime: AgentRuntime {
         pair.continuation.yield(.status(.working))
 
         do {
-            try await client.start(
-                arguments: invocation.arguments,
-                workingDirectory: session.workingDirectory
-            )
+            try await launchClient(for: profile.id)
         } catch {
-            listener.cancel()
-            if var updated = sessions[profile.id] {
-                updated.currentContinuation?.yield(
-                    .entry(
-                        .init(
-                            kind: .system,
-                            text: "Could not start Claude",
-                            detail: error.localizedDescription
-                        )
-                    )
-                )
-                updated.currentContinuation?.yield(.status(.failed))
-                updated.currentContinuation?.finish()
-                updated.currentContinuation = nil
-                updated.currentClient = nil
-                updated.listenerTask = nil
-                sessions[profile.id] = updated
-            }
+            failTurnToStart(profileID: profile.id, error: error)
         }
 
         return pair.stream
@@ -217,14 +186,94 @@ actor ClaudeRuntime: AgentRuntime {
         guard let session = sessions.removeValue(forKey: profile.id) else { return }
         session.listenerTask?.cancel()
         session.currentContinuation?.finish()
+        if let directory = session.stagedAttachmentDirectory {
+            try? FileManager.default.removeItem(at: directory)
+        }
         if let client = session.currentClient {
             await client.stop()
         }
     }
 
-    private func handle(_ event: JSONValue, profileID: UUID) {
+    private func launchClient(for profileID: UUID) async throws {
+        guard var session = sessions[profileID],
+              let pendingTurn = session.pendingTurn else {
+            throw ClaudeCLIError.processLaunch("The pending turn was lost.")
+        }
+
+        if let staleDirectory = session.stagedAttachmentDirectory {
+            try? FileManager.default.removeItem(at: staleDirectory)
+            session.stagedAttachmentDirectory = nil
+        }
+
+        let attemptID = UUID()
+        let client = ClaudeCLIClient(executableURL: session.executableURL)
+        let invocation = try ClaudeInvocation(
+            sessionID: session.sessionID,
+            resume: session.shouldResume,
+            profile: pendingTurn.profile,
+            prompt: pendingTurn.message,
+            attachments: pendingTurn.attachments
+        )
+        let listener = Task { [weak self] in
+            for await event in client.messages {
+                guard !Task.isCancelled else { break }
+                await self?.handle(
+                    event,
+                    profileID: profileID,
+                    attemptID: attemptID
+                )
+            }
+        }
+
+        session.currentClient = client
+        session.listenerTask = listener
+        session.currentAttemptID = attemptID
+        session.stagedAttachmentDirectory = invocation.stagedAttachmentDirectory
+        sessions[profileID] = session
+
+        do {
+            try await client.start(
+                arguments: invocation.arguments,
+                workingDirectory: session.workingDirectory
+            )
+        } catch {
+            listener.cancel()
+            throw error
+        }
+    }
+
+    private func failTurnToStart(profileID: UUID, error: any Error) {
+        guard var session = sessions[profileID] else { return }
+        session.currentContinuation?.yield(
+            .entry(
+                .init(
+                    kind: .system,
+                    text: "Could not start Claude",
+                    detail: error.localizedDescription
+                )
+            )
+        )
+        session.currentContinuation?.yield(.status(.failed))
+        session.currentContinuation?.finish()
+        session.currentContinuation = nil
+        session.currentClient = nil
+        session.listenerTask = nil
+        session.currentAttemptID = nil
+        session.pendingTurn = nil
+        if let directory = session.stagedAttachmentDirectory {
+            try? FileManager.default.removeItem(at: directory)
+            session.stagedAttachmentDirectory = nil
+        }
+        sessions[profileID] = session
+    }
+
+    private func handle(
+        _ event: JSONValue,
+        profileID: UUID,
+        attemptID: UUID
+    ) async {
         guard let type = event["type"]?.stringValue,
-              sessions[profileID] != nil else { return }
+              sessions[profileID]?.currentAttemptID == attemptID else { return }
 
         switch type {
         case "system":
@@ -237,7 +286,7 @@ actor ClaudeRuntime: AgentRuntime {
             handleToolResults(event, profileID: profileID)
 
         case "result":
-            handleResult(event, profileID: profileID)
+            await handleResult(event, profileID: profileID)
 
         case "transport_decode_error":
             yield(
@@ -360,12 +409,51 @@ actor ClaudeRuntime: AgentRuntime {
         }
     }
 
-    private func handleResult(_ event: JSONValue, profileID: UUID) {
+    private func handleResult(_ event: JSONValue, profileID: UUID) async {
         guard var session = sessions[profileID] else { return }
         session.receivedResult = true
         let failed = event["is_error"]?.boolValue == true
         let result = event["result"]?.stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let errors = event["errors"]?.arrayValue?
+            .compactMap(\.stringValue)
+            .joined(separator: "\n")
+        let failureDetail = result?.isEmpty == false ? result : errors
+        let permissionDenials = event["permission_denials"]?.arrayValue ?? []
+
+        if failed,
+           session.shouldResume,
+           session.pendingTurn?.didFallBackToFreshSession == false,
+           ClaudeResumeRecovery.shouldStartFresh(after: event) {
+            let replacementID = UUID().uuidString.lowercased()
+            session.sessionID = replacementID
+            session.shouldResume = false
+            session.currentClient = nil
+            session.listenerTask = nil
+            session.currentAttemptID = nil
+            session.receivedResult = false
+            session.pendingTurn?.didFallBackToFreshSession = true
+            sessions[profileID] = session
+
+            yield(
+                .entry(
+                    .init(
+                        kind: .system,
+                        text: "Claude session recovered",
+                        detail: "The saved Claude conversation could not be reopened, so bl00p continued in a fresh session while keeping this transcript."
+                    )
+                ),
+                profileID: profileID
+            )
+            yield(.sessionID(replacementID), profileID: profileID)
+
+            do {
+                try await launchClient(for: profileID)
+            } catch {
+                failTurnToStart(profileID: profileID, error: error)
+            }
+            return
+        }
 
         if failed {
             yield(
@@ -375,7 +463,7 @@ actor ClaudeRuntime: AgentRuntime {
                         text: result == "Not logged in · Please run /login"
                             ? "Claude authentication expired"
                             : "Claude could not complete the turn",
-                        detail: result
+                        detail: failureDetail
                     )
                 ),
                 profileID: profileID
@@ -386,28 +474,40 @@ actor ClaudeRuntime: AgentRuntime {
             yield(.entry(.init(kind: .assistant, text: result)), profileID: profileID)
         }
 
-        if let denials = event["permission_denials"]?.arrayValue,
-           !denials.isEmpty {
+        if !permissionDenials.isEmpty {
             yield(
                 .entry(
                     .init(
-                        kind: .system,
-                        text: "Claude stopped at a permission boundary",
-                        detail: denials
-                            .map(\.compactDescription)
-                            .joined(separator: "\n")
-                            .trimmedForClaudeTimeline
+                        kind: .question,
+                        title: "Some actions were blocked",
+                        text: "Claude could not run every requested action. Review its response, then tell it how you want to proceed.",
+                        detail: ClaudePermissionDenials
+                            .readableDetail(for: permissionDenials)
                     )
                 ),
                 profileID: profileID
             )
         }
 
-        session.currentContinuation?.yield(.status(failed ? .failed : .completed))
+        session.currentContinuation?.yield(
+            .status(
+                ClaudeTurnOutcome.status(
+                    failed: failed,
+                    permissionDenials: permissionDenials
+                )
+            )
+        )
         session.currentContinuation?.finish()
         session.currentContinuation = nil
         session.currentClient = nil
+        session.listenerTask = nil
+        session.currentAttemptID = nil
+        session.pendingTurn = nil
         session.shouldResume = true
+        if let directory = session.stagedAttachmentDirectory {
+            try? FileManager.default.removeItem(at: directory)
+            session.stagedAttachmentDirectory = nil
+        }
         sessions[profileID] = session
     }
 
@@ -416,6 +516,12 @@ actor ClaudeRuntime: AgentRuntime {
         defer {
             session.currentClient = nil
             session.listenerTask = nil
+            session.currentAttemptID = nil
+            session.pendingTurn = nil
+            if let directory = session.stagedAttachmentDirectory {
+                try? FileManager.default.removeItem(at: directory)
+                session.stagedAttachmentDirectory = nil
+            }
             sessions[profileID] = session
         }
 
@@ -570,6 +676,71 @@ private enum AuthenticationStatus {
     case loggedIn
     case loggedOut
     case unavailable(String)
+}
+
+enum ClaudeResumeRecovery {
+    static func shouldStartFresh(after event: JSONValue) -> Bool {
+        guard event["is_error"]?.boolValue == true else { return false }
+
+        let errors = event["errors"]?.arrayValue?
+            .compactMap(\.stringValue)
+            .joined(separator: "\n")
+            .lowercased() ?? ""
+        return errors.contains("no conversation found with session id")
+            || errors.contains("failed to load conversation")
+            || errors.contains("invalid session")
+    }
+}
+
+enum ClaudeTurnOutcome {
+    static func status(
+        failed: Bool,
+        permissionDenials: [JSONValue]
+    ) -> AgentStatus {
+        if failed {
+            return .failed
+        }
+        return permissionDenials.isEmpty ? .completed : .needsAnswer
+    }
+}
+
+enum ClaudePermissionDenials {
+    static func readableDetail(for denials: [JSONValue]) -> String {
+        let lines = denials.compactMap { denial -> String? in
+            let input = denial["tool_input"]
+            let command = input?["command"]?.stringValue
+            let description = input?["description"]?.stringValue
+            let tool = denial["tool_name"]?.stringValue
+
+            if let command, !command.isEmpty {
+                if let description, !description.isEmpty {
+                    return "• \(description)\n  \(command)"
+                }
+                return "• \(command)"
+            }
+            if let tool, !tool.isEmpty {
+                return "• \(tool)"
+            }
+            return nil
+        }
+
+        return lines.isEmpty
+            ? "One or more actions were not permitted."
+            : lines.joined(separator: "\n")
+                .trimmedForClaudeTimeline
+    }
+
+    static func readableLegacyDetail(_ detail: String?) -> String {
+        guard let detail, !detail.isEmpty else {
+            return "One or more actions were not permitted."
+        }
+        let denials = detail
+            .split(separator: "\n")
+            .compactMap { line in
+                try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8))
+            }
+        return readableDetail(for: denials)
+    }
 }
 
 private extension String {

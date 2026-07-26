@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @main
@@ -53,9 +54,21 @@ private struct RootView: View {
                 model.add(profile)
             }
         }
+        .task {
+            model.prepareNotifications()
+        }
         .onChange(of: model.selectedBotID) { _, newValue in
             if let newValue {
                 model.markViewed(newValue)
+            }
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: NSApplication.didBecomeActiveNotification
+            )
+        ) { _ in
+            if let selectedBotID = model.selectedBotID {
+                model.markViewed(selectedBotID)
             }
         }
     }

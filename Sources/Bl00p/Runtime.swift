@@ -10,7 +10,11 @@ enum AgentEvent: Sendable {
 
 protocol AgentRuntime: Sendable {
     func start(profile: BotProfile, resumeThreadID: String?) async -> AsyncStream<AgentEvent>
-    func respond(to message: String, profile: BotProfile) async -> AsyncStream<AgentEvent>
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent>
     func resolveApproval(
         entryID: UUID,
         approved: Bool,
@@ -45,7 +49,11 @@ struct DemoAgentRuntime: AgentRuntime {
         ])
     }
 
-    func respond(to message: String, profile: BotProfile) async -> AsyncStream<AgentEvent> {
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
         switch profile.role {
         case .builder:
             stream([
@@ -206,12 +214,24 @@ actor AgentRuntimeRouter: AgentRuntime {
         return await claude.start(profile: profile, resumeThreadID: resumeThreadID)
     }
 
-    func respond(to message: String, profile: BotProfile) async -> AsyncStream<AgentEvent> {
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
         let provider = activeProviders[profile.id] ?? profile.provider
         if provider == .codex {
-            return await codex.respond(to: message, profile: profile)
+            return await codex.respond(
+                to: message,
+                attachments: attachments,
+                profile: profile
+            )
         }
-        return await claude.respond(to: message, profile: profile)
+        return await claude.respond(
+            to: message,
+            attachments: attachments,
+            profile: profile
+        )
     }
 
     func resolveApproval(
