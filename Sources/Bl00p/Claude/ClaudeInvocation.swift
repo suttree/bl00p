@@ -50,10 +50,10 @@ struct ClaudeInvocation: Sendable {
 
     var arguments: [String] {
         var result = [
-            "-p",
             "--output-format", "stream-json",
+            "--input-format", "stream-json",
             "--verbose",
-            "--permission-mode", "dontAsk",
+            "--permission-prompt-tool", "stdio",
             "--append-system-prompt", systemPrompt,
             "--setting-sources", profile.loadProjectInstructions
                 ? "user,project,local"
@@ -71,11 +71,21 @@ struct ClaudeInvocation: Sendable {
         }
         result.append(contentsOf: [
             resume ? "--resume" : "--session-id",
-            sessionID,
-            "--",
-            promptWithAttachments
+            sessionID
         ])
         return result
+    }
+
+    var inputMessage: JSONValue {
+        .object([
+            "type": .string("user"),
+            "message": .object([
+                "role": .string("user"),
+                "content": .string(promptWithAttachments)
+            ]),
+            "parent_tool_use_id": .null,
+            "session_id": .string(sessionID)
+        ])
     }
 
     private var promptWithAttachments: String {
@@ -96,9 +106,9 @@ struct ClaudeInvocation: Sendable {
 
         \(profile.instructions)
 
-        The user is supervising this turn in the bl00p transcript. Work only inside the selected working directory. Explain important decisions and report the verification you performed. If a tool is denied, do not work around the policy: explain what you wanted to do and ask the user for the next step.
+        The user is supervising this turn in the bl00p transcript. Work only inside the selected working directory. Explain important decisions and report the verification you performed. If bl00p pauses for tool approval, wait for the user's decision. If a tool is denied, do not work around the policy: use the denial as feedback and explain any blocked outcome.
 
-        Never commit, push, force-push, create or update a pull request, reset or clean the repository, delete files, or run another destructive command unless bl00p presents a separate explicit approval for that exact action. This runtime does not yet provide that approval bridge, so stop and ask instead.
+        Never commit, push, force-push, create or update a pull request, reset or clean the repository, delete files, or run another destructive command unless bl00p presents a separate explicit approval for that exact action.
         """
     }
 

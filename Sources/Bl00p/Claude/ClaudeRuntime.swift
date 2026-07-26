@@ -1,6 +1,11 @@
 import Foundation
 
 actor ClaudeRuntime: AgentRuntime {
+    private struct PendingApproval: Sendable {
+        let requestID: String
+        let toolInput: JSONValue
+    }
+
     private struct PendingTurn {
         let message: String
         let attachments: [ImageAttachment]
@@ -22,6 +27,7 @@ actor ClaudeRuntime: AgentRuntime {
         var assistantTexts: Set<String> = []
         var receivedResult = false
         var stagedAttachmentDirectory: URL?
+        var pendingApprovals: [UUID: PendingApproval] = [:]
     }
 
     private let locator = ClaudeExecutableLocator()
@@ -153,6 +159,7 @@ actor ClaudeRuntime: AgentRuntime {
         session.toolEntries.removeAll()
         session.assistantTexts.removeAll()
         session.receivedResult = false
+        session.pendingApprovals.removeAll()
         sessions[profile.id] = session
         pair.continuation.yield(.status(.working))
 
@@ -170,16 +177,58 @@ actor ClaudeRuntime: AgentRuntime {
         approved: Bool,
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent> {
-        singleEventStream(
-            .entry(
-                .init(
-                    kind: .system,
-                    text: "Claude tool approvals are not active in this build.",
-                    detail: "No command was run. Tell Claude how you want to proceed in a new message."
+        guard let session = sessions[profile.id],
+              let client = session.currentClient,
+              let pending = session.pendingApprovals[entryID] else {
+            return emptyStream()
+        }
+
+        do {
+            try await client.respond(
+                to: pending.requestID,
+                result: ClaudeToolApprovalResponse.result(
+                    approved: approved,
+                    toolInput: pending.toolInput
                 )
-            ),
-            finalStatus: .needsAnswer
-        )
+            )
+            guard var activeSession = sessions[profile.id],
+                  activeSession.pendingApprovals[entryID] != nil else {
+                return singleEventStream(
+                    .entry(
+                        .init(
+                            kind: .system,
+                            text: "Claude stopped before receiving the approval decision."
+                        )
+                    ),
+                    finalStatus: .failed
+                )
+            }
+
+            activeSession.pendingApprovals.removeValue(forKey: entryID)
+            activeSession.currentContinuation?.yield(
+                .approvalResolved(entryID, approved ? .approved : .declined)
+            )
+            activeSession.currentContinuation?.yield(
+                .status(
+                    activeSession.pendingApprovals.isEmpty
+                        ? .working
+                        : .needsApproval
+                )
+            )
+            sessions[profile.id] = activeSession
+            return emptyStream()
+        } catch {
+            return singleEventStream(
+                .entry(
+                    .init(
+                        kind: .system,
+                        text: "Could not send the Claude approval decision",
+                        detail: error.localizedDescription
+                    )
+                ),
+                finalStatus: .needsApproval
+            )
+        }
     }
 
     func stop(profile: BotProfile) async {
@@ -232,12 +281,14 @@ actor ClaudeRuntime: AgentRuntime {
         sessions[profileID] = session
 
         do {
-            try await client.start(
+            try await client.connect(
                 arguments: invocation.arguments,
                 workingDirectory: session.workingDirectory
             )
+            try await client.send(invocation.inputMessage)
         } catch {
             listener.cancel()
+            await client.stop()
             throw error
         }
     }
@@ -288,6 +339,12 @@ actor ClaudeRuntime: AgentRuntime {
         case "result":
             await handleResult(event, profileID: profileID)
 
+        case "control_request":
+            await handleControlRequest(event, profileID: profileID)
+
+        case "control_cancel_request":
+            handleControlCancellation(event, profileID: profileID)
+
         case "transport_decode_error":
             yield(
                 .entry(
@@ -311,6 +368,76 @@ actor ClaudeRuntime: AgentRuntime {
         default:
             break
         }
+    }
+
+    private func handleControlRequest(
+        _ event: JSONValue,
+        profileID: UUID
+    ) async {
+        guard let requestID = event["request_id"]?.stringValue,
+              let request = event["request"],
+              let subtype = request["subtype"]?.stringValue,
+              var session = sessions[profileID],
+              let client = session.currentClient else { return }
+
+        guard subtype == "can_use_tool",
+              let approval = ClaudeToolApprovalRequest(request: request) else {
+            do {
+                try await client.respondError(
+                    to: requestID,
+                    message: "bl00p does not support Claude control request: \(subtype)"
+                )
+            } catch {
+                yield(
+                    .entry(
+                        .init(
+                            kind: .system,
+                            text: "Could not answer Claude's control request",
+                            detail: error.localizedDescription
+                        )
+                    ),
+                    profileID: profileID
+                )
+            }
+            return
+        }
+
+        guard !session.pendingApprovals.values.contains(where: {
+            $0.requestID == requestID
+        }) else { return }
+
+        let entry = approval.timelineEntry()
+        session.pendingApprovals[entry.id] = PendingApproval(
+            requestID: requestID,
+            toolInput: approval.toolInput
+        )
+        sessions[profileID] = session
+        session.currentContinuation?.yield(.entry(entry))
+        session.currentContinuation?.yield(.status(.needsApproval))
+    }
+
+    private func handleControlCancellation(
+        _ event: JSONValue,
+        profileID: UUID
+    ) {
+        guard let requestID = event["request_id"]?.stringValue,
+              var session = sessions[profileID],
+              let cancelled = session.pendingApprovals.first(where: {
+                  $0.value.requestID == requestID
+              }) else { return }
+
+        session.pendingApprovals.removeValue(forKey: cancelled.key)
+        session.currentContinuation?.yield(
+            .approvalResolved(cancelled.key, .declined)
+        )
+        session.currentContinuation?.yield(
+            .status(
+                session.pendingApprovals.isEmpty
+                    ? .working
+                    : .needsApproval
+            )
+        )
+        sessions[profileID] = session
     }
 
     private func handleSystem(_ event: JSONValue, profileID: UUID) {
@@ -425,6 +552,9 @@ actor ClaudeRuntime: AgentRuntime {
            session.shouldResume,
            session.pendingTurn?.didFallBackToFreshSession == false,
            ClaudeResumeRecovery.shouldStartFresh(after: event) {
+            if let client = session.currentClient {
+                await client.stop()
+            }
             let replacementID = UUID().uuidString.lowercased()
             session.sessionID = replacementID
             session.shouldResume = false
@@ -489,6 +619,15 @@ actor ClaudeRuntime: AgentRuntime {
             )
         }
 
+        for entryID in session.pendingApprovals.keys {
+            session.currentContinuation?.yield(
+                .approvalResolved(entryID, .declined)
+            )
+        }
+        session.pendingApprovals.removeAll()
+        if let client = session.currentClient {
+            await client.finishInput()
+        }
         session.currentContinuation?.yield(
             .status(
                 ClaudeTurnOutcome.status(
@@ -518,6 +657,7 @@ actor ClaudeRuntime: AgentRuntime {
             session.listenerTask = nil
             session.currentAttemptID = nil
             session.pendingTurn = nil
+            session.pendingApprovals.removeAll()
             if let directory = session.stagedAttachmentDirectory {
                 try? FileManager.default.removeItem(at: directory)
                 session.stagedAttachmentDirectory = nil
@@ -526,6 +666,11 @@ actor ClaudeRuntime: AgentRuntime {
         }
 
         guard session.currentContinuation != nil else { return }
+        for entryID in session.pendingApprovals.keys {
+            session.currentContinuation?.yield(
+                .approvalResolved(entryID, .declined)
+            )
+        }
         let exitStatus = event["exit_status"]?.intValue ?? -1
         let stderr = event["stderr"]?.stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -671,6 +816,10 @@ actor ClaudeRuntime: AgentRuntime {
             continuation.finish()
         }
     }
+
+    private func emptyStream() -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
 }
 private enum AuthenticationStatus {
     case loggedIn
@@ -740,6 +889,84 @@ enum ClaudePermissionDenials {
                 try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8))
             }
         return readableDetail(for: denials)
+    }
+}
+
+struct ClaudeToolApprovalRequest: Sendable {
+    let toolName: String
+    let toolInput: JSONValue
+    let title: String?
+    let displayName: String?
+    let description: String?
+    let decisionReason: String?
+    let blockedPath: String?
+
+    init?(request: JSONValue) {
+        guard request["subtype"]?.stringValue == "can_use_tool",
+              let toolName = request["tool_name"]?.stringValue,
+              let toolInput = request["input"],
+              toolInput.objectValue != nil else { return nil }
+        self.toolName = toolName
+        self.toolInput = toolInput
+        title = request["title"]?.stringValue
+        displayName = request["display_name"]?.stringValue
+        description = request["description"]?.stringValue
+        decisionReason = request["decision_reason"]?.stringValue
+        blockedPath = request["blocked_path"]?.stringValue
+    }
+
+    func timelineEntry(id: UUID = UUID()) -> TimelineEntry {
+        .init(
+            id: id,
+            kind: .approval,
+            title: displayName ?? "\(toolName) approval",
+            text: primaryAction,
+            detail: detail,
+            approvalState: .pending
+        )
+    }
+
+    private var primaryAction: String {
+        toolInput["command"]?.stringValue
+            ?? toolInput["file_path"]?.stringValue
+            ?? toolInput["notebook_path"]?.stringValue
+            ?? title
+            ?? toolName
+    }
+
+    private var detail: String? {
+        let values = [
+            title == primaryAction ? nil : title,
+            description,
+            decisionReason,
+            blockedPath.map { "Blocked path: \($0)" },
+            toolInput.compactDescription == primaryAction
+                ? nil
+                : toolInput.compactDescription
+        ]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+        return values.isEmpty
+            ? nil
+            : values.joined(separator: "\n").trimmedForClaudeTimeline
+    }
+}
+
+enum ClaudeToolApprovalResponse {
+    static func result(
+        approved: Bool,
+        toolInput: JSONValue
+    ) -> JSONValue {
+        if approved {
+            return .object([
+                "behavior": .string("allow"),
+                "updatedInput": toolInput
+            ])
+        }
+        return .object([
+            "behavior": .string("deny"),
+            "message": .string("The user declined this action in bl00p.")
+        ])
     }
 }
 

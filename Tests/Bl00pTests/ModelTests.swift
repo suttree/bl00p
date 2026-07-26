@@ -469,10 +469,17 @@ func claudeBuilderInvocationIsResumableAndConservative() throws {
     #expect(invocation.arguments.contains("Write"))
     #expect(invocation.arguments.contains("Bash(swift test:*)"))
     #expect(invocation.arguments.contains("Bash(xcrun swift test:*)"))
+    #expect(invocation.arguments.contains("--input-format"))
+    #expect(invocation.arguments.contains("--permission-prompt-tool"))
+    #expect(invocation.arguments.contains("stdio"))
+    #expect(!invocation.arguments.contains("dontAsk"))
     let toolRules = invocation.arguments.filter { $0.hasPrefix("Bash(") }
     #expect(!toolRules.contains(where: { $0.contains("git push") }))
     #expect(!toolRules.contains(where: { $0.contains("git reset") }))
-    #expect(invocation.arguments.suffix(2) == ["--", "Implement BLOOP-42"])
+    #expect(
+        invocation.inputMessage["message"]?["content"]?.stringValue
+            == "Implement BLOOP-42"
+    )
 }
 
 @Test
@@ -524,8 +531,159 @@ func claudeInvocationPassesTheSelectedModelAndAttachedImages() throws {
     #expect(invocation.arguments.contains("sonnet"))
     #expect(invocation.arguments.contains("--add-dir"))
     #expect(!invocation.arguments.contains(sourceDirectory.path))
-    #expect(invocation.arguments.last?.contains("failure.png") == true)
-    #expect(invocation.arguments.last?.contains(sourceFile.path) == false)
+    let input = try #require(
+        invocation.inputMessage["message"]?["content"]?.stringValue
+    )
+    #expect(input.contains("failure.png"))
+    #expect(!input.contains(sourceFile.path))
+}
+
+@Test
+func claudeToolApprovalsUseTheSDKControlProtocol() throws {
+    let request = try JSONDecoder().decode(
+        JSONValue.self,
+        from: Data(
+            """
+            {
+              "subtype": "can_use_tool",
+              "tool_name": "Bash",
+              "input": {
+                "command": "git push origin feature/example",
+                "description": "Push the feature branch"
+              },
+              "title": "Claude wants to push a branch",
+              "display_name": "Push branch",
+              "description": "Publishes local commits to GitHub",
+              "decision_reason": "Git operations require approval",
+              "blocked_path": "/tmp/project/.git",
+              "tool_use_id": "toolu_123"
+            }
+            """.utf8
+        )
+    )
+    let approval = try #require(ClaudeToolApprovalRequest(request: request))
+    let entry = approval.timelineEntry(
+        id: UUID(uuidString: "BD1F67B4-F1B8-48EE-89B9-D68B3510A0A7")!
+    )
+
+    #expect(entry.kind == .approval)
+    #expect(entry.title == "Push branch")
+    #expect(entry.text == "git push origin feature/example")
+    #expect(entry.detail?.contains("Git operations require approval") == true)
+    #expect(entry.approvalState == .pending)
+    #expect(
+        ClaudeToolApprovalResponse.result(
+            approved: true,
+            toolInput: approval.toolInput
+        ) == .object([
+            "behavior": .string("allow"),
+            "updatedInput": approval.toolInput
+        ])
+    )
+    #expect(
+        ClaudeToolApprovalResponse.result(
+            approved: false,
+            toolInput: approval.toolInput
+        ) == .object([
+            "behavior": .string("deny"),
+            "message": .string("The user declined this action in bl00p.")
+        ])
+    )
+}
+
+@Test
+func claudeCLIClientCompletesThePermissionRoundTrip() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-claude-control-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    try FileManager.default.createDirectory(
+        at: directory,
+        withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let executable = directory.appendingPathComponent("fake-claude")
+    try """
+    #!/usr/bin/env python3
+    import json
+    import sys
+
+    for line in sys.stdin:
+        message = json.loads(line)
+        if message.get("type") == "control_request":
+            request = message.get("request", {})
+            if request.get("subtype") == "initialize":
+                print(json.dumps({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": message["request_id"],
+                        "response": {"commands": []}
+                    }
+                }), flush=True)
+        elif message.get("type") == "user":
+            print(json.dumps({
+                "type": "control_request",
+                "request_id": "permission-1",
+                "request": {
+                    "subtype": "can_use_tool",
+                    "tool_name": "Bash",
+                    "input": {"command": "git push origin feature/example"},
+                    "tool_use_id": "toolu_1"
+                }
+            }), flush=True)
+        elif message.get("type") == "control_response":
+            behavior = message["response"]["response"]["behavior"]
+            print(json.dumps({
+                "type": "result",
+                "is_error": False,
+                "result": behavior,
+                "permission_denials": []
+            }), flush=True)
+            break
+    """.write(to: executable, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: executable.path
+    )
+
+    let client = ClaudeCLIClient(executableURL: executable)
+    try await client.connect(arguments: [], workingDirectory: directory)
+    try await client.send(
+        .object([
+            "type": .string("user"),
+            "message": .object([
+                "role": .string("user"),
+                "content": .string("Publish the branch")
+            ])
+        ])
+    )
+
+    var receivedPermission = false
+    var receivedResult: String?
+    for await message in client.messages {
+        if message["type"]?.stringValue == "control_request" {
+            receivedPermission = true
+            try await client.respond(
+                to: "permission-1",
+                result: ClaudeToolApprovalResponse.result(
+                    approved: true,
+                    toolInput: .object([
+                        "command": .string("git push origin feature/example")
+                    ])
+                )
+            )
+        } else if message["type"]?.stringValue == "result" {
+            receivedResult = message["result"]?.stringValue
+            break
+        }
+    }
+    await client.stop()
+
+    #expect(receivedPermission)
+    #expect(receivedResult == "allow")
 }
 
 @Test

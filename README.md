@@ -11,7 +11,7 @@ The current prototype includes:
 - Consistent, legible typography across conversations, settings, and bot creation
 - Structured messages, commands, findings, and approval cards
 - Real Codex sessions powered by `codex app-server`, with workspace-scoped writes and in-app approvals for commands, file changes, extra permissions, and connected-app mutations
-- Real, resumable Claude Code builder and PR-writer sessions
+- Real, resumable Claude Code builder and PR-writer sessions with in-app tool approvals
 - Local JSON persistence
 
 ## Run the prototype
@@ -47,8 +47,9 @@ claude auth login
 Claude profiles use the installed `claude` executable's `stream-json` mode.
 They inherit Claude's user and project settings, including configured MCP
 servers. The current allowlist supports repository inspection, file edits for
-non-reviewer roles, common test commands, and read-only Linear tools. Commit,
-push, PR mutation, destructive git, and delete operations remain blocked.
+non-reviewer roles, common test commands, and read-only Linear tools. Actions
+outside that allowlist pause in the conversation, where the user can approve
+or decline the exact tool call before Claude continues.
 
 ## Roadmap
 
