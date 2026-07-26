@@ -12,6 +12,7 @@ final class AppModel: ObservableObject {
 
     private let runtime: any AgentRuntime
     private let store: AppStateStore
+    private let isAppWindowActive: () -> Bool
     private var notifications: (any AgentNotificationDelivering)?
     private var runGenerations: [UUID: UUID] = [:]
     private var connectedProfileIDs: Set<UUID> = []
@@ -20,11 +21,15 @@ final class AppModel: ObservableObject {
     init(
         runtime: any AgentRuntime = AgentRuntimeRouter(),
         store: AppStateStore = AppStateStore(),
-        notifications: (any AgentNotificationDelivering)? = nil
+        notifications: (any AgentNotificationDelivering)? = nil,
+        isAppWindowActive: @escaping () -> Bool = {
+            AppWindowActivity.isActive
+        }
     ) {
         self.runtime = runtime
         self.store = store
         self.notifications = notifications
+        self.isAppWindowActive = isAppWindowActive
 
         if let saved = store.load(), !saved.profiles.isEmpty {
             let restoredProfiles = saved.profiles.map(Self.migrateLegacyDefaultName)
@@ -374,7 +379,8 @@ final class AppModel: ObservableObject {
         save()
         if notificationsArePrepared,
            let notice,
-           let profile = profiles.first(where: { $0.id == profileID }) {
+           let profile = profiles.first(where: { $0.id == profileID }),
+           !isAppWindowActive() {
             notifications?.post(notice, for: profile)
         }
     }

@@ -14,6 +14,8 @@ All notable changes to bl00p are documented in this file.
 
 ### Changed
 
+- Suppress notification banners and sounds while a bl00p window is active,
+  while preserving sidebar and Dock attention state.
 - Increase the typography throughout the Add Bot sheet and its role-prompt editor for readability.
 - Make Codex bots general-purpose agents instead of starting every conversation in review mode.
 - Start or reconnect a stopped bot automatically when its next message is sent, while preserving its transcript.
@@ -37,5 +39,7 @@ All notable changes to bl00p are documented in this file.
 
 ### Tests
 
+- Cover active-window notification suppression independently from Dock badge
+  updates.
 - Expand coverage for notifications, Dock badges, model and prompt isolation, image attachments, session recovery, state migration, composer sizing, automatic reconnects, and long-lived runtime streams.
 - Cover the Codex approval mode toggle and backward-compatible decoding of bot profiles missing newer fields.
