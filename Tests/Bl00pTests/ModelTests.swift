@@ -141,6 +141,41 @@ func assistantMarkdownProducesClickableLinksAndPreservesLayout() throws {
 }
 
 @Test
+func fencedMarkdownAndShellBlocksPreserveLinesWithoutLanguageLabels() throws {
+    let blocks = TranscriptMarkdown.blocks(
+        """
+        Example:
+
+        ```markdown
+        # Planned Features
+        ## Now
+        - Suppress notifications
+        ```
+
+        Then run:
+
+        ```sh
+        swift test
+        git status
+        ```
+        """
+    )
+    let code = blocks.compactMap { block -> String? in
+        guard case .code(let text) = block.content else { return nil }
+        return text
+    }
+
+    #expect(code.count == 2)
+    #expect(
+        try #require(code.first)
+            == "# Planned Features\n## Now\n- Suppress notifications"
+    )
+    #expect(try #require(code.last) == "swift test\ngit status")
+    #expect(!code.joined().contains("markdown"))
+    #expect(!code.joined().contains("```"))
+}
+
+@Test
 func codexBotsUseGeneralTurnsInsteadOfInheritingReviewMode() {
     let request = CodexTurnRequest.make(
         threadID: "document-thread",
