@@ -869,9 +869,14 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     let displayedPlanEntries = managerEntries.filter {
         $0.text == planText
     }
+    let runtimePlanEntryID = try #require(
+        await runtime.assistantEntryIDs.first
+    )
     #expect(displayedPlanEntries.count == 1)
     #expect(displayedPlanEntries.first?.kind == .approval)
     #expect(displayedPlanEntries.first?.id == approvalEntry.id)
+    #expect(approvalEntry.id != runtimePlanEntryID)
+    #expect(managerEntries.last?.id == approvalEntry.id)
     #expect(managerEntries.contains(where: { $0.id == olderManagerEntry.id }))
     #expect(
         managerEntries.first(where: { $0.id == olderManagerEntry.id })?.text
@@ -1074,6 +1079,7 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
     let revisedEntries = resolvedRestoredModel.session(for: manager.id).entries
     #expect(revisedApproval.text == revisedPlan)
     #expect(revisedEntries.filter { $0.text == revisedPlan }.count == 1)
+    #expect(revisedEntries.last?.id == revisedApproval.id)
     #expect(
         revisedEntries.filter { $0.kind == .approval }.map(\.approvalState)
             == [.declined, .pending]
@@ -1096,6 +1102,97 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
             $0.id == revisedApproval.id
         })?.approvalState == .pending
     )
+}
+
+@MainActor
+@Test
+func managerPlanningWithoutAPlanPausesWithoutAdoptingOlderMessages() async throws {
+    for olderEntry in [
+        nil,
+        TimelineEntry(
+            kind: .assistant,
+            text: "Unrelated guidance from before the managed workflow."
+        )
+    ] as [TimelineEntry?] {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "bl00p-manager-empty-plan-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        var builder = BotProfile.defaults[0]
+        var reviewer = BotProfile.defaults[1]
+        var publisher = BotProfile.defaults[2]
+        builder.id = UUID()
+        reviewer.id = UUID()
+        publisher.id = UUID()
+        let manager = BotProfile(
+            name: "Manager",
+            provider: .codex,
+            role: .manager,
+            instructions: "Coordinate.",
+            managerTeam: ManagerTeamConfiguration(
+                builderProfileID: builder.id,
+                reviewerProfileID: reviewer.id,
+                publisherProfileID: publisher.id
+            )
+        )
+        var sessions = Dictionary(
+            uniqueKeysWithValues: [manager, builder, reviewer, publisher]
+                .map { ($0.id, AgentSessionState()) }
+        )
+        if let olderEntry {
+            sessions[manager.id] = AgentSessionState(entries: [olderEntry])
+        }
+        let store = AppStateStore(
+            fileURL: directory.appendingPathComponent("state.json")
+        )
+        store.save(
+            PersistedAppState(
+                profiles: [manager, builder, reviewer, publisher],
+                sessions: sessions,
+                selectedBotID: manager.id
+            )
+        )
+        let runtime = OrchestrationRecordingRuntime(
+            managerPlanningResponses: [""]
+        )
+        let model = AppModel(runtime: runtime, store: store)
+
+        model.send("Plan this change", to: manager.id)
+        for _ in 0..<100
+            where model.workflow(for: manager.id)?.isPaused != true {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let workflow = try #require(model.workflow(for: manager.id))
+        let entries = model.session(for: manager.id).entries
+        #expect(workflow.stage == .planning)
+        #expect(workflow.isPaused)
+        #expect(workflow.implementationPlan == nil)
+        #expect(workflow.planApprovalEntryID == nil)
+        #expect(
+            workflow.pauseReason?
+                .contains("without returning an implementation plan") == true
+        )
+        #expect(entries.contains(where: { $0.kind == .approval }) == false)
+        #expect(entries.last?.kind == .system)
+        #expect(entries.last?.text == "Workflow paused")
+        #expect(
+            entries.last?.detail?
+                .contains("without returning an implementation plan") == true
+        )
+        if let olderEntry {
+            let preservedEntry = try #require(
+                entries.first(where: { $0.id == olderEntry.id })
+            )
+            #expect(preservedEntry.kind == .assistant)
+            #expect(preservedEntry.text == olderEntry.text)
+        } else {
+            #expect(entries.contains(where: { $0.kind == .assistant }) == false)
+        }
+    }
 }
 
 @MainActor
@@ -2397,7 +2494,18 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
 
     private(set) var calls: [Call] = []
     private(set) var approvalResolutionCount = 0
+    private(set) var assistantEntryIDs: [UUID] = []
     private var roleResponseCounts: [AgentRole: Int] = [:]
+    private let managerPlanningResponses: [String]
+
+    init(
+        managerPlanningResponses: [String] = [
+            "Implement the feature with persistence and tests.",
+            "Revised plan: implement the feature with restoration coverage."
+        ]
+    ) {
+        self.managerPlanningResponses = managerPlanningResponses
+    }
 
     func start(
         profile: BotProfile,
@@ -2428,9 +2536,9 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
         switch profile.role {
         case .manager:
             if message.contains("planning phase") {
-                response = count == 0
-                    ? "Implement the feature with persistence and tests."
-                    : "Revised plan: implement the feature with restoration coverage."
+                response = managerPlanningResponses.indices.contains(count)
+                    ? managerPlanningResponses[count]
+                    : managerPlanningResponses.last ?? ""
             } else {
                 response =
                     "Complete: [draft PR](https://github.com/suttree/bl00p/pull/99)"
@@ -2447,11 +2555,17 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
             response = "Documentation committed. Draft PR: https://github.com/suttree/bl00p/pull/99"
         }
 
+        let assistantEntry = response.isEmpty
+            ? nil
+            : TimelineEntry(kind: .assistant, text: response)
+        if let assistantEntry {
+            assistantEntryIDs.append(assistantEntry.id)
+        }
         return AsyncStream { continuation in
             continuation.yield(.status(.working))
-            continuation.yield(
-                .entry(.init(kind: .assistant, text: response))
-            )
+            if let assistantEntry {
+                continuation.yield(.entry(assistantEntry))
+            }
             continuation.yield(.status(.completed))
             continuation.finish()
         }
