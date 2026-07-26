@@ -44,6 +44,14 @@ final class AppModel: ObservableObject {
                     .filter { $0.provider == .codex }
                     .map(\.id)
             )
+            let pendingPlanApprovalManagerIDs = Set(
+                saved.managerWorkflows.compactMap { managerID, workflow in
+                    workflow.stage == .planning
+                        && workflow.planApprovalEntryID != nil
+                        ? managerID
+                        : nil
+                }
+            )
             sessions = Dictionary(
                 uniqueKeysWithValues: saved.sessions.map { profileID, restoredSession in
                     var session = restoredSession
@@ -55,7 +63,11 @@ final class AppModel: ObservableObject {
                         || session.status == .working
                         || session.status == .needsApproval
                         || session.status == .needsAnswer {
-                        session.status = .stopped
+                        session.status =
+                            session.status == .needsApproval
+                                && pendingPlanApprovalManagerIDs.contains(profileID)
+                                ? .needsApproval
+                                : .stopped
                     }
                     if endedAtLegacyPermissionBoundary && session.status == .completed {
                         session.status = .needsAnswer
@@ -72,7 +84,10 @@ final class AppModel: ObservableObject {
                 guard workflow.stage != .completed else { return workflow }
                 var restored = workflow
                 restored.isPaused = true
-                restored.pauseReason = "Ready to resume after the app restart."
+                restored.pauseReason =
+                    workflow.planApprovalEntryID == nil
+                        ? "Ready to resume after the app restart."
+                        : "Waiting for your approval of the implementation plan."
                 return restored
             }
             selectedBotID = saved.selectedBotID ?? saved.profiles.first?.id
@@ -299,6 +314,9 @@ final class AppModel: ObservableObject {
         guard state.status != .launching, state.status != .working else {
             return
         }
+        guard managerWorkflows[profileID]?.planApprovalEntryID == nil else {
+            return
+        }
 
         let startedWorkflow = startWorkflowIfNeeded(
             request: trimmed,
@@ -319,7 +337,7 @@ final class AppModel: ObservableObject {
                 .init(
                     kind: .system,
                     text: "Managed workflow started",
-                    detail: "Planning → Building → Review → Fixes → Re-check → Documentation & draft PR"
+                    detail: "Planning → Your approval → Building → Review → Fixes → Re-check → Documentation & draft PR"
                 ),
                 to: profileID
             )
@@ -429,7 +447,10 @@ final class AppModel: ObservableObject {
                 save()
             }
             let runtimeMessage = runtimeMessage(
-                userMessage: trimmed,
+                userMessage: workflowRuntimeMessage(
+                    for: profile,
+                    userMessage: trimmed
+                ),
                 handoff: pendingHandoff
             )
             let responseStream = await runtime.respond(
@@ -445,6 +466,16 @@ final class AppModel: ObservableObject {
     }
 
     func resolveApproval(_ entryID: UUID, approved: Bool, for profileID: UUID) {
+        if managerWorkflows[profileID]?.stage == .planning,
+           managerWorkflows[profileID]?.planApprovalEntryID == entryID {
+            resolveWorkflowPlanApproval(
+                entryID,
+                approved: approved,
+                for: profileID
+            )
+            return
+        }
+
         guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
 
         let generation = runGenerations[profileID] ?? UUID()
@@ -456,6 +487,57 @@ final class AppModel: ObservableObject {
                 profile: runtimeProfile(for: profile)
             )
             consume(stream, for: profileID, generation: generation)
+        }
+    }
+
+    private func resolveWorkflowPlanApproval(
+        _ entryID: UUID,
+        approved: Bool,
+        for managerID: UUID
+    ) {
+        guard var workflow = managerWorkflows[managerID],
+              workflow.stage == .planning,
+              workflow.planApprovalEntryID == entryID,
+              var state = sessions[managerID],
+              let entryIndex = state.entries.firstIndex(where: {
+                  $0.id == entryID
+                      && $0.kind == .approval
+                      && $0.approvalState == .pending
+              }) else {
+            return
+        }
+
+        state.entries[entryIndex].approvalState =
+            approved ? .approved : .declined
+        workflow.planApprovalEntryID = nil
+        workflow.updatedAt = .now
+
+        if approved, let builderID = workflow.team.builderProfileID {
+            state.status = .completed
+            workflow.stage = .building
+            workflow.isPaused = false
+            workflow.pauseReason = nil
+            sessions[managerID] = state
+            managerWorkflows[managerID] = workflow
+            save()
+
+            let plan = workflow.implementationPlan
+                ?? latestAssistantText(for: managerID)
+            Task { [weak self] in
+                await self?.dispatchInitialBuild(
+                    workflow: workflow,
+                    managerSummary: plan,
+                    to: builderID
+                )
+            }
+        } else {
+            state.status = .needsAnswer
+            workflow.isPaused = true
+            workflow.pauseReason =
+                "Plan declined. Send feedback to the Manager to request a revised plan."
+            sessions[managerID] = state
+            managerWorkflows[managerID] = workflow
+            save()
         }
     }
 
@@ -610,6 +692,30 @@ final class AppModel: ObservableObject {
             return handoff.agentContext
         }
         return "\(handoff.agentContext)\n\nNext instruction:\n\(userMessage)"
+    }
+
+    private func workflowRuntimeMessage(
+        for profile: BotProfile,
+        userMessage: String
+    ) -> String {
+        guard profile.role == .manager,
+              let workflow = managerWorkflows[profile.id],
+              workflow.stage == .planning,
+              workflow.planApprovalEntryID == nil else {
+            return userMessage
+        }
+
+        return """
+        You are in the planning phase of a managed bl00p workflow.
+
+        Original request:
+        \(workflow.request)
+
+        Current user instruction or revision feedback:
+        \(userMessage)
+
+        Produce only a focused implementation plan with acceptance criteria and verification expectations. You may inspect the repository read-only for context. Do not edit files, run mutating commands, implement the plan, review code, commit, push, publish, or spawn or delegate to other agents. Finish after presenting the plan. bl00p will ask the user to approve it and will dispatch the approved plan to the configured visible Builder and Reviewer.
+        """
     }
 
     private func handoffDetail(_ package: GitHandoffPackage) -> String {
@@ -776,15 +882,10 @@ final class AppModel: ObservableObject {
 
         switch workflow.stage {
         case .planning:
-            guard let next = transitionWorkflow(managerID, to: .building),
-                  let builderID = next.team.builderProfileID else { return }
-            Task { [weak self] in
-                await self?.dispatchInitialBuild(
-                    workflow: next,
-                    managerSummary: summary,
-                    to: builderID
-                )
-            }
+            requestWorkflowPlanApproval(
+                managerID,
+                implementationPlan: summary
+            )
 
         case .building:
             guard let next = transitionWorkflow(managerID, to: .reviewing),
@@ -906,6 +1007,53 @@ final class AppModel: ObservableObject {
 
         case .completed:
             break
+        }
+    }
+
+    private func requestWorkflowPlanApproval(
+        _ managerID: UUID,
+        implementationPlan: String
+    ) {
+        guard var workflow = managerWorkflows[managerID],
+              workflow.stage == .planning else {
+            return
+        }
+
+        let approvalID = UUID()
+        workflow.implementationPlan = implementationPlan
+        workflow.planApprovalEntryID = approvalID
+        workflow.isPaused = true
+        workflow.pauseReason =
+            "Waiting for your approval of the implementation plan."
+        workflow.updatedAt = .now
+
+        var state = sessions[managerID] ?? AgentSessionState()
+        let previousStatus = state.status
+        state.status = .needsApproval
+        state.hasUnreadCompletion = false
+        state.entries.append(
+            .init(
+                id: approvalID,
+                kind: .approval,
+                title: "Approve implementation plan",
+                text: implementationPlan,
+                detail: "Approve to hand this plan to the Builder and continue the managed workflow. Decline to pause and send revision feedback.",
+                approvalState: .pending
+            )
+        )
+
+        sessions[managerID] = state
+        managerWorkflows[managerID] = workflow
+        save()
+
+        if notificationsArePrepared,
+           let notice = AgentAttentionNotice.transition(
+               from: previousStatus,
+               to: .needsApproval
+           ),
+           let manager = profiles.first(where: { $0.id == managerID }),
+           !isAppWindowActive() {
+            notifications?.post(notice, for: manager)
         }
     }
 

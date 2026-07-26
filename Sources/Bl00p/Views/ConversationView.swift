@@ -9,6 +9,8 @@ struct ConversationView: View {
     var body: some View {
         if let profile = model.selectedProfile {
             let session = model.session(for: profile.id)
+            let isAwaitingPlanApproval =
+                model.workflow(for: profile.id)?.planApprovalEntryID != nil
 
             VStack(spacing: 0) {
                 ConversationHeader(
@@ -55,7 +57,9 @@ struct ConversationView: View {
                     profileID: profile.id,
                     draft: $draft,
                     attachments: $attachments,
-                    isEnabled: session.status != .launching && session.status != .working,
+                    isEnabled: session.status != .launching
+                        && session.status != .working
+                        && !isAwaitingPlanApproval,
                     send: {
                         let outgoing = draft
                         let outgoingAttachments = attachments
@@ -197,7 +201,12 @@ private struct ConversationHeader: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            BotAvatar(name: profile.name, provider: profile.provider, size: 38)
+            BotAvatar(
+                name: profile.name,
+                provider: profile.provider,
+                role: profile.role,
+                size: 38
+            )
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
@@ -393,7 +402,12 @@ private struct TimelineEntryView: View {
 
     private var assistantMessage: some View {
         HStack(alignment: .top, spacing: 10) {
-            BotAvatar(name: profile.name, provider: profile.provider, size: 28)
+            BotAvatar(
+                name: profile.name,
+                provider: profile.provider,
+                role: profile.role,
+                size: 28
+            )
             VStack(alignment: .leading, spacing: 4) {
                 Text(profile.name)
                     .font(.bl00p(.caption1, weight: .semibold))

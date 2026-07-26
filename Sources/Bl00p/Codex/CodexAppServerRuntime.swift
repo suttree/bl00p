@@ -1033,33 +1033,47 @@ enum CodexThreadConfiguration {
     // Increment whenever the execution boundary changes. Persisted threads from
     // an older boundary must start fresh because app-server can retain their
     // original sandbox and environment across process restarts.
-    static let turnModeVersion = 2
+    static let turnModeVersion = 3
 
-    private static let runtimeInstructions = """
+    private static let writableRuntimeInstructions = """
     bl00p runtime capabilities:
     - Workspace file writes are enabled for the selected working directory.
     - If Git metadata, network access, or another necessary operation is blocked, request elevated permission through Codex instead of asking the user to run the command in Terminal.
     - Prefer the authenticated GitHub connected app for pull-request and repository mutations. A failing `gh auth status` is not a blocker when the connected app can perform the action.
     """
 
+    private static let readOnlyManagerRuntimeInstructions = """
+    bl00p Manager runtime boundary:
+    - The selected working directory is read-only.
+    - Do not request additional permissions, edit files, run mutating commands, or perform Git mutations.
+    - Do not spawn or delegate to hidden sub-agents. bl00p dispatches approved plans to the configured visible agents.
+    """
+
     static func parameters(
         profile: BotProfile,
         workingDirectory: String
     ) -> [String: JSONValue] {
+        let isReadOnlyManager = profile.role == .manager
         var parameters: [String: JSONValue] = [
             "cwd": .string(workingDirectory),
             "runtimeWorkspaceRoots": .array([.string(workingDirectory)]),
-            // Auto mode still needs Codex to emit approval requests for actions
-            // outside the workspace sandbox (including writes to .git). bl00p
-            // answers those requests automatically in handleServerRequest.
-            "approvalPolicy": .string("on-request"),
+            // Writable roles still emit approval requests for actions outside
+            // the workspace sandbox. Managers cannot escalate their read-only
+            // boundary, even when their saved approval mode is automatic.
+            "approvalPolicy": .string(
+                isReadOnlyManager ? "never" : "on-request"
+            ),
             "approvalsReviewer": .string("user"),
-            "sandbox": .string("workspace-write"),
+            "sandbox": .string(
+                isReadOnlyManager ? "read-only" : "workspace-write"
+            ),
             "developerInstructions": .string(
                 [
                     profile.instructions,
                     roleBoundary(for: profile.role),
-                    runtimeInstructions
+                    isReadOnlyManager
+                        ? readOnlyManagerRuntimeInstructions
+                        : writableRuntimeInstructions
                 ]
                     .filter { !$0.isEmpty }
                     .joined(separator: "\n\n")
@@ -1080,7 +1094,7 @@ enum CodexThreadConfiguration {
         case .publisher:
             "You are the documenter and PR writer. Update documentation, run final verification, commit the completed work, push the branch, and create a draft pull request when asked and approved."
         case .manager:
-            "You are a coordinator. Prepare implementation briefs and delivery summaries, but do not edit code, commit, push, or publish."
+            "You are a plan-only coordinator. Prepare implementation briefs and delivery summaries, but do not implement, review, edit code, commit, push, publish, or delegate to other agents yourself."
         }
     }
 }
