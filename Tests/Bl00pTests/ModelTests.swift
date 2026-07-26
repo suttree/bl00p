@@ -37,21 +37,27 @@ func themeAdaptsToSystemAppearanceWithLegibleBrandSurfaces() throws {
     let dark = try #require(NSAppearance(named: .darkAqua))
     let lightAccent = resolved(Bl00pTheme.accent, for: light)
     let darkAccent = resolved(Bl00pTheme.accent, for: dark)
+    let lightAccentText = resolved(Bl00pTheme.accentText, for: light)
+    let darkAccentText = resolved(Bl00pTheme.accentText, for: dark)
     let lightBubble = resolved(Bl00pTheme.userBubble, for: light)
     let darkBubble = resolved(Bl00pTheme.userBubble, for: dark)
     let lightApproval = resolved(Bl00pTheme.approvalBackground, for: light)
     let darkApproval = resolved(Bl00pTheme.approvalBackground, for: dark)
 
-    #expect(lightAccent != darkAccent)
+    for surface in [lightAccent, darkAccent, lightBubble, darkBubble] {
+        #expect(abs(surface.redComponent - 1.00) < 0.001)
+        #expect(abs(surface.greenComponent - 105.0 / 255.0) < 0.001)
+        #expect(abs(surface.blueComponent - 180.0 / 255.0) < 0.001)
+    }
     #expect(lightApproval != darkApproval)
     #expect(
         Bl00pTheme.sidebarColors(for: .light)
             != Bl00pTheme.sidebarColors(for: .dark)
     )
-    #expect(contrastRatio(lightBubble, .white) >= 4.5)
-    #expect(contrastRatio(darkBubble, .white) >= 4.5)
-    #expect(contrastRatio(lightAccent, lightApproval) >= 4.5)
-    #expect(contrastRatio(darkAccent, darkApproval) >= 4.5)
+    #expect(contrastRatio(lightBubble, Bl00pTheme.avatarInk) >= 4.5)
+    #expect(contrastRatio(darkBubble, Bl00pTheme.avatarInk) >= 4.5)
+    #expect(contrastRatio(lightAccentText, lightApproval) >= 4.5)
+    #expect(contrastRatio(darkAccentText, darkApproval) >= 4.5)
 
     for appearance in [light, dark] {
         let mint = resolved(Bl00pTheme.mint, for: appearance)

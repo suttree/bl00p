@@ -188,7 +188,7 @@ private struct TimelineEntryView: View {
                 tint: .orange
             )
         case .question:
-            eventCard(icon: "questionmark.bubble.fill", tint: .bl00pPink)
+            eventCard(icon: "questionmark.bubble.fill", tint: .bl00pPinkText)
         case .approval:
             approvalCard
         }
@@ -217,7 +217,7 @@ private struct TimelineEntryView: View {
                     Color.bl00pUserBubble,
                     in: RoundedRectangle(cornerRadius: 15, style: .continuous)
                 )
-                .foregroundStyle(.white)
+                .foregroundStyle(Color.bl00pAvatarInk)
         }
     }
 
@@ -300,7 +300,7 @@ private struct TimelineEntryView: View {
             HStack {
                 Label(entry.title ?? "Approval required", systemImage: "hand.raised.fill")
                     .font(.bl00p(.callout, weight: .bold))
-                    .foregroundStyle(Color.bl00pPink)
+                    .foregroundStyle(Color.bl00pPinkText)
                 Spacer()
                 if let state = entry.approvalState, state != .pending {
                     Text(state == .approved ? "Approved" : "Declined")
@@ -330,6 +330,7 @@ private struct TimelineEntryView: View {
                         resolveApproval(entry.id, true)
                     }
                     .buttonStyle(.borderedProminent)
+                    .foregroundStyle(Color.bl00pAvatarInk)
                 }
             }
         }
@@ -510,7 +511,7 @@ private struct ComposerView: View {
                 Button(action: send) {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(Color.bl00pAvatarInk)
                         .frame(width: 36, height: 36)
                         .background(Color.bl00pPink, in: Circle())
                 }
@@ -533,7 +534,7 @@ private struct ComposerView: View {
 
                 Text(characterCountLabel)
                     .foregroundStyle(
-                        didReachCharacterLimit ? Color.bl00pPink : .secondary
+                        didReachCharacterLimit ? Color.bl00pPinkText : .secondary
                     )
             }
             .font(.bl00p(.caption1))
