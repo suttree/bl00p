@@ -179,6 +179,7 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
     var requireApprovalBeforePush: Bool
     var approvalMode: ApprovalMode
     var modelID: String?
+    var worktree: GitWorktreeOwnership?
 
     init(
         id: UUID = UUID(),
@@ -190,7 +191,8 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
         loadProjectInstructions: Bool = true,
         requireApprovalBeforePush: Bool = true,
         approvalMode: ApprovalMode = .ask,
-        modelID: String? = nil
+        modelID: String? = nil,
+        worktree: GitWorktreeOwnership? = nil
     ) {
         self.id = id
         self.name = name
@@ -202,6 +204,7 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
         self.requireApprovalBeforePush = requireApprovalBeforePush
         self.approvalMode = approvalMode
         self.modelID = modelID
+        self.worktree = worktree
     }
 
     init(from decoder: Decoder) throws {
@@ -216,12 +219,20 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
         requireApprovalBeforePush = try container.decode(Bool.self, forKey: .requireApprovalBeforePush)
         approvalMode = try container.decodeIfPresent(ApprovalMode.self, forKey: .approvalMode) ?? .ask
         modelID = try container.decodeIfPresent(String.self, forKey: .modelID)
+        worktree = try container.decodeIfPresent(
+            GitWorktreeOwnership.self,
+            forKey: .worktree
+        )
     }
 
     var modelDisplayName: String {
         guard let modelID, !modelID.isEmpty else { return "Default model" }
         return provider.modelOptions.first(where: { $0.id == modelID })?.displayName
             ?? modelID
+    }
+
+    var runtimeWorkingDirectory: String {
+        worktree?.worktreePath ?? workingDirectory
     }
 
     static let defaults: [BotProfile] = [
@@ -252,6 +263,96 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
     ]
 }
 
+struct GitWorktreeOwnership: Codable, Hashable, Sendable {
+    var ownerProfileID: UUID
+    var repositoryPath: String
+    var worktreePath: String
+    var branch: String
+    var baseRevision: String
+}
+
+enum HandoffTestStatus: String, Codable, Hashable, Sendable {
+    case notRun
+    case passed
+    case failed
+
+    var label: String {
+        switch self {
+        case .notRun: "Not run"
+        case .passed: "Passed"
+        case .failed: "Failed"
+        }
+    }
+}
+
+struct GitHandoffPackage: Identifiable, Codable, Hashable, Sendable {
+    var id: UUID
+    var sourceProfileID: UUID
+    var sourceName: String
+    var repositoryPath: String
+    var worktreePath: String
+    var branch: String
+    var baseRevision: String
+    var headRevision: String
+    var taskContext: String
+    var testStatus: HandoffTestStatus
+    var testSummary: String
+    var workingTreeSummary: String
+    var createdAt: Date
+
+    init(
+        id: UUID = UUID(),
+        sourceProfileID: UUID,
+        sourceName: String,
+        repositoryPath: String,
+        worktreePath: String,
+        branch: String,
+        baseRevision: String,
+        headRevision: String,
+        taskContext: String,
+        testStatus: HandoffTestStatus,
+        testSummary: String,
+        workingTreeSummary: String,
+        createdAt: Date = .now
+    ) {
+        self.id = id
+        self.sourceProfileID = sourceProfileID
+        self.sourceName = sourceName
+        self.repositoryPath = repositoryPath
+        self.worktreePath = worktreePath
+        self.branch = branch
+        self.baseRevision = baseRevision
+        self.headRevision = headRevision
+        self.taskContext = taskContext
+        self.testStatus = testStatus
+        self.testSummary = testSummary
+        self.workingTreeSummary = workingTreeSummary
+        self.createdAt = createdAt
+    }
+
+    var agentContext: String {
+        """
+        A bl00p handoff package is attached to this task.
+
+        Source bot: \(sourceName)
+        Repository: \(repositoryPath)
+        Source branch: \(branch)
+        Source HEAD: \(headRevision)
+        Base revision: \(baseRevision)
+        Source worktree: \(worktreePath)
+
+        Task context:
+        \(taskContext)
+
+        Test state: \(testStatus.label)
+        \(testSummary)
+
+        Working tree:
+        \(workingTreeSummary)
+        """
+    }
+}
+
 struct ImageAttachment: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var path: String
@@ -274,6 +375,7 @@ enum TimelineKind: String, Codable, Sendable {
     case diff
     case question
     case approval
+    case handoff
 }
 
 enum ApprovalState: String, Codable, Sendable {
@@ -319,6 +421,7 @@ struct AgentSessionState: Codable, Sendable {
     var hasUnreadCompletion = false
     var sessionID: String?
     var codexTurnModeVersion: Int?
+    var pendingHandoff: GitHandoffPackage? = nil
 }
 
 struct PersistedAppState: Codable, Sendable {

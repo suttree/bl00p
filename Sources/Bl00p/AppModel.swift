@@ -11,6 +11,7 @@ final class AppModel: ObservableObject {
     @Published var isAddingBot = false
 
     private let runtime: any AgentRuntime
+    private let worktrees: any GitWorktreeManaging
     private let store: AppStateStore
     private let isAppWindowActive: () -> Bool
     private var notifications: (any AgentNotificationDelivering)?
@@ -20,6 +21,7 @@ final class AppModel: ObservableObject {
 
     init(
         runtime: any AgentRuntime = AgentRuntimeRouter(),
+        worktrees: any GitWorktreeManaging = GitWorktreeManager(),
         store: AppStateStore = AppStateStore(),
         notifications: (any AgentNotificationDelivering)? = nil,
         isAppWindowActive: @escaping () -> Bool = {
@@ -27,6 +29,7 @@ final class AppModel: ObservableObject {
         }
     ) {
         self.runtime = runtime
+        self.worktrees = worktrees
         self.store = store
         self.notifications = notifications
         self.isAppWindowActive = isAppWindowActive
@@ -123,6 +126,7 @@ final class AppModel: ObservableObject {
         guard var copy = profiles.first(where: { $0.id == profileID }) else { return }
         copy.id = UUID()
         copy.name += " Copy"
+        copy.worktree = nil
         add(copy)
     }
 
@@ -138,7 +142,7 @@ final class AppModel: ObservableObject {
         guard profiles.count > 1 else { return }
         if let profile = profiles.first(where: { $0.id == profileID }) {
             Task {
-                await runtime.stop(profile: profile)
+                await runtime.stop(profile: runtimeProfile(for: profile))
             }
         }
         connectedProfileIDs.remove(profileID)
@@ -153,7 +157,11 @@ final class AppModel: ObservableObject {
 
     func update(_ profile: BotProfile) {
         guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
-        profiles[index] = profile
+        var updated = profile
+        if profiles[index].workingDirectory != profile.workingDirectory {
+            updated.worktree = nil
+        }
+        profiles[index] = updated
         save()
     }
 
@@ -174,6 +182,7 @@ final class AppModel: ObservableObject {
         if panel.runModal() == .OK, let path = panel.url?.path,
            let index = profiles.firstIndex(where: { $0.id == profileID }) {
             profiles[index].workingDirectory = path
+            profiles[index].worktree = nil
             save()
         }
     }
@@ -193,9 +202,12 @@ final class AppModel: ObservableObject {
         }
 
         Task {
-            await runtime.stop(profile: profile)
+            await runtime.stop(profile: runtimeProfile(for: profile))
+            guard let preparedProfile = await prepareRuntimeProfile(profile) else {
+                return
+            }
             let stream = await runtime.start(
-                profile: profile,
+                profile: preparedProfile,
                 resumeThreadID: previousThreadID
             )
             consume(stream, for: profileID, generation: generation)
@@ -213,7 +225,7 @@ final class AppModel: ObservableObject {
         connectedProfileIDs.remove(profileID)
         runGenerations[profileID] = UUID()
         Task {
-            await runtime.stop(profile: profile)
+            await runtime.stop(profile: runtimeProfile(for: profile))
         }
         apply(.status(.stopped), to: profileID)
         append(
@@ -238,6 +250,7 @@ final class AppModel: ObservableObject {
             || currentState.status == .stopped
             || currentState.status == .failed
         let previousThreadID = currentState.sessionID
+        let pendingHandoff = currentState.pendingHandoff
         let generation = runGenerations[profileID] ?? UUID()
         runGenerations[profileID] = generation
 
@@ -258,11 +271,17 @@ final class AppModel: ObservableObject {
 
         Task { [weak self] in
             guard let self else { return }
+            guard let preparedProfile = await prepareRuntimeProfile(
+                profile,
+                handoff: pendingHandoff
+            ) else {
+                return
+            }
 
             if shouldLaunch {
-                await runtime.stop(profile: profile)
+                await runtime.stop(profile: runtimeProfile(for: profile))
                 let launchStream = await runtime.start(
-                    profile: profile,
+                    profile: preparedProfile,
                     resumeThreadID: previousThreadID
                 )
                 var reachedReady = false
@@ -287,10 +306,20 @@ final class AppModel: ObservableObject {
                 consume(launchStream, for: profileID, generation: generation)
             }
 
+            if pendingHandoff != nil {
+                var handoffConsumed = sessions[profileID] ?? AgentSessionState()
+                handoffConsumed.pendingHandoff = nil
+                sessions[profileID] = handoffConsumed
+                save()
+            }
+            let runtimeMessage = runtimeMessage(
+                userMessage: trimmed,
+                handoff: pendingHandoff
+            )
             let responseStream = await runtime.respond(
-                to: trimmed,
+                to: runtimeMessage,
                 attachments: attachments,
-                profile: profile
+                profile: preparedProfile
             )
             for await event in responseStream {
                 guard runGenerations[profileID] == generation else { return }
@@ -308,7 +337,7 @@ final class AppModel: ObservableObject {
             let stream = await runtime.resolveApproval(
                 entryID: entryID,
                 approved: approved,
-                profile: profile
+                profile: runtimeProfile(for: profile)
             )
             consume(stream, for: profileID, generation: generation)
         }
@@ -320,6 +349,75 @@ final class AppModel: ObservableObject {
             state.hasUnreadCompletion = false
             sessions[profileID] = state
             save()
+        }
+    }
+
+    func handoff(from sourceProfileID: UUID, to targetProfileID: UUID) {
+        guard sourceProfileID != targetProfileID,
+              let source = profiles.first(where: { $0.id == sourceProfileID }),
+              let target = profiles.first(where: { $0.id == targetProfileID }),
+              source.role == .builder,
+              source.worktree != nil,
+              sessions[sourceProfileID]?.status != .working,
+              sessions[sourceProfileID]?.status != .launching else { return }
+
+        let sourceSession = sessions[sourceProfileID] ?? AgentSessionState()
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let package = try await worktrees.makeHandoff(
+                    from: source,
+                    session: sourceSession
+                )
+                await runtime.stop(profile: runtimeProfile(for: target))
+                connectedProfileIDs.remove(targetProfileID)
+                runGenerations[targetProfileID] = UUID()
+
+                if let targetIndex = profiles.firstIndex(
+                    where: { $0.id == targetProfileID }
+                ) {
+                    profiles[targetIndex].workingDirectory = package.repositoryPath
+                    if profiles[targetIndex].role == .builder {
+                        profiles[targetIndex].worktree = nil
+                    }
+                }
+
+                var targetSession = sessions[targetProfileID] ?? AgentSessionState()
+                targetSession.status = .stopped
+                targetSession.sessionID = nil
+                targetSession.pendingHandoff = package
+                targetSession.entries.append(
+                    .init(
+                        kind: .handoff,
+                        title: "Handoff from \(source.name)",
+                        text: package.taskContext,
+                        detail: handoffDetail(package)
+                    )
+                )
+                sessions[targetProfileID] = targetSession
+
+                var updatedSourceSession =
+                    sessions[sourceProfileID] ?? AgentSessionState()
+                updatedSourceSession.entries.append(
+                    .init(
+                        kind: .system,
+                        text: "Handoff prepared for \(target.name)",
+                        detail: "\(package.branch) · Tests \(package.testStatus.label.lowercased())"
+                    )
+                )
+                sessions[sourceProfileID] = updatedSourceSession
+                selectedBotID = targetProfileID
+                save()
+            } catch {
+                append(
+                    .init(
+                        kind: .system,
+                        text: "Could not create handoff",
+                        detail: error.localizedDescription
+                    ),
+                    to: sourceProfileID
+                )
+            }
         }
     }
 
@@ -335,6 +433,70 @@ final class AppModel: ObservableObject {
                 self?.apply(event, to: profileID)
             }
         }
+    }
+
+    private func prepareRuntimeProfile(
+        _ profile: BotProfile,
+        handoff: GitHandoffPackage? = nil
+    ) async -> BotProfile? {
+        guard profile.role == .builder, !profile.workingDirectory.isEmpty else {
+            return runtimeProfile(for: profile)
+        }
+
+        do {
+            let ownership = try await worktrees.prepareWorktree(
+                for: profile,
+                startingPoint: handoff?.branch,
+                handoffID: handoff?.id
+            )
+            var updated = profile
+            updated.workingDirectory = ownership.repositoryPath
+            updated.worktree = ownership
+            if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
+                profiles[index] = updated
+                save()
+            }
+            return runtimeProfile(for: updated)
+        } catch {
+            apply(.status(.failed), to: profile.id)
+            append(
+                .init(
+                    kind: .system,
+                    text: "Could not prepare isolated worktree",
+                    detail: error.localizedDescription
+                ),
+                to: profile.id
+            )
+            return nil
+        }
+    }
+
+    private func runtimeProfile(for profile: BotProfile) -> BotProfile {
+        var runtimeProfile = profile
+        runtimeProfile.workingDirectory = profile.runtimeWorkingDirectory
+        return runtimeProfile
+    }
+
+    private func runtimeMessage(
+        userMessage: String,
+        handoff: GitHandoffPackage?
+    ) -> String {
+        guard let handoff else { return userMessage }
+        if userMessage.isEmpty {
+            return handoff.agentContext
+        }
+        return "\(handoff.agentContext)\n\nNext instruction:\n\(userMessage)"
+    }
+
+    private func handoffDetail(_ package: GitHandoffPackage) -> String {
+        """
+        Branch: \(package.branch)
+        HEAD: \(package.headRevision)
+        Tests: \(package.testStatus.label)
+        \(package.testSummary)
+        Working tree:
+        \(package.workingTreeSummary)
+        """
     }
 
     private func apply(_ event: AgentEvent, to profileID: UUID) {

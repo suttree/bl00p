@@ -14,7 +14,11 @@ struct ConversationView: View {
                 ConversationHeader(
                     profile: profile,
                     session: session,
+                    handoffTargets: model.profiles.filter { $0.id != profile.id },
                     stop: { model.stop(profile.id) },
+                    handoff: { targetID in
+                        model.handoff(from: profile.id, to: targetID)
+                    },
                     showSettings: { model.isInspectorVisible.toggle() }
                 )
 
@@ -69,7 +73,9 @@ struct ConversationView: View {
 private struct ConversationHeader: View {
     let profile: BotProfile
     let session: AgentSessionState
+    let handoffTargets: [BotProfile]
     let stop: () -> Void
+    let handoff: (UUID) -> Void
     let showSettings: () -> Void
 
     private var isRunning: Bool {
@@ -96,6 +102,29 @@ private struct ConversationHeader: View {
 
             Spacer()
 
+            if profile.role == .builder,
+               profile.worktree != nil,
+               !handoffTargets.isEmpty {
+                Menu {
+                    ForEach(handoffTargets) { target in
+                        Button {
+                            handoff(target.id)
+                        } label: {
+                            Label(
+                                "\(target.name) · \(target.role.displayName)",
+                                systemImage: "arrowshape.turn.up.right"
+                            )
+                        }
+                    }
+                } label: {
+                    Label("Hand off", systemImage: "arrowshape.turn.up.right")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(isRunning)
+                .help("Package this branch, task, and test state for another bot")
+            }
+
             if isRunning {
                 Button("Stop", systemImage: "stop.fill", action: stop)
                     .buttonStyle(.bordered)
@@ -113,6 +142,9 @@ private struct ConversationHeader: View {
     }
 
     private var directoryLabel: String {
+        if let worktree = profile.worktree {
+            return "\(worktree.branch) · \(worktree.worktreePath)"
+        }
         if profile.workingDirectory.isEmpty {
             return "Working directory not set"
         }
@@ -191,6 +223,8 @@ private struct TimelineEntryView: View {
             eventCard(icon: "questionmark.bubble.fill", tint: .bl00pPinkText)
         case .approval:
             approvalCard
+        case .handoff:
+            eventCard(icon: "arrowshape.turn.up.right.fill", tint: .bl00pPinkText)
         }
     }
 

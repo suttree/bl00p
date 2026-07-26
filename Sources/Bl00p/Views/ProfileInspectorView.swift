@@ -34,10 +34,20 @@ struct ProfileInspectorView: View {
                     .frame(maxWidth: 180)
                 }
 
+                LabeledContent("Role") {
+                    Picker("Role", selection: $profile.role) {
+                        ForEach(AgentRole.allCases) { role in
+                            Text(role.displayName).tag(role)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 180)
+                }
+
                 Divider()
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("WORKING DIRECTORY")
+                    Text("REPOSITORY")
                         .font(.bl00p(.caption2, weight: .bold))
                         .tracking(1.1)
                         .foregroundStyle(.secondary)
@@ -55,6 +65,25 @@ struct ProfileInspectorView: View {
                         }
                         .buttonStyle(.bordered)
                         .help("Browse for a working directory")
+                    }
+
+                    if let worktree = profile.worktree {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Label(worktree.branch, systemImage: "arrow.triangle.branch")
+                                .font(.bl00p(.caption1, weight: .semibold))
+                            Text(worktree.worktreePath)
+                                .font(.bl00p(.caption2, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .textSelection(.enabled)
+                        }
+                        .padding(.top, 4)
+                    } else if profile.role == .builder {
+                        Text(
+                            "An isolated branch and worktree will be created automatically when this bot starts."
+                        )
+                            .font(.bl00p(.caption1))
+                            .foregroundStyle(.secondary)
                     }
                 }
 

@@ -33,6 +33,12 @@ struct AddBotSheet: View {
                     }
                 }
 
+                Picker("Role", selection: $draft.role) {
+                    ForEach(AgentRole.allCases) { role in
+                        Text(role.displayName).tag(role)
+                    }
+                }
+
                 TextEditor(text: $draft.instructions)
                     .font(.bl00p(.body, sizeOffset: 1))
                     .frame(minHeight: 130)
@@ -66,7 +72,7 @@ struct AddBotSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 520, height: 490)
+        .frame(width: 520, height: 530)
         .font(.bl00p(.body, sizeOffset: 1))
         .tint(.bl00pPink)
         .onAppear {
@@ -85,6 +91,7 @@ struct AddBotSheet: View {
 struct NewBotDraft {
     var name = AgentProvider.codex.displayName
     private(set) var provider = AgentProvider.codex
+    var role = AgentProvider.codex.defaultRole
     var modelID = ""
     var instructions = ""
 
@@ -94,9 +101,13 @@ struct NewBotDraft {
 
     mutating func selectProvider(_ newProvider: AgentProvider) {
         let previousProvider = provider
+        let wasUsingDefaultRole = role == previousProvider.defaultRole
         provider = newProvider
         if name == previousProvider.displayName || name == "New Bot" {
             name = newProvider.displayName
+        }
+        if wasUsingDefaultRole {
+            role = newProvider.defaultRole
         }
         modelID = ""
     }
@@ -105,7 +116,7 @@ struct NewBotDraft {
         BotProfile(
             name: trimmedName,
             provider: provider,
-            role: provider.defaultRole,
+            role: role,
             instructions: instructions,
             modelID: modelID.isEmpty ? nil : modelID
         )
