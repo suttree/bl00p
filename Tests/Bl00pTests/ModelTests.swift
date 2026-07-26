@@ -823,13 +823,21 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     let store = AppStateStore(
         fileURL: directory.appendingPathComponent("state.json")
     )
+    let olderManagerEntry = TimelineEntry(
+        kind: .assistant,
+        text: "Earlier unrelated Manager guidance."
+    )
+    var initialSessions = Dictionary(
+        uniqueKeysWithValues: [manager, builder, reviewer, publisher]
+            .map { ($0.id, AgentSessionState()) }
+    )
+    initialSessions[managerID] = AgentSessionState(
+        entries: [olderManagerEntry]
+    )
     store.save(
         PersistedAppState(
             profiles: [manager, builder, reviewer, publisher],
-            sessions: Dictionary(
-                uniqueKeysWithValues: [manager, builder, reviewer, publisher]
-                    .map { ($0.id, AgentSessionState()) }
-            ),
+            sessions: initialSessions,
             selectedBotID: managerID
         )
     )
@@ -856,6 +864,19 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
             $0.kind == .approval && $0.approvalState == .pending
         })
     )
+    let planText = "Implement the feature with persistence and tests."
+    let managerEntries = model.session(for: managerID).entries
+    let displayedPlanEntries = managerEntries.filter {
+        $0.text == planText
+    }
+    #expect(displayedPlanEntries.count == 1)
+    #expect(displayedPlanEntries.first?.kind == .approval)
+    #expect(displayedPlanEntries.first?.id == approvalEntry.id)
+    #expect(managerEntries.contains(where: { $0.id == olderManagerEntry.id }))
+    #expect(
+        managerEntries.first(where: { $0.id == olderManagerEntry.id })?.text
+            == olderManagerEntry.text
+    )
     #expect(awaitingApproval.stage == .planning)
     #expect(awaitingApproval.isPaused)
     #expect(
@@ -864,7 +885,7 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     )
     #expect(
         awaitingApproval.implementationPlan
-            == "Implement the feature with persistence and tests."
+            == planText
     )
     let planningCalls = await runtime.calls
     #expect(planningCalls.map(\.role) == [.manager])
@@ -912,6 +933,7 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
             ]
     )
     #expect(calls[1].message.contains("Manager brief:"))
+    #expect(calls[1].message.contains(planText))
     #expect(calls[2].message.contains("Source branch: \(ownership.branch)"))
     #expect(calls[3].message.contains("Review finding"))
     #expect(calls[4].message.contains("Re-check the updated"))
@@ -982,6 +1004,12 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
             $0.kind == .approval && $0.approvalState == .pending
         })
     )
+    let initialPlan = "Implement the feature with persistence and tests."
+    #expect(
+        model.session(for: manager.id).entries.filter {
+            $0.text == initialPlan
+        }.map(\.kind) == [.approval]
+    )
     let restoredModel = AppModel(runtime: runtime, store: store)
     #expect(restoredModel.session(for: manager.id).status == .needsApproval)
     #expect(
@@ -1012,6 +1040,62 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
     #expect(restoredModel.session(for: manager.id).status == .needsAnswer)
     #expect(await runtime.calls.map(\.role) == [.manager])
     #expect(await runtime.approvalResolutionCount == 0)
+
+    let resolvedRestoredModel = AppModel(runtime: runtime, store: store)
+    let restoredDeclinedEntry = try #require(
+        resolvedRestoredModel.session(for: manager.id).entries.first(where: {
+            $0.id == approvalEntry.id
+        })
+    )
+    #expect(restoredDeclinedEntry.approvalState == .declined)
+    #expect(
+        resolvedRestoredModel.session(for: manager.id).entries.filter {
+            $0.text == initialPlan
+        }.map(\.kind) == [.approval]
+    )
+
+    resolvedRestoredModel.send(
+        "Revise the plan to include restoration coverage",
+        to: manager.id
+    )
+    for _ in 0..<100
+        where resolvedRestoredModel.session(for: manager.id).status
+            != .needsApproval {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let revisedPlan =
+        "Revised plan: implement the feature with restoration coverage."
+    let revisedApproval = try #require(
+        resolvedRestoredModel.session(for: manager.id).entries.last(where: {
+            $0.kind == .approval && $0.approvalState == .pending
+        })
+    )
+    let revisedEntries = resolvedRestoredModel.session(for: manager.id).entries
+    #expect(revisedApproval.text == revisedPlan)
+    #expect(revisedEntries.filter { $0.text == revisedPlan }.count == 1)
+    #expect(
+        revisedEntries.filter { $0.kind == .approval }.map(\.approvalState)
+            == [.declined, .pending]
+    )
+    #expect(
+        revisedEntries.contains(where: {
+            $0.kind == .assistant
+                && ($0.text == initialPlan || $0.text == revisedPlan)
+        }) == false
+    )
+
+    let revisedRestoredModel = AppModel(runtime: runtime, store: store)
+    #expect(revisedRestoredModel.session(for: manager.id).status == .needsApproval)
+    #expect(
+        revisedRestoredModel.workflow(for: manager.id)?.implementationPlan
+            == revisedPlan
+    )
+    #expect(
+        revisedRestoredModel.session(for: manager.id).entries.first(where: {
+            $0.id == revisedApproval.id
+        })?.approvalState == .pending
+    )
 }
 
 @MainActor
@@ -2343,9 +2427,14 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
         let response: String
         switch profile.role {
         case .manager:
-            response = count == 0
-                ? "Implement the feature with persistence and tests."
-                : "Complete: [draft PR](https://github.com/suttree/bl00p/pull/99)"
+            if message.contains("planning phase") {
+                response = count == 0
+                    ? "Implement the feature with persistence and tests."
+                    : "Revised plan: implement the feature with restoration coverage."
+            } else {
+                response =
+                    "Complete: [draft PR](https://github.com/suttree/bl00p/pull/99)"
+            }
         case .builder:
             response = count == 0
                 ? "Implementation committed and tests passed."

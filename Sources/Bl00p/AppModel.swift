@@ -882,9 +882,13 @@ final class AppModel: ObservableObject {
 
         switch workflow.stage {
         case .planning:
+            guard let planEntry = latestAssistantEntry(for: profileID) else {
+                return
+            }
             requestWorkflowPlanApproval(
                 managerID,
-                implementationPlan: summary
+                implementationPlan: planEntry.text,
+                replacingAssistantEntryID: planEntry.id
             )
 
         case .building:
@@ -1012,34 +1016,36 @@ final class AppModel: ObservableObject {
 
     private func requestWorkflowPlanApproval(
         _ managerID: UUID,
-        implementationPlan: String
+        implementationPlan: String,
+        replacingAssistantEntryID assistantEntryID: UUID
     ) {
         guard var workflow = managerWorkflows[managerID],
-              workflow.stage == .planning else {
+              workflow.stage == .planning,
+              var state = sessions[managerID],
+              let entryIndex = state.entries.firstIndex(where: {
+                  $0.id == assistantEntryID && $0.kind == .assistant
+              }) else {
             return
         }
 
-        let approvalID = UUID()
         workflow.implementationPlan = implementationPlan
-        workflow.planApprovalEntryID = approvalID
+        workflow.planApprovalEntryID = assistantEntryID
         workflow.isPaused = true
         workflow.pauseReason =
             "Waiting for your approval of the implementation plan."
         workflow.updatedAt = .now
 
-        var state = sessions[managerID] ?? AgentSessionState()
         let previousStatus = state.status
         state.status = .needsApproval
         state.hasUnreadCompletion = false
-        state.entries.append(
-            .init(
-                id: approvalID,
-                kind: .approval,
-                title: "Approve implementation plan",
-                text: implementationPlan,
-                detail: "Approve to hand this plan to the Builder and continue the managed workflow. Decline to pause and send revision feedback.",
-                approvalState: .pending
-            )
+        state.entries[entryIndex] = .init(
+            id: assistantEntryID,
+            kind: .approval,
+            title: "Approve implementation plan",
+            text: implementationPlan,
+            detail: "Approve to hand this plan to the Builder and continue the managed workflow. Decline to pause and send revision feedback.",
+            timestamp: state.entries[entryIndex].timestamp,
+            approvalState: .pending
         )
 
         sessions[managerID] = state
@@ -1319,10 +1325,14 @@ final class AppModel: ObservableObject {
         performSend(runtimeMessage, to: targetProfileID)
     }
 
+    private func latestAssistantEntry(for profileID: UUID) -> TimelineEntry? {
+        sessions[profileID]?.entries.last(where: {
+            $0.kind == .assistant && !$0.text.isEmpty
+        })
+    }
+
     private func latestAssistantText(for profileID: UUID) -> String {
-        sessions[profileID]?.entries
-            .last(where: { $0.kind == .assistant && !$0.text.isEmpty })?
-            .text
+        latestAssistantEntry(for: profileID)?.text
             ?? "No assistant summary was captured."
     }
 
