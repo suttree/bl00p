@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SidebarView: View {
@@ -5,6 +6,7 @@ struct SidebarView: View {
     let windowColorScheme: ColorScheme
     @State private var renameTargetID: UUID?
     @State private var renameDraft = ""
+    @FocusState private var isRenameFieldFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -73,24 +75,42 @@ struct SidebarView: View {
                 get: { renameTargetID != nil },
                 set: { isPresented in
                     if !isPresented {
+                        isRenameFieldFocused = false
                         renameTargetID = nil
                     }
                 }
             )
         ) {
             TextField("Bot name", text: $renameDraft)
+                .focused($isRenameFieldFocused)
             Button("Cancel", role: .cancel) {
+                isRenameFieldFocused = false
                 renameTargetID = nil
             }
             Button("Rename") {
                 if let renameTargetID {
                     model.rename(renameTargetID, to: renameDraft)
                 }
+                isRenameFieldFocused = false
                 renameTargetID = nil
             }
             .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } message: {
             Text("Choose the name shown in the sidebar and conversation.")
+        }
+        .onChange(of: renameTargetID) { _, targetID in
+            guard targetID != nil else {
+                isRenameFieldFocused = false
+                return
+            }
+
+            // The native alert restores focus to Cancel while its sheet appears.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                if renameTargetID != nil {
+                    isRenameFieldFocused = true
+                    focusRenameTextField()
+                }
+            }
         }
         .alert(
             "Could not delete bot",
@@ -102,6 +122,29 @@ struct SidebarView: View {
             Button("OK") {}
         } message: {
             Text(model.profileDeletionError ?? "")
+        }
+    }
+
+    private func focusRenameTextField() {
+        func renameTextField(in view: NSView) -> NSTextField? {
+            if let textField = view as? NSTextField,
+               textField.placeholderString == "Bot name",
+               textField.window?.sheetParent != nil {
+                return textField
+            }
+
+            return view.subviews.lazy
+                .compactMap(renameTextField(in:))
+                .first
+        }
+
+        let textField = NSApp.windows.lazy
+            .compactMap(\.contentView)
+            .compactMap(renameTextField(in:))
+            .first
+
+        if let textField {
+            textField.window?.makeFirstResponder(textField)
         }
     }
 
