@@ -2,17 +2,14 @@ import SwiftUI
 
 struct AddBotSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var name = AgentProvider.codex.displayName
-    @State private var provider = AgentProvider.codex
-    @State private var modelID = ""
-    @State private var instructions = ""
+    @State private var draft = NewBotDraft()
 
     let add: (BotProfile) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack(spacing: 12) {
-                BotAvatar(name: name, provider: provider, size: 44)
+                BotAvatar(name: draft.name, provider: draft.provider, size: 44)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Add a bot")
                         .font(.bl00p(.title2, weight: .bold))
@@ -22,24 +19,24 @@ struct AddBotSheet: View {
             }
 
             Form {
-                TextField("Name", text: $name)
+                TextField("Name", text: $draft.name)
 
-                Picker("Provider", selection: $provider) {
+                Picker("Provider", selection: providerSelection) {
                     ForEach(AgentProvider.allCases) { item in
                         Text(item.displayName).tag(item)
                     }
                 }
 
-                Picker("Model", selection: $modelID) {
-                    ForEach(provider.modelOptions) { option in
+                Picker("Model", selection: $draft.modelID) {
+                    ForEach(draft.provider.modelOptions) { option in
                         Text(option.displayName).tag(option.id)
                     }
                 }
 
-                TextEditor(text: $instructions)
+                TextEditor(text: $draft.instructions)
                     .frame(minHeight: 130)
                     .overlay(alignment: .topLeading) {
-                        if instructions.isEmpty {
+                        if draft.instructions.isEmpty {
                             Text("Role prompt and working guidelines…")
                                 .foregroundStyle(.tertiary)
                                 .padding(.top, 8)
@@ -58,29 +55,55 @@ struct AddBotSheet: View {
                 .keyboardShortcut(.cancelAction)
 
                 Button("Add Bot") {
-                    add(
-                        BotProfile(
-                            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-                            provider: provider,
-                            role: provider.defaultRole,
-                            instructions: instructions,
-                            modelID: modelID.isEmpty ? nil : modelID
-                        )
-                    )
+                    add(draft.profile())
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(draft.trimmedName.isEmpty)
             }
         }
         .padding(24)
         .frame(width: 520, height: 490)
         .tint(.bl00pPink)
-        .onChange(of: provider) { previous, current in
-            if name == previous.displayName || name == "New Bot" {
-                name = current.displayName
-            }
-            modelID = ""
+        .onAppear {
+            draft = NewBotDraft()
         }
+    }
+
+    private var providerSelection: Binding<AgentProvider> {
+        Binding(
+            get: { draft.provider },
+            set: { draft.selectProvider($0) }
+        )
+    }
+}
+
+struct NewBotDraft {
+    var name = AgentProvider.codex.displayName
+    private(set) var provider = AgentProvider.codex
+    var modelID = ""
+    var instructions = ""
+
+    var trimmedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    mutating func selectProvider(_ newProvider: AgentProvider) {
+        let previousProvider = provider
+        provider = newProvider
+        if name == previousProvider.displayName || name == "New Bot" {
+            name = newProvider.displayName
+        }
+        modelID = ""
+    }
+
+    func profile() -> BotProfile {
+        BotProfile(
+            name: trimmedName,
+            provider: provider,
+            role: provider.defaultRole,
+            instructions: instructions,
+            modelID: modelID.isEmpty ? nil : modelID
+        )
     }
 }

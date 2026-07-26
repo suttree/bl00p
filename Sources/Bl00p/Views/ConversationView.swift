@@ -34,6 +34,7 @@ struct ConversationView: View {
                 }
 
                 ComposerView(
+                    profileID: profile.id,
                     draft: $draft,
                     attachments: $attachments,
                     isEnabled: session.status != .launching && session.status != .working,
@@ -448,6 +449,7 @@ private struct AttachmentThumbnail: View {
 }
 
 private struct ComposerView: View {
+    let profileID: UUID
     @Binding var draft: String
     @Binding var attachments: [ImageAttachment]
     let isEnabled: Bool
@@ -455,6 +457,7 @@ private struct ComposerView: View {
     @State private var isDropTargeted = false
     @State private var editorWidth: CGFloat = 600
     @State private var didReachCharacterLimit = false
+    @FocusState private var isEditorFocused: Bool
 
     private var editorHeight: CGFloat {
         ComposerTextMetrics.editorHeight(
@@ -478,6 +481,7 @@ private struct ComposerView: View {
 
             HStack(alignment: .bottom, spacing: 10) {
                 TextEditor(text: limitedDraft)
+                    .focused($isEditorFocused)
                     .font(.bl00p(.body))
                     .scrollContentBackground(.hidden)
                     .frame(height: editorHeight)
@@ -550,6 +554,10 @@ private struct ComposerView: View {
             addImages(urls)
         } isTargeted: { targeted in
             isDropTargeted = targeted
+        }
+        .task(id: profileID) {
+            await Task.yield()
+            isEditorFocused = true
         }
     }
 

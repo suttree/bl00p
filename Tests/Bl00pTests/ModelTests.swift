@@ -16,6 +16,20 @@ func providersChooseSensibleHiddenRolesForNewBots() {
 }
 
 @Test
+func addBotDraftSubmitsTheProviderCurrentlyShown() {
+    var draft = NewBotDraft()
+    draft.selectProvider(.claude)
+    draft.selectProvider(.codex)
+
+    let profile = draft.profile()
+
+    #expect(draft.provider == .codex)
+    #expect(profile.provider == .codex)
+    #expect(profile.name == "Codex")
+    #expect(profile.role == .reviewer)
+}
+
+@Test
 func attentionStatesAreExplicit() {
     #expect(AgentStatus.needsApproval.needsAttention)
     #expect(AgentStatus.needsAnswer.needsAttention)
