@@ -684,7 +684,7 @@ func handoffPackageIsDeliveredWithTheRecipientsNextMessage() async throws {
     #expect(model.selectedBotID == target.id)
     #expect(model.session(for: target.id).entries.last?.kind == .handoff)
     #expect(model.profiles.first(where: { $0.id == target.id })?.workingDirectory
-        == package.repositoryPath)
+        == package.worktreePath)
 
     model.send("Review this implementation", to: target.id)
     for _ in 0..<30 where await runtime.messages.isEmpty {
@@ -696,6 +696,317 @@ func handoffPackageIsDeliveredWithTheRecipientsNextMessage() async throws {
     #expect(delivered.contains("Test state: Passed"))
     #expect(delivered.contains("Next instruction:\nReview this implementation"))
     #expect(model.session(for: target.id).pendingHandoff == nil)
+}
+
+@MainActor
+@Test
+func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-manager-workflow-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/managed-feature",
+        baseRevision: "abc123"
+    )
+    let package = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "def456",
+        taskContext: "Add optional orchestration",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        workingTreeSummary: "Clean"
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate the team.",
+        workingDirectory: "/tmp/project",
+        managerTeam: ManagerTeamConfiguration(
+            builderProfileID: builderID,
+            reviewerProfileID: reviewerID,
+            publisherProfileID: publisherID
+        )
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement the work.",
+        workingDirectory: "/tmp/project"
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review the work.",
+        workingDirectory: "/tmp/project"
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Document and publish the work.",
+        workingDirectory: "/tmp/project"
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer, publisher],
+            sessions: Dictionary(
+                uniqueKeysWithValues: [manager, builder, reviewer, publisher]
+                    .map { ($0.id, AgentSessionState()) }
+            ),
+            selectedBotID: managerID
+        )
+    )
+    let runtime = OrchestrationRecordingRuntime()
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            package: package,
+            preparedOwnership: ownership
+        ),
+        store: store
+    )
+
+    model.send("Add optional orchestration", to: managerID)
+
+    for _ in 0..<200
+        where model.workflow(for: managerID)?.stage != .completed {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let workflow = try #require(model.workflow(for: managerID))
+    let calls = await runtime.calls
+    #expect(workflow.stage == .completed)
+    #expect(workflow.branch == ownership.branch)
+    #expect(
+        workflow.pullRequestURL
+            == "https://github.com/suttree/bl00p/pull/99"
+    )
+    #expect(
+        calls.map(\.role)
+            == [
+                .manager,
+                .builder,
+                .reviewer,
+                .builder,
+                .reviewer,
+                .publisher,
+                .manager
+            ]
+    )
+    #expect(calls[1].message.contains("Manager brief:"))
+    #expect(calls[2].message.contains("Source branch: \(ownership.branch)"))
+    #expect(calls[3].message.contains("Review finding"))
+    #expect(calls[4].message.contains("Re-check the updated"))
+    #expect(calls[5].message.contains("create a draft pull request"))
+    #expect(calls[6].message.contains("https://github.com/suttree/bl00p/pull/99"))
+    #expect(
+        model.profiles.first(where: { $0.id == reviewerID })?
+            .workingDirectory == ownership.worktreePath
+    )
+    #expect(
+        model.profiles.first(where: { $0.id == publisherID })?
+            .workingDirectory == ownership.worktreePath
+    )
+}
+
+@MainActor
+@Test
+func managerWithoutATeamRemainsAStandaloneBot() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-standalone-manager-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let manager = BotProfile(
+        name: "Solo Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Help plan work."
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager],
+            sessions: [manager.id: AgentSessionState()],
+            selectedBotID: manager.id
+        )
+    )
+    let runtime = ImmediateRecordingRuntime()
+    let model = AppModel(runtime: runtime, store: store)
+
+    model.send("Help me scope this change", to: manager.id)
+    for _ in 0..<30
+        where model.session(for: manager.id).status != .completed {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(model.workflow(for: manager.id) == nil)
+    #expect(await runtime.responseCount == 1)
+    #expect(
+        model.session(for: manager.id).entries.map(\.kind)
+            == [.user, .assistant]
+    )
+}
+
+@MainActor
+@Test
+func managedPublishingPausesUntilADraftPRURLIsReturned() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-publisher-gate-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    var builder = BotProfile.defaults[0]
+    var reviewer = BotProfile.defaults[1]
+    var publisher = BotProfile.defaults[2]
+    builder.id = UUID()
+    reviewer.id = UUID()
+    publisher.id = UUID()
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builder.id,
+        reviewerProfileID: reviewer.id,
+        publisherProfileID: publisher.id
+    )
+    let manager = BotProfile(
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: manager.id,
+        team: team,
+        request: "Ship the feature",
+        stage: .publishing
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer, publisher],
+            sessions: [
+                manager.id: AgentSessionState(),
+                builder.id: AgentSessionState(),
+                reviewer.id: AgentSessionState(),
+                publisher.id: AgentSessionState()
+            ],
+            selectedBotID: publisher.id,
+            managerWorkflows: [manager.id: workflow]
+        )
+    )
+    let model = AppModel(
+        runtime: ImmediateRecordingRuntime(),
+        store: store
+    )
+
+    model.send("Finish publishing", to: publisher.id)
+    for _ in 0..<30
+        where model.session(for: publisher.id).status != .completed {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let paused = try #require(model.workflow(for: manager.id))
+    #expect(paused.stage == .publishing)
+    #expect(paused.isPaused)
+    #expect(paused.pauseReason?.contains("without a draft PR URL") == true)
+    #expect(
+        model.session(for: publisher.id).entries.last?.title
+            == "Draft PR URL required"
+    )
+}
+
+@MainActor
+@Test
+func deletingAnAssignedBotClearsTheManagersStaleTeamReference() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-manager-delete-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    var builder = BotProfile.defaults[0]
+    var reviewer = BotProfile.defaults[1]
+    var publisher = BotProfile.defaults[2]
+    builder.id = UUID()
+    reviewer.id = UUID()
+    publisher.id = UUID()
+    let manager = BotProfile(
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: ManagerTeamConfiguration(
+            builderProfileID: builder.id,
+            reviewerProfileID: reviewer.id,
+            publisherProfileID: publisher.id
+        )
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer, publisher],
+            sessions: Dictionary(
+                uniqueKeysWithValues: [manager, builder, reviewer, publisher]
+                    .map { ($0.id, AgentSessionState()) }
+            ),
+            selectedBotID: manager.id
+        )
+    )
+    let model = AppModel(runtime: DemoAgentRuntime(), store: store)
+
+    model.delete(builder.id)
+
+    let updatedManager = try #require(
+        model.profiles.first(where: { $0.id == manager.id })
+    )
+    #expect(updatedManager.managerTeam?.builderProfileID == nil)
+    #expect(updatedManager.managerTeam?.reviewerProfileID == reviewer.id)
+    #expect(updatedManager.managerTeam?.publisherProfileID == publisher.id)
+    #expect(!model.isManagerTeamReady(manager.id))
+    #expect(
+        store.load()?
+            .profiles
+            .first(where: { $0.id == manager.id })?
+            .managerTeam?
+            .builderProfileID == nil
+    )
 }
 
 @MainActor
@@ -1532,6 +1843,188 @@ func aLongLivedStartupStreamDoesNotBlockTheFirstTurn() async throws {
     try? FileManager.default.removeItem(at: directory)
 }
 
+@MainActor
+@Test
+func failedMessageCanRetryInPlaceWithItsAttachments() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-retry-\(UUID().uuidString)", isDirectory: true)
+    let runtime = FailOnceRuntime()
+    let profile = BotProfile.defaults[0]
+    let earlierEntry = TimelineEntry(kind: .user, text: "Earlier message")
+    let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    store.save(
+        PersistedAppState(
+            profiles: [profile],
+            sessions: [
+                profile.id: AgentSessionState(entries: [earlierEntry])
+            ],
+            selectedBotID: profile.id
+        )
+    )
+    let model = AppModel(
+        runtime: runtime,
+        store: store
+    )
+    let profileID = profile.id
+    let attachment = ImageAttachment(path: "/tmp/retry-screenshot.png")
+
+    model.send(
+        "Try this once more",
+        attachments: [attachment],
+        to: profileID
+    )
+
+    for _ in 0..<30 where model.session(for: profileID).status != .failed {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let failedEntry = try #require(
+        model.session(for: profileID).entries.last(where: { $0.kind == .user })
+    )
+    #expect(failedEntry.id != earlierEntry.id)
+    #expect(failedEntry.deliveryFailed == true)
+    #expect(
+        model.session(for: profileID).entries.first(where: {
+            $0.id == earlierEntry.id
+        })?.deliveryFailed != true
+    )
+
+    model.retry(failedEntry.id, for: profileID)
+
+    for _ in 0..<30 where model.session(for: profileID).status != .completed {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let session = model.session(for: profileID)
+    let userEntries = session.entries.filter { $0.kind == .user }
+    #expect(session.status == .completed)
+    #expect(userEntries.count == 2)
+    #expect(userEntries.filter { $0.id == failedEntry.id }.count == 1)
+    #expect(
+        userEntries.first(where: { $0.id == failedEntry.id })?.deliveryFailed
+            != true
+    )
+    #expect(
+        userEntries.first(where: { $0.id == failedEntry.id })?.attachments
+            == [attachment]
+    )
+    #expect(await runtime.messages == ["Try this once more", "Try this once more"])
+    #expect(await runtime.attachments == [[attachment], [attachment]])
+    try? FileManager.default.removeItem(at: directory)
+}
+
+@MainActor
+@Test
+func pendingQuestionAndApprovalStatesBlockFailedMessageRetry() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-blocked-retry-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    let runtime = ImmediateRecordingRuntime()
+    let model = AppModel(
+        runtime: runtime,
+        store: AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    )
+    let profileID = try #require(model.profiles.first?.id)
+    let failedEntry = TimelineEntry(
+        kind: .user,
+        text: "Do not resend this",
+        deliveryFailed: true
+    )
+
+    for status in [AgentStatus.needsAnswer, .needsApproval] {
+        model.sessions[profileID] = AgentSessionState(
+            status: status,
+            entries: [failedEntry]
+        )
+
+        #expect(!status.allowsFailedMessageRetry)
+        model.retry(failedEntry.id, for: profileID)
+        #expect(model.session(for: profileID).status == status)
+        #expect(
+            model.session(for: profileID).entries.first?.deliveryFailed == true
+        )
+    }
+
+    #expect(await runtime.startCount == 0)
+    #expect(await runtime.responseCount == 0)
+    try? FileManager.default.removeItem(at: directory)
+}
+
+@MainActor
+@Test
+func anotherRetryFailureKeepsTheSameBubbleRetryable() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-repeat-retry-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    let runtime = FailOnceRuntime(failuresBeforeSuccess: 2)
+    let model = AppModel(
+        runtime: runtime,
+        store: AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    )
+    let profileID = try #require(model.profiles.first?.id)
+
+    model.send("Still failing", to: profileID)
+    for _ in 0..<30 where model.session(for: profileID).status != .failed {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    let entryID = try #require(model.session(for: profileID).entries.first?.id)
+
+    model.retry(entryID, for: profileID)
+    for _ in 0..<30 {
+        if await runtime.messages.count == 2,
+           model.session(for: profileID).status == .failed {
+            break
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let userEntries = model.session(for: profileID).entries.filter {
+        $0.kind == .user
+    }
+    #expect(userEntries.count == 1)
+    #expect(userEntries.first?.id == entryID)
+    #expect(userEntries.first?.deliveryFailed == true)
+    #expect(await runtime.messages == ["Still failing", "Still failing"])
+    try? FileManager.default.removeItem(at: directory)
+}
+
+@MainActor
+@Test
+func idleDisconnectDoesNotMakeACompletedMessageRetryable() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-idle-disconnect-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    let runtime = LongLivedStartupRuntime()
+    let model = AppModel(
+        runtime: runtime,
+        store: AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    )
+    let profileID = try #require(model.profiles.first?.id)
+
+    model.send("Complete before disconnecting", to: profileID)
+
+    for _ in 0..<30 where model.session(for: profileID).status != .completed {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    await runtime.disconnect()
+    for _ in 0..<30 where model.session(for: profileID).status != .failed {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let userEntry = try #require(
+        model.session(for: profileID).entries.first(where: { $0.kind == .user })
+    )
+    #expect(model.session(for: profileID).status == .failed)
+    #expect(userEntry.deliveryFailed != true)
+    try? FileManager.default.removeItem(at: directory)
+}
+
 private func runGit(_ arguments: [String], in directory: URL) throws {
     _ = try gitOutput(arguments, in: directory)
 }
@@ -1633,6 +2126,79 @@ private actor HandoffRecordingRuntime: AgentRuntime {
     func stop(profile: BotProfile) async {}
 }
 
+private actor OrchestrationRecordingRuntime: AgentRuntime {
+    struct Call: Sendable {
+        let role: AgentRole
+        let message: String
+    }
+
+    private(set) var calls: [Call] = []
+    private var roleResponseCounts: [AgentRole: Int] = [:]
+
+    func start(
+        profile: BotProfile,
+        resumeThreadID: String?
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(
+                .sessionID(
+                    resumeThreadID
+                        ?? "workflow-\(profile.id.uuidString)"
+                )
+            )
+            continuation.yield(.status(.needsAnswer))
+            continuation.finish()
+        }
+    }
+
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        calls.append(.init(role: profile.role, message: message))
+        let count = roleResponseCounts[profile.role, default: 0]
+        roleResponseCounts[profile.role] = count + 1
+
+        let response: String
+        switch profile.role {
+        case .manager:
+            response = count == 0
+                ? "Implement the feature with persistence and tests."
+                : "Complete: [draft PR](https://github.com/suttree/bl00p/pull/99)"
+        case .builder:
+            response = count == 0
+                ? "Implementation committed and tests passed."
+                : "Review finding fixed, committed, and tests passed."
+        case .reviewer:
+            response = count == 0
+                ? "Review finding: add a regression test."
+                : "Review clean. Ready to publish."
+        case .publisher:
+            response = "Documentation committed. Draft PR: https://github.com/suttree/bl00p/pull/99"
+        }
+
+        return AsyncStream { continuation in
+            continuation.yield(.status(.working))
+            continuation.yield(
+                .entry(.init(kind: .assistant, text: response))
+            )
+            continuation.yield(.status(.completed))
+            continuation.finish()
+        }
+    }
+
+    func resolveApproval(
+        entryID: UUID,
+        approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func stop(profile: BotProfile) async {}
+}
+
 private actor ImmediateRecordingRuntime: AgentRuntime {
     private(set) var startCount = 0
     private(set) var responseCount = 0
@@ -1663,6 +2229,60 @@ private actor ImmediateRecordingRuntime: AgentRuntime {
                 .entry(.init(kind: .assistant, text: "Working on \(message)"))
             )
             continuation.yield(.status(.completed))
+            continuation.finish()
+        }
+    }
+
+    func resolveApproval(
+        entryID: UUID,
+        approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func stop(profile: BotProfile) async {}
+}
+
+private actor FailOnceRuntime: AgentRuntime {
+    private(set) var messages: [String] = []
+    private(set) var attachments: [[ImageAttachment]] = []
+    private let failuresBeforeSuccess: Int
+
+    init(failuresBeforeSuccess: Int = 1) {
+        self.failuresBeforeSuccess = failuresBeforeSuccess
+    }
+
+    func start(
+        profile: BotProfile,
+        resumeThreadID: String?
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(
+                .sessionID(resumeThreadID ?? "retry-\(profile.id.uuidString)")
+            )
+            continuation.yield(.status(.needsAnswer))
+            continuation.finish()
+        }
+    }
+
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        messages.append(message)
+        self.attachments.append(attachments)
+        let shouldFail = messages.count <= failuresBeforeSuccess
+        return AsyncStream { continuation in
+            if shouldFail {
+                continuation.yield(.status(.failed))
+            } else {
+                continuation.yield(
+                    .entry(.init(kind: .assistant, text: "Retry succeeded"))
+                )
+                continuation.yield(.status(.completed))
+            }
             continuation.finish()
         }
     }
@@ -1740,6 +2360,12 @@ private actor LongLivedStartupRuntime: AgentRuntime {
     }
 
     func stop(profile: BotProfile) async {
+        startupContinuation?.finish()
+        startupContinuation = nil
+    }
+
+    func disconnect() {
+        startupContinuation?.yield(.status(.failed))
         startupContinuation?.finish()
         startupContinuation = nil
     }

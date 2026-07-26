@@ -37,6 +37,8 @@ All notable changes to bl00p are documented in this file.
 - Keep loading saved profiles and sessions when a bot profile gains new fields, instead of silently discarding all persisted state on decode failure.
 - Recover from stale Claude conversation identifiers by continuing in a fresh session without discarding the local transcript.
 - Keep Codex lifecycle events connected so idle disconnects are reported correctly.
+- Let failed chat messages retry in place with their original text and attachments
+  without marking completed messages as failed after idle disconnects.
 - Show blocked Claude actions as a readable question that the user can respond to.
 - Prevent duplicate sends while a bot is launching or working.
 - Migrate legacy bot names, starter cards, permission messages, and Codex review sessions when restoring saved state.

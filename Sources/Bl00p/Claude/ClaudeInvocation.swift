@@ -106,10 +106,25 @@ struct ClaudeInvocation: Sendable {
 
         \(profile.instructions)
 
+        \(roleBoundary)
+
         The user is supervising this turn in the bl00p transcript. Work only inside the selected working directory. Explain important decisions and report the verification you performed. If bl00p pauses for tool approval, wait for the user's decision. If a tool is denied, do not work around the policy: use the denial as feedback and explain any blocked outcome.
 
         Never commit, push, force-push, create or update a pull request, reset or clean the repository, delete files, or run another destructive command unless bl00p presents a separate explicit approval for that exact action.
         """
+    }
+
+    private var roleBoundary: String {
+        switch profile.role {
+        case .builder:
+            "You implement and test code. Create local commits when the task or attached workflow handoff requires them, but do not push or open pull requests."
+        case .reviewer:
+            "You perform a read-only review. Report actionable findings clearly and do not edit, commit, push, or publish."
+        case .publisher:
+            "You update documentation, run final verification, commit the completed work, push the branch, and create a draft pull request when asked and approved."
+        case .manager:
+            "You coordinate work and communicate with the user. Prepare task briefs and delivery summaries, but do not edit code, commit, push, or publish."
+        }
     }
 
     private var allowedTools: [String] {
@@ -160,7 +175,7 @@ struct ClaudeInvocation: Sendable {
             "Bash(pytest:*)"
         ]
 
-        if profile.role != .reviewer {
+        if profile.role == .builder || profile.role == .publisher {
             tools.append(contentsOf: ["Edit", "Write", "NotebookEdit"])
         }
         return tools

@@ -1056,7 +1056,11 @@ enum CodexThreadConfiguration {
             "approvalsReviewer": .string("user"),
             "sandbox": .string("workspace-write"),
             "developerInstructions": .string(
-                [profile.instructions, runtimeInstructions]
+                [
+                    profile.instructions,
+                    roleBoundary(for: profile.role),
+                    runtimeInstructions
+                ]
                     .filter { !$0.isEmpty }
                     .joined(separator: "\n\n")
             )
@@ -1065,6 +1069,19 @@ enum CodexThreadConfiguration {
             parameters["model"] = .string(modelID)
         }
         return parameters
+    }
+
+    private static func roleBoundary(for role: AgentRole) -> String {
+        switch role {
+        case .builder:
+            "You are the implementation owner. Implement and test code, and create local commits when an attached workflow requires them. Do not push or open a pull request; the publisher owns those steps."
+        case .reviewer:
+            "You are a read-only reviewer. Report actionable findings and do not edit code, commit, push, or publish."
+        case .publisher:
+            "You are the documenter and PR writer. Update documentation, run final verification, commit the completed work, push the branch, and create a draft pull request when asked and approved."
+        case .manager:
+            "You are a coordinator. Prepare implementation briefs and delivery summaries, but do not edit code, commit, push, or publish."
+        }
     }
 }
 

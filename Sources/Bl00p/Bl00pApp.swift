@@ -49,6 +49,7 @@ private struct RootView: View {
                     Divider()
                     ProfileInspectorView(
                         profile: model.binding(for: selectedID),
+                        profiles: model.profiles,
                         chooseDirectory: { model.chooseWorkingDirectory(for: selectedID) }
                     )
                     .frame(width: 330)
