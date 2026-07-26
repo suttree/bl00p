@@ -178,6 +178,51 @@ func codexThreadConfigurationKeepsBotPromptsSeparate() {
 }
 
 @Test
+func codexThreadConfigurationHonorsTheApprovalModeToggle() {
+    var profile = BotProfile(
+        name: "Review",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review this code."
+    )
+
+    profile.approvalMode = .ask
+    let askParameters = CodexThreadConfiguration.parameters(
+        profile: profile,
+        workingDirectory: "/tmp/project"
+    )
+    #expect(askParameters["approvalPolicy"]?.stringValue == "on-request")
+
+    profile.approvalMode = .auto
+    let autoParameters = CodexThreadConfiguration.parameters(
+        profile: profile,
+        workingDirectory: "/tmp/project"
+    )
+    #expect(autoParameters["approvalPolicy"]?.stringValue == "never")
+}
+
+@Test
+func botProfileDecodesLegacyJSONMissingApprovalMode() throws {
+    let legacyJSON = """
+    {
+        "id": "D24E2670-03E9-420B-9AB5-00A589E09249",
+        "name": "Claude",
+        "provider": "claude",
+        "role": "builder",
+        "instructions": "Do the work.",
+        "workingDirectory": "",
+        "loadProjectInstructions": true,
+        "requireApprovalBeforePush": true
+    }
+    """.data(using: .utf8)!
+
+    let profile = try JSONDecoder().decode(BotProfile.self, from: legacyJSON)
+
+    #expect(profile.approvalMode == .ask)
+    #expect(profile.name == "Claude")
+}
+
+@Test
 func persistedStateRoundTrips() throws {
     let profile = BotProfile.defaults[0]
     let state = PersistedAppState(

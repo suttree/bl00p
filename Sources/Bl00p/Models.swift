@@ -154,6 +154,20 @@ enum AgentStatus: String, Codable, Sendable {
     }
 }
 
+enum ApprovalMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    case ask
+    case auto
+
+    var id: Self { self }
+
+    var displayName: String {
+        switch self {
+        case .ask: "Ask before running"
+        case .auto: "Auto-approve"
+        }
+    }
+}
+
 struct BotProfile: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var name: String
@@ -163,6 +177,7 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
     var workingDirectory: String
     var loadProjectInstructions: Bool
     var requireApprovalBeforePush: Bool
+    var approvalMode: ApprovalMode
     var modelID: String?
 
     init(
@@ -174,6 +189,7 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
         workingDirectory: String = "",
         loadProjectInstructions: Bool = true,
         requireApprovalBeforePush: Bool = true,
+        approvalMode: ApprovalMode = .ask,
         modelID: String? = nil
     ) {
         self.id = id
@@ -184,7 +200,22 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
         self.workingDirectory = workingDirectory
         self.loadProjectInstructions = loadProjectInstructions
         self.requireApprovalBeforePush = requireApprovalBeforePush
+        self.approvalMode = approvalMode
         self.modelID = modelID
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        provider = try container.decode(AgentProvider.self, forKey: .provider)
+        role = try container.decode(AgentRole.self, forKey: .role)
+        instructions = try container.decode(String.self, forKey: .instructions)
+        workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
+        loadProjectInstructions = try container.decode(Bool.self, forKey: .loadProjectInstructions)
+        requireApprovalBeforePush = try container.decode(Bool.self, forKey: .requireApprovalBeforePush)
+        approvalMode = try container.decodeIfPresent(ApprovalMode.self, forKey: .approvalMode) ?? .ask
+        modelID = try container.decodeIfPresent(String.self, forKey: .modelID)
     }
 
     var modelDisplayName: String {

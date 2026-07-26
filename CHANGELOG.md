@@ -6,6 +6,7 @@ All notable changes to bl00p are documented in this file.
 
 ### Added
 
+- Add a per-bot approval mode toggle for Codex bots, letting commands and file changes auto-approve instead of prompting.
 - Add model selection when creating or configuring Claude and Codex bots.
 - Add image attachments through drag and drop, with previews in the composer and conversation timeline.
 - Add macOS notifications and a Dock badge when a bot finishes, fails, asks a question, or needs approval.
@@ -23,6 +24,7 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Keep loading saved profiles and sessions when a bot profile gains new fields, instead of silently discarding all persisted state on decode failure.
 - Recover from stale Claude conversation identifiers by continuing in a fresh session without discarding the local transcript.
 - Keep Codex lifecycle events connected so idle disconnects are reported correctly.
 - Show blocked Claude actions as a readable question that the user can respond to.
@@ -33,3 +35,4 @@ All notable changes to bl00p are documented in this file.
 ### Tests
 
 - Expand coverage for notifications, Dock badges, model and prompt isolation, image attachments, session recovery, state migration, composer sizing, automatic reconnects, and long-lived runtime streams.
+- Cover the Codex approval mode toggle and backward-compatible decoding of bot profiles missing newer fields.
