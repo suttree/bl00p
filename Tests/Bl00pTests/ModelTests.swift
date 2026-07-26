@@ -71,7 +71,8 @@ func completedAgentPostsNotificationAndUpdatesDockBadge() async throws {
     let model = AppModel(
         runtime: ImmediateRecordingRuntime(),
         store: AppStateStore(fileURL: directory.appendingPathComponent("state.json")),
-        notifications: notifications
+        notifications: notifications,
+        isAppWindowActive: { false }
     )
     let backgroundProfile = try #require(model.profiles.dropFirst().first)
 
@@ -86,6 +87,40 @@ func completedAgentPostsNotificationAndUpdatesDockBadge() async throws {
     #expect(notifications.authorizationRequestCount == 1)
     #expect(notifications.notices.map(\.notice) == [.completed])
     #expect(notifications.notices.first?.profileID == backgroundProfile.id)
+    #expect(notifications.badgeCounts.last == 1)
+
+    model.markViewed(backgroundProfile.id)
+    #expect(notifications.badgeCounts.last == 0)
+    try? FileManager.default.removeItem(at: directory)
+}
+
+@MainActor
+@Test
+func activeWindowSuppressesNotificationButKeepsDockBadge() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-active-notifications-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    let notifications = RecordingNotificationDelivery()
+    let model = AppModel(
+        runtime: ImmediateRecordingRuntime(),
+        store: AppStateStore(fileURL: directory.appendingPathComponent("state.json")),
+        notifications: notifications,
+        isAppWindowActive: { true }
+    )
+    let backgroundProfile = try #require(model.profiles.dropFirst().first)
+
+    model.prepareNotifications()
+    model.send("Finish this task", to: backgroundProfile.id)
+
+    for _ in 0..<30
+        where model.session(for: backgroundProfile.id).status != .completed {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(notifications.authorizationRequestCount == 1)
+    #expect(notifications.notices.isEmpty)
     #expect(notifications.badgeCounts.last == 1)
 
     model.markViewed(backgroundProfile.id)

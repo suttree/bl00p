@@ -2,6 +2,13 @@ import AppKit
 import Foundation
 import UserNotifications
 
+enum AppWindowActivity {
+    @MainActor
+    static var isActive: Bool {
+        NSApplication.shared.isActive && NSApplication.shared.keyWindow != nil
+    }
+}
+
 enum AgentAttentionNotice: Equatable, Sendable {
     case needsAnswer
     case needsApproval
@@ -111,7 +118,9 @@ final class AppNotificationController:
         withCompletionHandler completionHandler:
             @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        completionHandler([.banner, .list, .sound, .badge])
+        // A notification queued while bl00p was in the background can arrive
+        // just after its window becomes active.
+        completionHandler([])
     }
 
     nonisolated func userNotificationCenter(
