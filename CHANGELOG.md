@@ -6,6 +6,8 @@ All notable changes to bl00p are documented in this file.
 
 ### Added
 
+- Add in-app approval cards for individual Claude tool calls, returning each
+  approval or rejection to the active Claude session.
 - Add a per-bot approval mode toggle for Codex bots, letting commands and file changes auto-approve instead of prompting.
 - Add model selection when creating or configuring Claude and Codex bots.
 - Add image attachments through drag and drop, with previews in the composer and conversation timeline.
