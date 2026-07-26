@@ -25,10 +25,11 @@ struct Bl00pApp: App {
 
 private struct RootView: View {
     @ObservedObject var model: AppModel
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         NavigationSplitView {
-            SidebarView(model: model)
+            SidebarView(model: model, windowColorScheme: colorScheme)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 300)
         } detail: {
             HStack(spacing: 0) {

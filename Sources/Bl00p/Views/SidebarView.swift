@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SidebarView: View {
     @ObservedObject var model: AppModel
+    let windowColorScheme: ColorScheme
     @State private var renameTargetID: UUID?
     @State private var renameDraft = ""
 
@@ -13,7 +14,8 @@ struct SidebarView: View {
                 ForEach(model.profiles) { profile in
                     BotRow(
                         profile: profile,
-                        session: model.session(for: profile.id)
+                        session: model.session(for: profile.id),
+                        windowColorScheme: windowColorScheme
                     )
                     .tag(Optional(profile.id))
                     .contextMenu {
@@ -59,7 +61,8 @@ struct SidebarView: View {
         }
         .background(
             LinearGradient(
-                colors: [.white, .bl00pPinkSoft.opacity(0.5)],
+                colors: Bl00pTheme.sidebarColors(for: windowColorScheme)
+                    .map(Color.init(nsColor:)),
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -108,6 +111,7 @@ struct SidebarView: View {
 private struct BotRow: View {
     let profile: BotProfile
     let session: AgentSessionState
+    let windowColorScheme: ColorScheme
 
     private var showsAttention: Bool {
         session.status.needsAttention || session.hasUnreadCompletion
@@ -121,7 +125,17 @@ private struct BotRow: View {
                         Circle()
                             .fill(Color.bl00pPink)
                             .frame(width: 10, height: 10)
-                            .overlay(Circle().stroke(.white, lineWidth: 2))
+                            .overlay(
+                                Circle()
+                                    .stroke(
+                                        Color(
+                                            nsColor: Bl00pTheme.sidebarTop(
+                                                for: windowColorScheme
+                                            )
+                                        ),
+                                        lineWidth: 2
+                                    )
+                            )
                             .offset(x: 3, y: -3)
                     }
                 }

@@ -8,6 +8,7 @@ The current prototype includes:
 - Builder, reviewer, and PR-writer roles
 - Editable role prompts and working directories
 - A Slack-like sidebar with attention badges
+- Automatic light and dark appearances that follow the macOS system setting
 - Consistent, legible typography across conversations, settings, and bot creation
 - Structured messages, commands, findings, and approval cards
 - Real Codex sessions powered by `codex app-server`, with workspace-scoped writes and in-app approvals for commands, file changes, extra permissions, and connected-app mutations

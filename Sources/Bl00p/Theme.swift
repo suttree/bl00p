@@ -1,12 +1,81 @@
 import AppKit
 import SwiftUI
 
+enum Bl00pTheme {
+    static let accent = adaptive(
+        light: NSColor(srgbRed: 0.69, green: 0.00, blue: 0.35, alpha: 1),
+        dark: NSColor(srgbRed: 1.00, green: 0.48, blue: 0.74, alpha: 1)
+    )
+    static let userBubble = adaptive(
+        light: NSColor(srgbRed: 0.69, green: 0.00, blue: 0.35, alpha: 1),
+        dark: NSColor(srgbRed: 0.50, green: 0.06, blue: 0.27, alpha: 1)
+    )
+    static let mint = adaptive(
+        light: NSColor(srgbRed: 0.41, green: 1.00, blue: 0.71, alpha: 1),
+        dark: NSColor(srgbRed: 0.32, green: 0.88, blue: 0.63, alpha: 1)
+    )
+    static let avatarInk = NSColor(
+        srgbRed: 0.10,
+        green: 0.08,
+        blue: 0.10,
+        alpha: 1
+    )
+    static let approvalBackground = adaptive(
+        light: NSColor(srgbRed: 1.00, green: 0.94, blue: 0.97, alpha: 1),
+        dark: NSColor(srgbRed: 0.20, green: 0.11, blue: 0.16, alpha: 1)
+    )
+    static let sidebarLightTop = NSColor(
+        srgbRed: 0.99,
+        green: 0.98,
+        blue: 0.99,
+        alpha: 1
+    )
+    static let sidebarLightBottom = NSColor(
+        srgbRed: 1.00,
+        green: 0.94,
+        blue: 0.97,
+        alpha: 1
+    )
+    static let sidebarDarkTop = NSColor(
+        srgbRed: 0.12,
+        green: 0.11,
+        blue: 0.12,
+        alpha: 1
+    )
+    static let sidebarDarkBottom = NSColor(
+        srgbRed: 0.18,
+        green: 0.12,
+        blue: 0.16,
+        alpha: 1
+    )
+
+    static func sidebarColors(for colorScheme: ColorScheme) -> [NSColor] {
+        colorScheme == .dark
+            ? [sidebarDarkTop, sidebarDarkBottom]
+            : [sidebarLightTop, sidebarLightBottom]
+    }
+
+    static func sidebarTop(for colorScheme: ColorScheme) -> NSColor {
+        colorScheme == .dark ? sidebarDarkTop : sidebarLightTop
+    }
+
+    private static func adaptive(light: NSColor, dark: NSColor) -> NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? dark
+                : light
+        }
+    }
+}
+
 extension Color {
-    static let bl00pPink = Color(red: 1.0, green: 105.0 / 255.0, blue: 180.0 / 255.0)
-    static let bl00pMint = Color(red: 105.0 / 255.0, green: 1.0, blue: 180.0 / 255.0)
-    static let bl00pPinkSoft = Color(red: 1.0, green: 0.93, blue: 0.97)
-    static let bl00pInk = Color(red: 0.10, green: 0.08, blue: 0.10)
-    static let bl00pMuted = Color(red: 0.43, green: 0.39, blue: 0.42)
+    static let bl00pPink = Color(nsColor: Bl00pTheme.accent)
+    static let bl00pUserBubble = Color(nsColor: Bl00pTheme.userBubble)
+    static let bl00pMint = Color(nsColor: Bl00pTheme.mint)
+    static let bl00pAvatarInk = Color(nsColor: Bl00pTheme.avatarInk)
+    static let bl00pPinkSoft = Color(nsColor: Bl00pTheme.approvalBackground)
+    static let bl00pInk = Color(nsColor: .labelColor)
+    static let bl00pMuted = Color(nsColor: .secondaryLabelColor)
 }
 
 extension Font {
@@ -39,7 +108,7 @@ struct BotAvatar: View {
 
             Text(initial)
                 .font(.system(size: size * 0.42, weight: .heavy, design: .rounded))
-                .foregroundStyle(Color.bl00pInk)
+                .foregroundStyle(Color.bl00pAvatarInk)
         }
         .frame(width: size, height: size)
         .accessibilityLabel(name)

@@ -6,6 +6,7 @@ All notable changes to bl00p are documented in this file.
 
 ### Added
 
+- Add automatic light and dark appearances across every app surface.
 - Add in-app approval cards for individual Claude tool calls, returning each
   approval or rejection to the active Claude session.
 - Add a per-bot approval mode toggle for Codex bots, letting commands and file changes auto-approve instead of prompting.

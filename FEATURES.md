@@ -8,9 +8,3 @@ what the current prototype already supports.
 - Add Git worktree ownership and handoff packages.
   - Acceptance: implementation bots can work in isolated worktrees and hand
     off their branch, task context, and test state without overlapping edits.
-
-## Next
-
-- Support the system light and dark appearances throughout the app.
-  - Acceptance: every view follows the current macOS appearance with legible
-    text, controls, status indicators, and message cards in both modes.
