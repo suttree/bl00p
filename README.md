@@ -10,7 +10,7 @@ The current prototype includes:
 - A Slack-like sidebar with attention badges
 - Consistent, legible typography across conversations, settings, and bot creation
 - Structured messages, commands, findings, and approval cards
-- A real, read-only Codex reviewer powered by `codex app-server`, with a per-bot toggle to auto-approve its commands and file changes instead of asking
+- Real Codex sessions powered by `codex app-server`, with workspace-scoped writes and in-app approvals for commands, file changes, extra permissions, and connected-app mutations
 - Real, resumable Claude Code builder and PR-writer sessions
 - Local JSON persistence
 
@@ -42,7 +42,7 @@ claude auth login
 
 ## Runtime boundary
 
-`AgentRuntime` is intentionally provider-neutral. Codex profiles use the desktop-bundled or plugin-bundled `codex app-server` runtime. Reviewer threads start with a read-only sandbox, user-routed approvals, and resume from their saved thread ID when possible.
+`AgentRuntime` is intentionally provider-neutral. Codex profiles use the desktop-bundled or plugin-bundled `codex app-server` runtime. Threads can write within their selected workspace, route elevated and connected-app actions through bl00p's approval cards, and resume from their saved thread ID when possible.
 
 Claude profiles use the installed `claude` executable's `stream-json` mode.
 They inherit Claude's user and project settings, including configured MCP
@@ -50,7 +50,7 @@ servers. The current allowlist supports repository inspection, file edits for
 non-reviewer roles, common test commands, and read-only Linear tools. Commit,
 push, PR mutation, destructive git, and delete operations remain blocked.
 
-The next integration slices are:
+## Roadmap
 
-- An in-app approval bridge for individual Claude tool calls
-- Git worktree ownership and handoff packages
+Planned product work and its acceptance criteria are tracked in
+[FEATURES.md](FEATURES.md).
