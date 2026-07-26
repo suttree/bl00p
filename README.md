@@ -34,6 +34,19 @@ open .build/bl00p.app
 
 Run tests by replacing `swift build` with `swift test`.
 
+## Build an installable release
+
+Build, package, sign, and verify an optimized app bundle with:
+
+```sh
+sh scripts/build-installable-app.sh
+```
+
+The script writes `bl00p.app` and a bundle-preserving ZIP to
+`.build/install/`. The app is ad-hoc signed for local installation: drag the
+app into `/Applications`. Distribution to other Macs requires Developer ID
+signing and Apple notarization.
+
 Claude Code must be installed and authenticated before launching a Claude
 profile:
 
