@@ -8,6 +8,7 @@ The current prototype includes:
 - Builder, reviewer, and PR-writer roles
 - Editable role prompts and working directories
 - A Slack-like sidebar with attention badges
+- Consistent, legible typography across conversations, settings, and bot creation
 - Structured messages, commands, findings, and approval cards
 - A real, read-only Codex reviewer powered by `codex app-server`, with a per-bot toggle to auto-approve its commands and file changes instead of asking
 - Real, resumable Claude Code builder and PR-writer sessions

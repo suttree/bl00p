@@ -34,10 +34,12 @@ struct AddBotSheet: View {
                 }
 
                 TextEditor(text: $draft.instructions)
+                    .font(.bl00p(.body, sizeOffset: 1))
                     .frame(minHeight: 130)
                     .overlay(alignment: .topLeading) {
                         if draft.instructions.isEmpty {
                             Text("Role prompt and working guidelines…")
+                                .font(.bl00p(.body, sizeOffset: 1))
                                 .foregroundStyle(.tertiary)
                                 .padding(.top, 8)
                                 .padding(.leading, 5)
@@ -64,6 +66,7 @@ struct AddBotSheet: View {
         }
         .padding(24)
         .frame(width: 520, height: 490)
+        .font(.bl00p(.body, sizeOffset: 1))
         .tint(.bl00pPink)
         .onAppear {
             draft = NewBotDraft()
