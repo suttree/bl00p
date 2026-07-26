@@ -95,6 +95,9 @@ All notable changes to bl00p are documented in this file.
 - Quarantine unreadable saved state instead of letting the next autosave
   overwrite it with defaults, and rotate a `state.json.bak` backup on every
   save so one bad write can't destroy the only copy of prior state.
+- Preserve managed workflow dispatch payloads through runtime delivery and
+  restart recovery, including implementation plans, review findings, and
+  publishing and reporting details.
 
 ### Tests
 
@@ -108,7 +111,8 @@ All notable changes to bl00p are documented in this file.
   decisions, read-only role boundaries, and backward-compatible decoding of
   bot profiles missing newer fields.
 - Cover Manager plan approval, visible team dispatch, restart persistence,
-  read-only Codex configuration, and role-specific avatar colors.
+  delivered dispatch payload recovery, read-only Codex configuration, and
+  role-specific avatar colors.
 - Cover the approved-plan Builder handoff, including revised plans and missing
   or inconsistent plan safeguards.
 - Cover idempotent plan-approval restoration, stale or duplicate approval-card

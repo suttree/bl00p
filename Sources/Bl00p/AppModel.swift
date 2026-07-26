@@ -1248,13 +1248,24 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func resumeWorkflow(_ managerID: UUID) {
+    func resumeWorkflow(_ managerProfileOrSessionID: UUID) {
+        let managerID =
+            managerWorkflows[managerProfileOrSessionID] != nil
+                ? managerProfileOrSessionID
+                : selectedSessionID(for: managerProfileOrSessionID)
+                    ?? managerProfileOrSessionID
         guard var workflow = managerWorkflows[managerID],
               workflow.stage != .completed,
               workflow.planApprovalEntryID == nil,
               workflow.resumeAvailableAfterRestart == true,
-              let activeProfileID = expectedProfileID(for: workflow),
-              profiles.contains(where: { $0.id == activeProfileID }) else {
+              let activeSessionID = expectedProfileID(for: workflow) else {
+            return
+        }
+        let activeProfileID =
+            sessions[activeSessionID]?.ownerProfileID ?? activeSessionID
+        guard profiles.contains(where: {
+            $0.id == activeProfileID
+        }) else {
             return
         }
 
@@ -1264,15 +1275,15 @@ final class AppModel: ObservableObject {
             let activeRole: AgentRole =
                 workflow.stage == .publishing ? .publisher : .reviewer
             guard let handoff = workflow.latestHandoff,
-                  let activeSessionID = participantSessionID(
+                  let handoffSessionID = participantSessionID(
                       activeRole,
                       in: workflow
                   ),
                   prepareWorkflowHandoff(
                       handoff,
-                      for: sessions[activeSessionID]?.ownerProfileID
+                      for: sessions[handoffSessionID]?.ownerProfileID
                           ?? activeProfileID,
-                      sessionID: activeSessionID
+                      sessionID: handoffSessionID
                   ) else {
                 pauseWorkflow(
                     managerID,
@@ -1292,15 +1303,23 @@ final class AppModel: ObservableObject {
             .init(
                 kind: .system,
                 text: "Managed workflow resumed",
-                detail: "\(profileName(activeProfileID)) is continuing \(workflow.stage.label.lowercased())."
+                detail: "\(profileNameForSession(activeSessionID)) is continuing \(workflow.stage.label.lowercased())."
             ),
             to: managerID
         )
+        let instruction: String
+        if let dispatch = workflow.deliveredDispatch,
+           dispatch.id == workflow.deliveredDispatchID {
+            instruction = dispatch.kind == .initialBuild
+                ? resumeInstruction(for: workflow)
+                : runtimeInstruction(for: dispatch, workflow: workflow)
+        } else {
+            instruction = resumeInstruction(for: workflow)
+        }
         performSend(
-            resumeInstruction(for: workflow),
-            to: sessions[activeProfileID]?.ownerProfileID
-                ?? activeProfileID,
-            sessionID: activeProfileID
+            instruction,
+            to: activeProfileID,
+            sessionID: activeSessionID
         )
     }
 
@@ -2631,6 +2650,7 @@ final class AppModel: ObservableObject {
         workflowDispatchesInFlight.insert(dispatch.id)
         Task { [weak self] in
             guard let self else { return }
+            await flushPersistence()
             await processPendingWorkflowDispatch(
                 managerID: managerID,
                 dispatchID: dispatch.id
@@ -2821,13 +2841,14 @@ final class AppModel: ObservableObject {
         }
         currentWorkflow.pendingDispatch = nil
         currentWorkflow.deliveredDispatchID = dispatchID
+        currentWorkflow.deliveredDispatch = currentDispatch
         currentWorkflow.resumeAvailableAfterRestart = false
         currentWorkflow.isPaused = false
         currentWorkflow.pauseReason = nil
         currentWorkflow.updatedAt = .now
         sessions[currentTargetSessionID] = targetState
         managerWorkflows[managerID] = currentWorkflow
-        save(immediately: true)
+        await flushPersistence()
 
         performSend(
             runtimeInstruction(

@@ -21,6 +21,9 @@ The current prototype includes:
 - Real Codex sessions powered by `codex app-server`, with workspace-scoped writes and in-app approvals for commands, file changes, extra permissions, and connected-app mutations
 - Real, resumable Claude Code builder and PR-writer sessions with in-app tool approvals
 - Local JSON persistence
+- Persisted workflow handoffs and delivered dispatch payloads so an app restart
+  can resume with the original plan, review findings, publishing context, and
+  draft PR details intact
 
 ## Run the prototype
 
@@ -113,6 +116,11 @@ actions; the same plan is not repeated as a separate conversation message.
 
 The persistence rules and restore invariants are documented in
 [docs/MANAGED_WORKFLOWS.md](docs/MANAGED_WORKFLOWS.md).
+
+If bl00p restarts while a team handoff is being delivered, the saved dispatch
+is retried; if the dispatch was already recorded as delivered, the same saved
+payload is used when you choose Resume instead of replacing it with a generic
+stage prompt.
 
 ## Runtime boundary
 

@@ -140,7 +140,6 @@ struct ConversationView: View {
             )
         }
     }
-
     private func requestClose(_ sessionID: UUID) {
         Task {
             let assessment = await model.closeAssessment(for: sessionID)

@@ -570,6 +570,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     var approvedPlanEntryID: UUID?
     var pendingDispatch: ManagerWorkflowDispatch?
     var deliveredDispatchID: UUID?
+    var deliveredDispatch: ManagerWorkflowDispatch?
     var resumeAvailableAfterRestart: Bool?
     var stage: ManagerWorkflowStage
     var branch: String?
@@ -596,6 +597,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         approvedPlanEntryID: UUID? = nil,
         pendingDispatch: ManagerWorkflowDispatch? = nil,
         deliveredDispatchID: UUID? = nil,
+        deliveredDispatch: ManagerWorkflowDispatch? = nil,
         resumeAvailableAfterRestart: Bool? = nil,
         stage: ManagerWorkflowStage = .planning,
         branch: String? = nil,
@@ -621,6 +623,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         self.approvedPlanEntryID = approvedPlanEntryID
         self.pendingDispatch = pendingDispatch
         self.deliveredDispatchID = deliveredDispatchID
+        self.deliveredDispatch = deliveredDispatch
         self.resumeAvailableAfterRestart = resumeAvailableAfterRestart
         self.stage = stage
         self.branch = branch
@@ -641,7 +644,8 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     enum CodingKeys: String, CodingKey {
         case id, managerProfileID, team, request, implementationPlan
         case planApprovalEntryID, approvedPlanEntryID, pendingDispatch
-        case deliveredDispatchID, resumeAvailableAfterRestart
+        case deliveredDispatchID, deliveredDispatch
+        case resumeAvailableAfterRestart
         case stage, branch, pullRequestURL
         case verificationSummary, publisherSummary, revisionRounds
         case latestHandoff, reviewSummary, revisionStartedAt
@@ -667,6 +671,10 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         deliveredDispatchID = try container.decodeIfPresent(
             UUID.self,
             forKey: .deliveredDispatchID
+        )
+        deliveredDispatch = try container.decodeIfPresent(
+            ManagerWorkflowDispatch.self,
+            forKey: .deliveredDispatch
         )
         resumeAvailableAfterRestart = try container.decodeIfPresent(
             Bool.self,
