@@ -5,6 +5,7 @@ bl00p (“bot loop”) is a native macOS control room for running coding agents 
 The current prototype includes:
 
 - Claude and Codex bot profiles
+- Sidebar bot renaming with the name field focused as soon as the alert opens
 - Builder, reviewer, and PR-writer roles
 - Editable role prompts and working directories
 - A Slack-like sidebar with attention badges

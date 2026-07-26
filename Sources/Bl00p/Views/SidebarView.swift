@@ -6,7 +6,6 @@ struct SidebarView: View {
     let windowColorScheme: ColorScheme
     @State private var renameTargetID: UUID?
     @State private var renameDraft = ""
-    @FocusState private var isRenameFieldFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -75,42 +74,24 @@ struct SidebarView: View {
                 get: { renameTargetID != nil },
                 set: { isPresented in
                     if !isPresented {
-                        isRenameFieldFocused = false
                         renameTargetID = nil
                     }
                 }
             )
         ) {
-            TextField("Bot name", text: $renameDraft)
-                .focused($isRenameFieldFocused)
+            RenameTextField(text: $renameDraft)
             Button("Cancel", role: .cancel) {
-                isRenameFieldFocused = false
                 renameTargetID = nil
             }
             Button("Rename") {
                 if let renameTargetID {
                     model.rename(renameTargetID, to: renameDraft)
                 }
-                isRenameFieldFocused = false
                 renameTargetID = nil
             }
             .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } message: {
             Text("Choose the name shown in the sidebar and conversation.")
-        }
-        .onChange(of: renameTargetID) { _, targetID in
-            guard targetID != nil else {
-                isRenameFieldFocused = false
-                return
-            }
-
-            // The native alert restores focus to Cancel while its sheet appears.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                if renameTargetID != nil {
-                    isRenameFieldFocused = true
-                    focusRenameTextField()
-                }
-            }
         }
         .alert(
             "Could not delete bot",
@@ -125,29 +106,6 @@ struct SidebarView: View {
         }
     }
 
-    private func focusRenameTextField() {
-        func renameTextField(in view: NSView) -> NSTextField? {
-            if let textField = view as? NSTextField,
-               textField.placeholderString == "Bot name",
-               textField.window?.sheetParent != nil {
-                return textField
-            }
-
-            return view.subviews.lazy
-                .compactMap(renameTextField(in:))
-                .first
-        }
-
-        let textField = NSApp.windows.lazy
-            .compactMap(\.contentView)
-            .compactMap(renameTextField(in:))
-            .first
-
-        if let textField {
-            textField.window?.makeFirstResponder(textField)
-        }
-    }
-
     private var brand: some View {
         HStack {
             Text("bl00p")
@@ -159,6 +117,92 @@ struct SidebarView: View {
         .padding(.horizontal, 14)
         .padding(.top, 14)
         .padding(.bottom, 10)
+    }
+}
+
+private struct RenameTextField: NSViewRepresentable {
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    func makeNSView(context: Context) -> RenameTextFieldControl {
+        let field = RenameTextFieldControl(string: text)
+        field.placeholderString = "Bot name"
+        field.delegate = context.coordinator
+        return field
+    }
+
+    func updateNSView(_ nsView: RenameTextFieldControl, context: Context) {
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        private let text: Binding<String>
+
+        init(text: Binding<String>) {
+            self.text = text
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            text.wrappedValue = field.stringValue
+        }
+    }
+}
+
+private final class RenameTextFieldControl: NSTextField {
+    private var keyWindowObserver: NSObjectProtocol?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        removeKeyWindowObserver()
+
+        guard let window else { return }
+        keyWindowObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.focusWhenPresented()
+            }
+        }
+        focusWhenPresented()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            removeKeyWindowObserver()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    private func focusWhenPresented() {
+        guard let window else { return }
+
+        let editor = currentEditor()
+        guard window.firstResponder !== self, window.firstResponder !== editor else {
+            return
+        }
+        guard window.makeFirstResponder(self) else { return }
+
+        // Native alert presentation may select the whole field. Put the caret
+        // at the end without replacing text the user entered while it appeared.
+        currentEditor()?.selectedRange = NSRange(
+            location: stringValue.utf16.count,
+            length: 0
+        )
+    }
+
+    private func removeKeyWindowObserver() {
+        if let keyWindowObserver {
+            NotificationCenter.default.removeObserver(keyWindowObserver)
+            self.keyWindowObserver = nil
+        }
     }
 }
 

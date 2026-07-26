@@ -46,6 +46,8 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Focus the bot name field when the sidebar rename alert opens without
+  replacing text entered during presentation.
 - Hand the Builder the exact implementation plan approved by the user, while
   preserving the original request as separate context and pausing on an
   inconsistent or missing plan.
