@@ -60,6 +60,7 @@ struct AddBotSheet: View {
                     add(draft.profile())
                 }
                 .buttonStyle(.borderedProminent)
+                .foregroundStyle(Color.bl00pAvatarInk)
                 .keyboardShortcut(.defaultAction)
                 .disabled(draft.trimmedName.isEmpty)
             }

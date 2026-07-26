@@ -2,13 +2,17 @@ import AppKit
 import SwiftUI
 
 enum Bl00pTheme {
-    static let accent = adaptive(
+    static let hotPink = NSColor(
+        srgbRed: 1.00,
+        green: 105.0 / 255.0,
+        blue: 180.0 / 255.0,
+        alpha: 1
+    )
+    static let accent = hotPink
+    static let userBubble = hotPink
+    static let accentText = adaptive(
         light: NSColor(srgbRed: 0.69, green: 0.00, blue: 0.35, alpha: 1),
         dark: NSColor(srgbRed: 1.00, green: 0.48, blue: 0.74, alpha: 1)
-    )
-    static let userBubble = adaptive(
-        light: NSColor(srgbRed: 0.69, green: 0.00, blue: 0.35, alpha: 1),
-        dark: NSColor(srgbRed: 0.50, green: 0.06, blue: 0.27, alpha: 1)
     )
     static let mint = adaptive(
         light: NSColor(srgbRed: 0.41, green: 1.00, blue: 0.71, alpha: 1),
@@ -70,6 +74,7 @@ enum Bl00pTheme {
 
 extension Color {
     static let bl00pPink = Color(nsColor: Bl00pTheme.accent)
+    static let bl00pPinkText = Color(nsColor: Bl00pTheme.accentText)
     static let bl00pUserBubble = Color(nsColor: Bl00pTheme.userBubble)
     static let bl00pMint = Color(nsColor: Bl00pTheme.mint)
     static let bl00pAvatarInk = Color(nsColor: Bl00pTheme.avatarInk)
@@ -140,9 +145,9 @@ extension AgentStatus {
         case .stopped: .secondary
         case .launching: .orange
         case .working: .blue
-        case .needsApproval, .needsAnswer: .bl00pPink
+        case .needsApproval, .needsAnswer: .bl00pPinkText
         case .completed: .green
-        case .failed: .bl00pPink
+        case .failed: .bl00pPinkText
         }
     }
 }
