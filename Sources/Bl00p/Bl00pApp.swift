@@ -3,8 +3,13 @@ import SwiftUI
 
 @main
 struct Bl00pApp: App {
-    @StateObject private var model = AppModel()
-    private let updateController = UpdateController()
+    @StateObject private var model: AppModel
+    private let updateController: UpdateController
+
+    init() {
+        _model = StateObject(wrappedValue: AppModel())
+        updateController = UpdateController()
+    }
 
     var body: some Scene {
         WindowGroup {
