@@ -45,8 +45,8 @@ sh scripts/build-installable-app.sh
 
 The script writes `bl00p.app` and a bundle-preserving ZIP to
 `.build/install/`. The app is ad-hoc signed for local installation: drag the
-app into `/Applications`. Distribution to other Macs requires Developer ID
-signing and Apple notarization.
+app into `/Applications`. GitHub releases use Developer ID signing and Apple
+notarization before the stapled app is archived for distribution.
 
 Release cadence, Sparkle signing, and GitHub Actions setup are documented in
 [docs/RELEASING.md](docs/RELEASING.md).

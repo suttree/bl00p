@@ -27,6 +27,7 @@ func updateFeedUsesSignedGitHubReleaseAssets() throws {
     #expect(info["SUEnableAutomaticChecks"] as? Bool == true)
     #expect(info["SUAutomaticallyUpdate"] as? Bool == true)
     #expect(info["SUVerifyUpdateBeforeExtraction"] as? Bool == true)
+    #expect(publicKey == "O2mHaTZMsDiYGGPMKTgkR2dR9wuOsOjiCyNiY0UsLhc=")
     #expect(decodedPublicKey.count == 32)
 }
 
