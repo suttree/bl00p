@@ -225,10 +225,7 @@ private struct TimelineEntryView: View {
                 Text(profile.name)
                     .font(.bl00p(.caption1, weight: .semibold))
                     .foregroundStyle(.secondary)
-                Text(TranscriptMarkdown.attributed(entry.text))
-                    .textSelection(.enabled)
-                    .lineSpacing(3)
-                    .padding(.vertical, 2)
+                MarkdownMessageView(source: entry.text)
             }
             Spacer(minLength: 60)
         }
@@ -629,13 +626,151 @@ private struct ComposerView: View {
     }
 }
 
+private struct MarkdownMessageView: View {
+    let source: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(TranscriptMarkdown.blocks(source)) { block in
+                switch block.content {
+                case .prose(let text):
+                    Text(text)
+                        .textSelection(.enabled)
+                        .lineSpacing(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                case .code(let code):
+                    Text(code)
+                        .font(.bl00p(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(
+                            Color(nsColor: .controlBackgroundColor),
+                            in: RoundedRectangle(
+                                cornerRadius: 10,
+                                style: .continuous
+                            )
+                        )
+                        .overlay {
+                            RoundedRectangle(
+                                cornerRadius: 10,
+                                style: .continuous
+                            )
+                            .stroke(.quaternary, lineWidth: 1)
+                        }
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
 enum TranscriptMarkdown {
+    struct Block: Identifiable {
+        enum Content {
+            case prose(AttributedString)
+            case code(String)
+        }
+
+        let id: Int
+        let content: Content
+    }
+
     static func attributed(_ source: String) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace
         )
         return (try? AttributedString(markdown: source, options: options))
             ?? AttributedString(source)
+    }
+
+    static func blocks(_ source: String) -> [Block] {
+        let normalized = source
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.split(
+            separator: "\n",
+            omittingEmptySubsequences: false
+        ).map(String.init)
+
+        var result: [Block] = []
+        var proseLines: [String] = []
+        var codeLines: [String] = []
+        var activeFence: String?
+
+        func appendProse() {
+            let prose = proseLines
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .newlines)
+            guard !prose.isEmpty else {
+                proseLines.removeAll()
+                return
+            }
+            result.append(
+                Block(id: result.count, content: .prose(attributed(prose)))
+            )
+            proseLines.removeAll()
+        }
+
+        func appendCode() {
+            result.append(
+                Block(
+                    id: result.count,
+                    content: .code(codeLines.joined(separator: "\n"))
+                )
+            )
+            codeLines.removeAll()
+        }
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if let fence = activeFence {
+                if isClosingFence(trimmed, matching: fence) {
+                    appendCode()
+                    activeFence = nil
+                } else {
+                    codeLines.append(line)
+                }
+                continue
+            }
+
+            if let fence = openingFence(in: trimmed) {
+                appendProse()
+                activeFence = fence
+            } else {
+                proseLines.append(line)
+            }
+        }
+
+        if activeFence != nil {
+            appendCode()
+        } else {
+            appendProse()
+        }
+        return result
+    }
+
+    private static func openingFence(in line: String) -> String? {
+        guard let marker = line.first, marker == "`" || marker == "~" else {
+            return nil
+        }
+        let count = line.prefix { $0 == marker }.count
+        guard count >= 3 else { return nil }
+        return String(repeating: marker, count: count)
+    }
+
+    private static func isClosingFence(
+        _ line: String,
+        matching fence: String
+    ) -> Bool {
+        guard let marker = fence.first,
+              line.count >= fence.count,
+              line.allSatisfy({ $0 == marker }) else {
+            return false
+        }
+        return true
     }
 }
 
