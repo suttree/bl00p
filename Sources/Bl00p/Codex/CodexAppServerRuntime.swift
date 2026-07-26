@@ -23,6 +23,7 @@ actor CodexAppServerRuntime: AgentRuntime {
     private struct Session {
         let client: CodexAppServerClient
         var threadID: String
+        var approvalMode: ApprovalMode
         var currentTurnID: String?
         var lifecycleContinuation: AsyncStream<AgentEvent>.Continuation?
         var currentContinuation: AsyncStream<AgentEvent>.Continuation?
@@ -89,6 +90,7 @@ actor CodexAppServerRuntime: AgentRuntime {
             sessions[profile.id] = Session(
                 client: client,
                 threadID: "",
+                approvalMode: profile.approvalMode,
                 lifecycleContinuation: pair.continuation,
                 listenerTask: listener
             )
@@ -470,7 +472,6 @@ actor CodexAppServerRuntime: AgentRuntime {
 
         switch method {
         case "item/commandExecution/requestApproval":
-            let entryID = UUID()
             let command = params["command"]?.stringValue ?? "Command requested by Codex"
             let detail = [
                 params["reason"]?.stringValue,
@@ -479,6 +480,18 @@ actor CodexAppServerRuntime: AgentRuntime {
                 .compactMap { $0 }
                 .joined(separator: "\n")
 
+            if session.approvalMode == .auto {
+                await autoApprove(
+                    requestID: requestID,
+                    logText: "Auto-approved command",
+                    logDetail: detail.isEmpty ? command : "\(command)\n\(detail)",
+                    session: session,
+                    profileID: profileID
+                )
+                return
+            }
+
+            let entryID = UUID()
             session.pendingApprovals[entryID] = PendingApproval(
                 requestID: requestID,
                 method: method
@@ -498,9 +511,23 @@ actor CodexAppServerRuntime: AgentRuntime {
             session.currentContinuation?.yield(.status(.needsApproval))
 
         case "item/fileChange/requestApproval":
-            let entryID = UUID()
             let reason = params["reason"]?.stringValue
                 ?? "Codex requested permission to change files."
+
+            if session.approvalMode == .auto {
+                await autoApprove(
+                    requestID: requestID,
+                    logText: "Auto-approved file change",
+                    logDetail: [reason, params["grantRoot"]?.stringValue]
+                        .compactMap { $0 }
+                        .joined(separator: "\n"),
+                    session: session,
+                    profileID: profileID
+                )
+                return
+            }
+
+            let entryID = UUID()
             session.pendingApprovals[entryID] = PendingApproval(
                 requestID: requestID,
                 method: method
@@ -748,6 +775,34 @@ actor CodexAppServerRuntime: AgentRuntime {
         session.listenerTask?.cancel()
     }
 
+    private func autoApprove(
+        requestID: JSONValue,
+        logText: String,
+        logDetail: String,
+        session: Session,
+        profileID: UUID
+    ) async {
+        do {
+            try await session.client.respond(
+                to: requestID,
+                result: .object(["decision": .string("accept")])
+            )
+        } catch {
+            yieldTransportError(error, profileID: profileID)
+            return
+        }
+        yield(
+            .entry(
+                .init(
+                    kind: .system,
+                    text: logText,
+                    detail: logDetail.isEmpty ? nil : logDetail
+                )
+            ),
+            profileID: profileID
+        )
+    }
+
     private func questionEntry(for question: CodexQuestion) -> TimelineEntry {
         let options = question.options.isEmpty
             ? nil
@@ -854,7 +909,7 @@ enum CodexThreadConfiguration {
         var parameters: [String: JSONValue] = [
             "cwd": .string(workingDirectory),
             "runtimeWorkspaceRoots": .array([.string(workingDirectory)]),
-            "approvalPolicy": .string("on-request"),
+            "approvalPolicy": .string(profile.approvalMode == .auto ? "never" : "on-request"),
             "approvalsReviewer": .string("user"),
             "sandbox": .string("read-only"),
             "developerInstructions": .string(profile.instructions)

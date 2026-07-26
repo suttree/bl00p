@@ -58,6 +58,32 @@ struct ProfileInspectorView: View {
                     }
                 }
 
+                if profile.provider == .codex {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("APPROVALS")
+                            .font(.bl00p(.caption2, weight: .bold))
+                            .tracking(1.1)
+                            .foregroundStyle(.secondary)
+
+                        Picker("Approval mode", selection: $profile.approvalMode) {
+                            ForEach(ApprovalMode.allCases) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+
+                        Text(
+                            profile.approvalMode == .auto
+                                ? "Codex runs commands and file changes without asking. Only takes effect the next time this bot connects."
+                                : "Codex asks before running commands or changing files outside its read-only sandbox."
+                        )
+                            .font(.bl00p(.caption1))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text("ROLE PROMPT")
                         .font(.bl00p(.caption2, weight: .bold))
