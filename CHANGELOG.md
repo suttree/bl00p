@@ -1,0 +1,35 @@
+# Changelog
+
+All notable changes to bl00p are documented in this file.
+
+## Unreleased
+
+### Added
+
+- Add model selection when creating or configuring Claude and Codex bots.
+- Add image attachments through drag and drop, with previews in the composer and conversation timeline.
+- Add macOS notifications and a Dock badge when a bot finishes, fails, asks a question, or needs approval.
+- Add bot renaming from the sidebar.
+
+### Changed
+
+- Make Codex bots general-purpose agents instead of starting every conversation in review mode.
+- Start or reconnect a stopped bot automatically when its next message is sent, while preserving its transcript.
+- Keep bot profiles separate by applying each bot's model, prompt, and working directory to its own runtime session.
+- Simplify bot creation and settings around provider, model, instructions, and working directory.
+- Refresh the conversation, composer, sidebar, avatars, typography, and app icon.
+- Present tool activity in compact, expandable cards and use clearer status text throughout the app.
+- Increase the app build number from 2 to 6.
+
+### Fixed
+
+- Recover from stale Claude conversation identifiers by continuing in a fresh session without discarding the local transcript.
+- Keep Codex lifecycle events connected so idle disconnects are reported correctly.
+- Show blocked Claude actions as a readable question that the user can respond to.
+- Prevent duplicate sends while a bot is launching or working.
+- Migrate legacy bot names, starter cards, permission messages, and Codex review sessions when restoring saved state.
+- Stage Claude image attachments in an isolated temporary directory and remove them after each turn.
+
+### Tests
+
+- Expand coverage for notifications, Dock badges, model and prompt isolation, image attachments, session recovery, state migration, composer sizing, automatic reconnects, and long-lived runtime streams.
