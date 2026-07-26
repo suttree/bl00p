@@ -224,7 +224,7 @@ private struct TimelineEntryView: View {
                 Text(profile.name)
                     .font(.bl00p(.caption1, weight: .semibold))
                     .foregroundStyle(.secondary)
-                Text(entry.text)
+                Text(TranscriptMarkdown.attributed(entry.text))
                     .textSelection(.enabled)
                     .lineSpacing(3)
                     .padding(.vertical, 2)
@@ -454,6 +454,7 @@ private struct ComposerView: View {
     let send: () -> Void
     @State private var isDropTargeted = false
     @State private var editorWidth: CGFloat = 600
+    @State private var didReachCharacterLimit = false
 
     private var editorHeight: CGFloat {
         ComposerTextMetrics.editorHeight(
@@ -476,7 +477,7 @@ private struct ComposerView: View {
             }
 
             HStack(alignment: .bottom, spacing: 10) {
-                TextEditor(text: $draft)
+                TextEditor(text: limitedDraft)
                     .font(.bl00p(.body))
                     .scrollContentBackground(.hidden)
                     .frame(height: editorHeight)
@@ -517,13 +518,22 @@ private struct ComposerView: View {
                 .keyboardShortcut(.return, modifiers: [.command])
             }
 
-            Text(
-                isEnabled
-                    ? "Drop images here · ⌘↩ to send"
-                    : "Working…"
-            )
-                .font(.bl00p(.caption1))
-                .foregroundStyle(.secondary)
+            HStack {
+                Text(
+                    isEnabled
+                        ? "Drop images here · ⌘↩ to send"
+                        : "Working…"
+                )
+
+                Spacer()
+
+                Text(characterCountLabel)
+                    .foregroundStyle(
+                        didReachCharacterLimit ? Color.bl00pPink : .secondary
+                    )
+            }
+            .font(.bl00p(.caption1))
+            .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
@@ -546,6 +556,24 @@ private struct ComposerView: View {
     private var hasContent: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !attachments.isEmpty
+    }
+
+    private var limitedDraft: Binding<String> {
+        Binding(
+            get: { draft },
+            set: { proposedValue in
+                didReachCharacterLimit =
+                    proposedValue.count > ComposerLimits.maximumCharacters
+                draft = ComposerLimits.clamp(proposedValue)
+            }
+        )
+    }
+
+    private var characterCountLabel: String {
+        if didReachCharacterLimit {
+            return "\(ComposerLimits.maximumCharacters.formatted()) character limit"
+        }
+        return "\(draft.count.formatted()) / \(ComposerLimits.maximumCharacters.formatted())"
     }
 
     private func attachmentChip(_ attachment: ImageAttachment) -> some View {
@@ -593,11 +621,35 @@ private struct ComposerView: View {
     }
 }
 
+enum TranscriptMarkdown {
+    static func attributed(_ source: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace
+        )
+        return (try? AttributedString(markdown: source, options: options))
+            ?? AttributedString(source)
+    }
+}
+
+enum ComposerLimits {
+    static let maximumCharacters = 50_000
+    static let maximumEditorHeight: CGFloat = 240
+
+    static func clamp(_ text: String) -> String {
+        guard text.count > maximumCharacters else { return text }
+        return String(text.prefix(maximumCharacters))
+    }
+}
+
 enum ComposerTextMetrics {
     static func editorHeight(
         for text: String,
         width: CGFloat
     ) -> CGFloat {
+        if text.count > 5_000 {
+            return ComposerLimits.maximumEditorHeight
+        }
+
         let font = NSFont.systemFont(
             ofSize: NSFont.preferredFont(forTextStyle: .body).pointSize + 2
         )
@@ -611,6 +663,9 @@ enum ComposerTextMetrics {
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: font]
         )
-        return min(116, max(24, ceil(bounds.height) + 6))
+        return min(
+            ComposerLimits.maximumEditorHeight,
+            max(24, ceil(bounds.height) + 6)
+        )
     }
 }

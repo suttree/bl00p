@@ -91,7 +91,39 @@ func composerGrowsWhenTextWrapsWithoutANewline() {
     )
 
     #expect(wrappedHeight > shortHeight)
-    #expect(wrappedHeight <= 116)
+    #expect(wrappedHeight <= ComposerLimits.maximumEditorHeight)
+}
+
+@Test
+func composerUsesAGenerousExplicitCharacterLimit() {
+    let oversized = String(
+        repeating: "a",
+        count: ComposerLimits.maximumCharacters + 1_000
+    )
+    let clamped = ComposerLimits.clamp(oversized)
+
+    #expect(clamped.count == 50_000)
+    #expect(
+        ComposerTextMetrics.editorHeight(for: clamped, width: 420)
+            == ComposerLimits.maximumEditorHeight
+    )
+}
+
+@Test
+func assistantMarkdownProducesClickableLinksAndPreservesLayout() throws {
+    let rendered = TranscriptMarkdown.attributed(
+        """
+        Draft PR created: [suttree/bl00p#1](https://github.com/suttree/bl00p/pull/1)
+
+        - Branch: `feature/improve-agent-workflows`
+        """
+    )
+    let link = try #require(rendered.runs.compactMap(\.link).first)
+
+    #expect(link.absoluteString == "https://github.com/suttree/bl00p/pull/1")
+    #expect(String(rendered.characters).contains("suttree/bl00p#1"))
+    #expect(String(rendered.characters).contains("\n\n- Branch:"))
+    #expect(!String(rendered.characters).contains("https://github.com"))
 }
 
 @Test
