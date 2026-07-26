@@ -493,9 +493,13 @@ private struct TimelineEntryView: View {
                 }
             }
 
-            Text(entry.text)
-                .font(.bl00p(.callout, design: .monospaced))
-                .textSelection(.enabled)
+            if entry.title == "Approve implementation plan" {
+                MarkdownMessageView(source: entry.text)
+            } else {
+                Text(entry.text)
+                    .font(.bl00p(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+            }
 
             if let detail = entry.detail {
                 Text(detail)

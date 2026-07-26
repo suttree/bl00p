@@ -20,6 +20,7 @@ final class AppModel: ObservableObject {
     private var runGenerations: [UUID: UUID] = [:]
     private var connectedProfileIDs: Set<UUID> = []
     private var inFlightUserEntryIDs: [UUID: UUID] = [:]
+    private var planningTurnAssistantEntryIDs: [UUID: Set<UUID>] = [:]
     private var notificationsArePrepared = false
 
     init(
@@ -454,6 +455,10 @@ final class AppModel: ObservableObject {
                 ),
                 handoff: pendingHandoff
             )
+            if managerWorkflows[profileID]?.stage == .planning,
+               managerWorkflows[profileID]?.planApprovalEntryID == nil {
+                planningTurnAssistantEntryIDs[profileID] = []
+            }
             let responseStream = await runtime.respond(
                 to: runtimeMessage,
                 attachments: attachments,
@@ -879,15 +884,34 @@ final class AppModel: ObservableObject {
     ) {
         guard let workflow = managerWorkflows[managerID],
               expectedProfileID(for: workflow) == profileID else { return }
-        let summary = latestAssistantText(for: profileID)
 
-        switch workflow.stage {
-        case .planning:
+        if workflow.stage == .planning {
+            let capturedEntryIDs =
+                planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
+                ?? []
+            guard let planEntry = sessions[profileID]?.entries.last(where: {
+                capturedEntryIDs.contains($0.id)
+                    && $0.kind == .assistant
+                    && !$0.text.isEmpty
+            }) else {
+                pauseWorkflow(
+                    managerID,
+                    reason: "\(profileName(profileID)) finished the planning turn without returning an implementation plan. Send feedback to try again."
+                )
+                return
+            }
             requestWorkflowPlanApproval(
                 managerID,
-                implementationPlan: summary
+                implementationPlan: planEntry.text,
+                replacingAssistantEntryID: planEntry.id
             )
+            return
+        }
 
+        let summary = latestAssistantText(for: profileID)
+        switch workflow.stage {
+        case .planning:
+            break
         case .building:
             guard let next = transitionWorkflow(managerID, to: .reviewing),
                   let reviewerID = next.team.reviewerProfileID else { return }
@@ -1013,10 +1037,15 @@ final class AppModel: ObservableObject {
 
     private func requestWorkflowPlanApproval(
         _ managerID: UUID,
-        implementationPlan: String
+        implementationPlan: String,
+        replacingAssistantEntryID assistantEntryID: UUID
     ) {
         guard var workflow = managerWorkflows[managerID],
-              workflow.stage == .planning else {
+              workflow.stage == .planning,
+              var state = sessions[managerID],
+              let entryIndex = state.entries.firstIndex(where: {
+                  $0.id == assistantEntryID && $0.kind == .assistant
+              }) else {
             return
         }
 
@@ -1028,19 +1057,22 @@ final class AppModel: ObservableObject {
             "Waiting for your approval of the implementation plan."
         workflow.updatedAt = .now
 
-        var state = sessions[managerID] ?? AgentSessionState()
         let previousStatus = state.status
         state.status = .needsApproval
         state.hasUnreadCompletion = false
-        state.entries.append(
+        let assistantTimestamp = state.entries[entryIndex].timestamp
+        state.entries.remove(at: entryIndex)
+        state.entries.insert(
             .init(
                 id: approvalID,
                 kind: .approval,
                 title: "Approve implementation plan",
                 text: implementationPlan,
                 detail: "Approve to hand this plan to the Builder and continue the managed workflow. Decline to pause and send revision feedback.",
+                timestamp: assistantTimestamp,
                 approvalState: .pending
-            )
+            ),
+            at: entryIndex
         )
 
         sessions[managerID] = state
@@ -1320,10 +1352,14 @@ final class AppModel: ObservableObject {
         performSend(runtimeMessage, to: targetProfileID)
     }
 
+    private func latestAssistantEntry(for profileID: UUID) -> TimelineEntry? {
+        sessions[profileID]?.entries.last(where: {
+            $0.kind == .assistant && !$0.text.isEmpty
+        })
+    }
+
     private func latestAssistantText(for profileID: UUID) -> String {
-        sessions[profileID]?.entries
-            .last(where: { $0.kind == .assistant && !$0.text.isEmpty })?
-            .text
+        latestAssistantEntry(for: profileID)?.text
             ?? "No assistant summary was captured."
     }
 
@@ -1403,11 +1439,19 @@ final class AppModel: ObservableObject {
             }
         case .entry(let entry):
             state.entries.append(entry)
+            if entry.kind == .assistant,
+               planningTurnAssistantEntryIDs[profileID] != nil {
+                planningTurnAssistantEntryIDs[profileID]?.insert(entry.id)
+            }
         case .upsertEntry(let entry):
             if let index = state.entries.firstIndex(where: { $0.id == entry.id }) {
                 state.entries[index] = entry
             } else {
                 state.entries.append(entry)
+            }
+            if entry.kind == .assistant,
+               planningTurnAssistantEntryIDs[profileID] != nil {
+                planningTurnAssistantEntryIDs[profileID]?.insert(entry.id)
             }
         case .approvalResolved(let entryID, let approvalState):
             if let index = state.entries.firstIndex(where: { $0.id == entryID }) {

@@ -36,6 +36,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Show each managed implementation plan only once in its approval card,
+  preserving Markdown formatting and preventing later runtime updates from
+  replacing the approval state.
 - Keep the selected provider when adding a bot, including after switching between Claude and Codex.
 - Focus the message composer when the app opens or the user switches bots.
 - Keep loading saved profiles and sessions when a bot profile gains new fields, instead of silently discarding all persisted state on decode failure.
