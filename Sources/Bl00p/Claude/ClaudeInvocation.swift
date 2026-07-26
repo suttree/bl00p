@@ -5,6 +5,48 @@ struct ClaudeInvocation: Sendable {
     let resume: Bool
     let profile: BotProfile
     let prompt: String
+    let attachments: [ImageAttachment]
+
+    /// A directory holding copies of `attachments`, created fresh per turn so
+    /// `--add-dir` grants Claude access only to the attached files rather
+    /// than to their original parent directories (e.g. all of ~/Desktop).
+    let stagedAttachmentDirectory: URL?
+    private let stagedAttachments: [ImageAttachment]
+
+    init(
+        sessionID: String,
+        resume: Bool,
+        profile: BotProfile,
+        prompt: String,
+        attachments: [ImageAttachment] = []
+    ) throws {
+        self.sessionID = sessionID
+        self.resume = resume
+        self.profile = profile
+        self.prompt = prompt
+        self.attachments = attachments
+
+        guard !attachments.isEmpty else {
+            self.stagedAttachmentDirectory = nil
+            self.stagedAttachments = []
+            return
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bl00p-attachments", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        self.stagedAttachmentDirectory = directory
+        self.stagedAttachments = try attachments.enumerated().map { index, attachment in
+            let source = URL(fileURLWithPath: attachment.path)
+            let slot = directory.appendingPathComponent("\(index)", isDirectory: true)
+            try FileManager.default.createDirectory(at: slot, withIntermediateDirectories: true)
+            let destination = slot.appendingPathComponent(source.lastPathComponent)
+            try FileManager.default.copyItem(at: source, to: destination)
+            return ImageAttachment(id: attachment.id, path: destination.path)
+        }
+    }
 
     var arguments: [String] {
         var result = [
@@ -20,13 +62,32 @@ struct ClaudeInvocation: Sendable {
         ]
 
         result.append(contentsOf: allowedTools)
+        if let modelID = profile.modelID, !modelID.isEmpty {
+            result.append(contentsOf: ["--model", modelID])
+        }
+        if let stagedAttachmentDirectory {
+            result.append("--add-dir")
+            result.append(stagedAttachmentDirectory.path)
+        }
         result.append(contentsOf: [
             resume ? "--resume" : "--session-id",
             sessionID,
             "--",
-            prompt
+            promptWithAttachments
         ])
         return result
+    }
+
+    private var promptWithAttachments: String {
+        guard !stagedAttachments.isEmpty else { return prompt }
+        let paths = stagedAttachments.map { "- \($0.path)" }.joined(separator: "\n")
+        let request = prompt.isEmpty ? "Please inspect the attached image(s)." : prompt
+        return """
+        \(request)
+
+        The user attached these local images. Use the Read tool to inspect them:
+        \(paths)
+        """
     }
 
     private var systemPrompt: String {
@@ -67,8 +128,14 @@ struct ClaudeInvocation: Sendable {
             "Bash(git merge-base:*)",
             "Bash(git ls-files:*)",
             "Bash(git grep:*)",
+            "Bash(swift --version:*)",
             "Bash(swift test:*)",
             "Bash(swift build:*)",
+            "Bash(env swift --version:*)",
+            "Bash(xcrun --find swift:*)",
+            "Bash(xcrun swift test:*)",
+            "Bash(xcrun swift build:*)",
+            "Bash(xcode-select -p:*)",
             "Bash(xcodebuild test:*)",
             "Bash(xcodebuild build:*)",
             "Bash(npm test:*)",

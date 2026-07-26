@@ -2,39 +2,44 @@ import SwiftUI
 
 struct SidebarView: View {
     @ObservedObject var model: AppModel
+    @State private var renameTargetID: UUID?
+    @State private var renameDraft = ""
 
     var body: some View {
         VStack(spacing: 0) {
             brand
 
             List(selection: $model.selectedBotID) {
-                Section("BOT LOOP") {
-                    ForEach(model.profiles) { profile in
-                        BotRow(
-                            profile: profile,
-                            session: model.session(for: profile.id)
-                        )
-                        .tag(Optional(profile.id))
-                        .contextMenu {
-                            Button("Edit Prompt") {
-                                model.showSettings(for: profile.id)
-                            }
-
-                            Button("Set Working Directory…") {
-                                model.chooseWorkingDirectory(for: profile.id)
-                            }
-
-                            Divider()
-
-                            Button("Duplicate Bot") {
-                                model.duplicate(profile.id)
-                            }
-
-                            Button("Delete Bot", role: .destructive) {
-                                model.delete(profile.id)
-                            }
-                            .disabled(model.profiles.count == 1)
+                ForEach(model.profiles) { profile in
+                    BotRow(
+                        profile: profile,
+                        session: model.session(for: profile.id)
+                    )
+                    .tag(Optional(profile.id))
+                    .contextMenu {
+                        Button("Rename…") {
+                            renameDraft = profile.name
+                            renameTargetID = profile.id
                         }
+
+                        Button("Edit Prompt") {
+                            model.showSettings(for: profile.id)
+                        }
+
+                        Button("Set Working Directory…") {
+                            model.chooseWorkingDirectory(for: profile.id)
+                        }
+
+                        Divider()
+
+                        Button("Duplicate Bot") {
+                            model.duplicate(profile.id)
+                        }
+
+                        Button("Delete Bot", role: .destructive) {
+                            model.delete(profile.id)
+                        }
+                        .disabled(model.profiles.count == 1)
                     }
                 }
             }
@@ -43,24 +48,13 @@ struct SidebarView: View {
 
             Divider()
 
-            VStack(spacing: 10) {
-                Button {
-                    model.launchAll()
-                } label: {
-                    Label("Launch Loop", systemImage: "play.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-
-                Button {
-                    model.isAddingBot = true
-                } label: {
-                    Label("Add Bot", systemImage: "plus")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
+            Button {
+                model.isAddingBot = true
+            } label: {
+                Label("Add Bot", systemImage: "plus")
+                    .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.bordered)
             .padding(14)
         }
         .background(
@@ -70,38 +64,40 @@ struct SidebarView: View {
                 endPoint: .bottom
             )
         )
+        .alert(
+            "Rename bot",
+            isPresented: Binding(
+                get: { renameTargetID != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        renameTargetID = nil
+                    }
+                }
+            )
+        ) {
+            TextField("Bot name", text: $renameDraft)
+            Button("Cancel", role: .cancel) {
+                renameTargetID = nil
+            }
+            Button("Rename") {
+                if let renameTargetID {
+                    model.rename(renameTargetID, to: renameDraft)
+                }
+                renameTargetID = nil
+            }
+            .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("Choose the name shown in the sidebar and conversation.")
+        }
     }
 
     private var brand: some View {
-        HStack(spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.bl00pPink)
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 36, height: 36)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text("bl00p")
-                    .font(.bl00p(.title3, weight: .heavy, design: .rounded))
-                    .foregroundStyle(Color.bl00pInk)
-                Text("BOT LOOP")
-                    .font(.system(size: 10, weight: .bold))
-                    .tracking(1.8)
-                    .foregroundStyle(Color.bl00pPink)
-            }
+        HStack {
+            Text("bl00p")
+                .font(.bl00p(.title3, weight: .heavy, design: .rounded))
+                .foregroundStyle(Color.bl00pInk)
 
             Spacer()
-
-            Button {
-                model.isInspectorVisible.toggle()
-            } label: {
-                Image(systemName: "sidebar.trailing")
-            }
-            .buttonStyle(.plain)
-            .help("Toggle bot settings")
         }
         .padding(.horizontal, 14)
         .padding(.top, 14)
@@ -119,7 +115,7 @@ private struct BotRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            BotAvatar(provider: profile.provider, size: 32)
+            BotAvatar(name: profile.name, provider: profile.provider, size: 32)
                 .overlay(alignment: .topTrailing) {
                     if showsAttention {
                         Circle()
@@ -135,8 +131,8 @@ private struct BotRow: View {
                     .font(.bl00p(.callout, weight: .semibold))
                     .lineLimit(1)
 
-                Text("\(profile.provider.displayName) · \(profile.role.displayName)")
-                    .font(.bl00p(.caption1))
+                Text("\(profile.provider.displayName) · \(profile.modelDisplayName)")
+                    .font(.bl00p(.caption2))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
