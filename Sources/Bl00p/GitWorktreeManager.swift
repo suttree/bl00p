@@ -1,0 +1,361 @@
+import Foundation
+
+protocol GitWorktreeManaging: Sendable {
+    func prepareWorktree(
+        for profile: BotProfile,
+        startingPoint: String?,
+        handoffID: UUID?
+    ) async throws -> GitWorktreeOwnership
+
+    func makeHandoff(
+        from profile: BotProfile,
+        session: AgentSessionState
+    ) async throws -> GitHandoffPackage
+}
+
+enum GitWorktreeError: LocalizedError {
+    case noRepository
+    case invalidRepository(String)
+    case conflictingWorktree(String)
+    case commandFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .noRepository:
+            "Choose a Git repository before launching this implementation bot."
+        case .invalidRepository(let path):
+            "\(path) is not inside a Git repository."
+        case .conflictingWorktree(let path):
+            "The managed worktree at \(path) belongs to a different branch."
+        case .commandFailed(let detail):
+            detail
+        }
+    }
+}
+
+actor GitWorktreeManager: GitWorktreeManaging {
+    func prepareWorktree(
+        for profile: BotProfile,
+        startingPoint: String? = nil,
+        handoffID: UUID? = nil
+    ) throws -> GitWorktreeOwnership {
+        guard !profile.workingDirectory.isEmpty else {
+            throw GitWorktreeError.noRepository
+        }
+
+        let selectedDirectory = URL(fileURLWithPath: profile.workingDirectory)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        let repository = try primaryRepositoryRoot(from: selectedDirectory)
+
+        if let ownership = profile.worktree,
+           ownership.ownerProfileID == profile.id,
+           canonicalPath(ownership.repositoryPath) == repository.path,
+           isReusable(ownership) {
+            return ownership
+        }
+
+        let profileMark = String(
+            profile.id.uuidString
+                .lowercased()
+                .replacingOccurrences(of: "-", with: "")
+                .prefix(8)
+        )
+        let handoffMark = handoffID.map {
+            "-" + String(
+                $0.uuidString
+                    .lowercased()
+                    .replacingOccurrences(of: "-", with: "")
+                    .prefix(6)
+            )
+        } ?? ""
+        let name = branchSlug(profile.name)
+        let branch = "bl00p/\(name)-\(profileMark)\(handoffMark)"
+        let worktreeRoot = repository
+            .deletingLastPathComponent()
+            .appendingPathComponent(".bl00p-worktrees", isDirectory: true)
+        let worktree = worktreeRoot.appendingPathComponent(
+            "\(repository.lastPathComponent)-\(profileMark)\(handoffMark)",
+            isDirectory: true
+        )
+        let worktreePath = canonicalPath(worktree.path)
+        let base = startingPoint ?? "HEAD"
+        let baseRevision = try git(
+            ["rev-parse", "\(base)^{commit}"],
+            in: repository
+        ).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let registered = try registeredWorktrees(in: repository)
+        if let registeredBranch = registered[worktreePath] {
+            guard registeredBranch == branch else {
+                throw GitWorktreeError.conflictingWorktree(worktreePath)
+            }
+        } else {
+            guard !FileManager.default.fileExists(atPath: worktreePath) else {
+                throw GitWorktreeError.conflictingWorktree(worktreePath)
+            }
+            try FileManager.default.createDirectory(
+                at: worktreeRoot,
+                withIntermediateDirectories: true
+            )
+
+            let branchExists = try git(
+                ["show-ref", "--verify", "--quiet", "refs/heads/\(branch)"],
+                in: repository,
+                allowFailure: true
+            ).status == 0
+            let arguments = branchExists
+                ? ["worktree", "add", worktreePath, branch]
+                : ["worktree", "add", "-b", branch, worktreePath, base]
+            _ = try git(arguments, in: repository)
+        }
+
+        return GitWorktreeOwnership(
+            ownerProfileID: profile.id,
+            repositoryPath: repository.path,
+            worktreePath: worktreePath,
+            branch: branch,
+            baseRevision: baseRevision
+        )
+    }
+
+    func makeHandoff(
+        from profile: BotProfile,
+        session: AgentSessionState
+    ) throws -> GitHandoffPackage {
+        guard let ownership = profile.worktree,
+              ownership.ownerProfileID == profile.id else {
+            throw GitWorktreeError.noRepository
+        }
+
+        let worktree = URL(fileURLWithPath: ownership.worktreePath)
+        let branch = try git(["branch", "--show-current"], in: worktree)
+            .stdout
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard branch == ownership.branch else {
+            throw GitWorktreeError.conflictingWorktree(ownership.worktreePath)
+        }
+        let head = try git(["rev-parse", "HEAD"], in: worktree)
+            .stdout
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let status = try git(["status", "--short"], in: worktree)
+            .stdout
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let task = session.entries
+            .last(where: { $0.kind == .user && !$0.text.isEmpty })?
+            .text
+            ?? "No task context was captured."
+        let evidence = HandoffTestEvidence.latest(in: session.entries)
+
+        return GitHandoffPackage(
+            sourceProfileID: profile.id,
+            sourceName: profile.name,
+            repositoryPath: ownership.repositoryPath,
+            worktreePath: ownership.worktreePath,
+            branch: ownership.branch,
+            baseRevision: ownership.baseRevision,
+            headRevision: head,
+            taskContext: task,
+            testStatus: evidence.status,
+            testSummary: evidence.summary,
+            workingTreeSummary: status.isEmpty
+                ? "Clean"
+                : status.truncated(to: 1_000)
+        )
+    }
+
+    private func primaryRepositoryRoot(from directory: URL) throws -> URL {
+        let rootResult = try git(
+            ["rev-parse", "--show-toplevel"],
+            in: directory,
+            allowFailure: true
+        )
+        guard rootResult.status == 0 else {
+            throw GitWorktreeError.invalidRepository(directory.path)
+        }
+
+        let list = try git(["worktree", "list", "--porcelain"], in: directory)
+            .stdout
+        guard let primaryPath = list
+            .split(separator: "\n")
+            .first(where: { $0.hasPrefix("worktree ") })?
+            .dropFirst("worktree ".count),
+            !primaryPath.isEmpty else {
+            let fallback = rootResult.stdout
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return URL(fileURLWithPath: fallback)
+                .standardizedFileURL
+                .resolvingSymlinksInPath()
+        }
+        return URL(fileURLWithPath: String(primaryPath))
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+    }
+
+    private func isReusable(_ ownership: GitWorktreeOwnership) -> Bool {
+        let worktree = URL(fileURLWithPath: ownership.worktreePath)
+        guard FileManager.default.fileExists(atPath: worktree.path) else {
+            return false
+        }
+        guard let branch = try? git(
+            ["branch", "--show-current"],
+            in: worktree,
+            allowFailure: true
+        ) else { return false }
+        return branch.status == 0
+            && branch.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                == ownership.branch
+    }
+
+    private func registeredWorktrees(in repository: URL) throws -> [String: String] {
+        let output = try git(["worktree", "list", "--porcelain"], in: repository)
+            .stdout
+        var result: [String: String] = [:]
+        var path: String?
+
+        for line in output.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix("worktree ") {
+                path = canonicalPath(String(line.dropFirst("worktree ".count)))
+            } else if line.hasPrefix("branch refs/heads/"), let path {
+                result[path] = String(line.dropFirst("branch refs/heads/".count))
+            } else if line.isEmpty {
+                path = nil
+            }
+        }
+        return result
+    }
+
+    private func branchSlug(_ name: String) -> String {
+        let lowered = name.lowercased()
+        var result = ""
+        var previousWasDash = false
+
+        for character in lowered {
+            if character.isLetter || character.isNumber {
+                result.append(character)
+                previousWasDash = false
+            } else if !previousWasDash && !result.isEmpty {
+                result.append("-")
+                previousWasDash = true
+            }
+        }
+        let trimmed = result.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return trimmed.isEmpty ? "builder" : String(trimmed.prefix(32))
+    }
+
+    private func canonicalPath(_ path: String) -> String {
+        URL(fileURLWithPath: path)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .path
+    }
+
+    private struct GitResult {
+        let status: Int32
+        let stdout: String
+        let stderr: String
+    }
+
+    private func git(
+        _ arguments: [String],
+        in directory: URL,
+        allowFailure: Bool = false
+    ) throws -> GitResult {
+        let process = Process()
+        let standardOutput = Pipe()
+        let standardError = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = arguments
+        process.currentDirectoryURL = directory
+        process.standardOutput = standardOutput
+        process.standardError = standardError
+
+        do {
+            try process.run()
+        } catch {
+            throw GitWorktreeError.commandFailed(error.localizedDescription)
+        }
+        process.waitUntilExit()
+
+        let output = String(
+            data: standardOutput.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        ) ?? ""
+        let error = String(
+            data: standardError.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        ) ?? ""
+        let result = GitResult(
+            status: process.terminationStatus,
+            stdout: output,
+            stderr: error
+        )
+        if !allowFailure && result.status != 0 {
+            let command = (["git"] + arguments).joined(separator: " ")
+            let detail = error
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw GitWorktreeError.commandFailed(
+                detail.isEmpty ? "\(command) failed." : detail
+            )
+        }
+        return result
+    }
+}
+
+struct HandoffTestEvidence: Equatable {
+    let status: HandoffTestStatus
+    let summary: String
+
+    static func latest(in entries: [TimelineEntry]) -> HandoffTestEvidence {
+        let testEntry = entries.last { entry in
+            guard entry.kind == .command else { return false }
+            let command = entry.text.lowercased()
+            return [
+                "swift test",
+                "xcodebuild test",
+                "npm test",
+                "npm run test",
+                "pnpm test",
+                "yarn test",
+                "pytest",
+                "cargo test",
+                "go test",
+                "bundle exec rspec"
+            ].contains(where: command.contains)
+        }
+
+        guard let testEntry else {
+            return .init(
+                status: .notRun,
+                summary: "No test command was recorded."
+            )
+        }
+
+        let failed = testEntry.title?
+            .localizedCaseInsensitiveContains("failed") == true
+        let completed = testEntry.title?
+            .localizedCaseInsensitiveContains("finished") == true
+            || testEntry.title?
+                .localizedCaseInsensitiveContains("completed") == true
+        let status: HandoffTestStatus = failed
+            ? .failed
+            : (completed ? .passed : .notRun)
+        let detail = testEntry.detail?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let summary = [
+            "`\(testEntry.text)`",
+            detail?.isEmpty == false ? detail?.truncated(to: 500) : nil
+        ]
+            .compactMap { $0 }
+            .joined(separator: "\n")
+
+        return .init(status: status, summary: summary)
+    }
+}
+
+private extension String {
+    func truncated(to limit: Int) -> String {
+        guard count > limit else { return self }
+        return String(prefix(limit)) + "…"
+    }
+}
