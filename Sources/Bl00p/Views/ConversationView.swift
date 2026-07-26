@@ -213,7 +213,10 @@ private struct TimelineEntryView: View {
             }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .background(Color.bl00pPink, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .background(
+                    Color.bl00pUserBubble,
+                    in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+                )
                 .foregroundStyle(.white)
         }
     }
@@ -331,10 +334,10 @@ private struct TimelineEntryView: View {
             }
         }
         .padding(15)
-        .background(Color.bl00pPinkSoft.opacity(0.75), in: RoundedRectangle(cornerRadius: 14))
+        .background(Color.bl00pPinkSoft, in: RoundedRectangle(cornerRadius: 14))
         .overlay {
             RoundedRectangle(cornerRadius: 14)
-                .stroke(Color.bl00pPink.opacity(0.25), lineWidth: 1)
+                .stroke(Color.bl00pPink.opacity(0.40), lineWidth: 1)
         }
     }
 }

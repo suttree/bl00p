@@ -1,12 +1,70 @@
+import AppKit
 import Foundation
 import Testing
 @testable import Bl00p
+
+@Test
+func themeAdaptsToSystemAppearanceWithLegibleBrandSurfaces() throws {
+    let light = try #require(NSAppearance(named: .aqua))
+    let dark = try #require(NSAppearance(named: .darkAqua))
+    let lightAccent = resolved(Bl00pTheme.accent, for: light)
+    let darkAccent = resolved(Bl00pTheme.accent, for: dark)
+    let lightBubble = resolved(Bl00pTheme.userBubble, for: light)
+    let darkBubble = resolved(Bl00pTheme.userBubble, for: dark)
+    let lightApproval = resolved(Bl00pTheme.approvalBackground, for: light)
+    let darkApproval = resolved(Bl00pTheme.approvalBackground, for: dark)
+
+    #expect(lightAccent != darkAccent)
+    #expect(lightApproval != darkApproval)
+    #expect(
+        Bl00pTheme.sidebarColors(for: .light)
+            != Bl00pTheme.sidebarColors(for: .dark)
+    )
+    #expect(contrastRatio(lightBubble, .white) >= 4.5)
+    #expect(contrastRatio(darkBubble, .white) >= 4.5)
+    #expect(contrastRatio(lightAccent, lightApproval) >= 4.5)
+    #expect(contrastRatio(darkAccent, darkApproval) >= 4.5)
+
+    for appearance in [light, dark] {
+        let mint = resolved(Bl00pTheme.mint, for: appearance)
+        #expect(contrastRatio(mint, Bl00pTheme.avatarInk) >= 4.5)
+    }
+}
 
 @Test
 func defaultProfilesCoverTheLoop() {
     #expect(BotProfile.defaults.map(\.role) == [.builder, .reviewer, .publisher])
     #expect(Set(BotProfile.defaults.map(\.provider)) == [.claude, .codex])
     #expect(BotProfile.defaults.map(\.name) == ["Claude", "Codex", "Claude"])
+}
+
+private func contrastRatio(_ first: NSColor, _ second: NSColor) -> CGFloat {
+    let firstLuminance = relativeLuminance(first)
+    let secondLuminance = relativeLuminance(second)
+    let lighter = max(firstLuminance, secondLuminance)
+    let darker = min(firstLuminance, secondLuminance)
+    return (lighter + 0.05) / (darker + 0.05)
+}
+
+private func resolved(_ color: NSColor, for appearance: NSAppearance) -> NSColor {
+    var result = color
+    appearance.performAsCurrentDrawingAppearance {
+        result = color.usingColorSpace(.sRGB) ?? color
+    }
+    return result
+}
+
+private func relativeLuminance(_ color: NSColor) -> CGFloat {
+    guard let rgb = color.usingColorSpace(.sRGB) else { return 0 }
+    let components = [rgb.redComponent, rgb.greenComponent, rgb.blueComponent]
+        .map { component in
+            component <= 0.04045
+                ? component / 12.92
+                : pow((component + 0.055) / 1.055, 2.4)
+        }
+    return 0.2126 * components[0]
+        + 0.7152 * components[1]
+        + 0.0722 * components[2]
 }
 
 @Test
