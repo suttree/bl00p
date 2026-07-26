@@ -6,6 +6,8 @@ All notable changes to bl00p are documented in this file.
 
 ### Added
 
+- Add signed automatic update checks, installation, and relaunch through
+  Sparkle and GitHub Releases.
 - Add automatic light and dark appearances across every app surface.
 - Add in-app approval cards for individual Claude tool calls, returning each
   approval or rejection to the active Claude session.

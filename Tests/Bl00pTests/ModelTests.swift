@@ -4,6 +4,33 @@ import Testing
 @testable import Bl00p
 
 @Test
+func updateFeedUsesSignedGitHubReleaseAssets() throws {
+    let projectRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let infoURL = projectRoot
+        .appendingPathComponent("Resources")
+        .appendingPathComponent("Info.plist")
+    let data = try Data(contentsOf: infoURL)
+    let info = try #require(
+        PropertyListSerialization.propertyList(from: data, format: nil)
+            as? [String: Any]
+    )
+    let publicKey = try #require(info["SUPublicEDKey"] as? String)
+    let decodedPublicKey = try #require(Data(base64Encoded: publicKey))
+
+    #expect(
+        info["SUFeedURL"] as? String
+            == "https://github.com/suttree/bl00p/releases/latest/download/appcast.xml"
+    )
+    #expect(info["SUEnableAutomaticChecks"] as? Bool == true)
+    #expect(info["SUAutomaticallyUpdate"] as? Bool == true)
+    #expect(info["SUVerifyUpdateBeforeExtraction"] as? Bool == true)
+    #expect(decodedPublicKey.count == 32)
+}
+
+@Test
 func themeAdaptsToSystemAppearanceWithLegibleBrandSurfaces() throws {
     let light = try #require(NSAppearance(named: .aqua))
     let dark = try #require(NSAppearance(named: .darkAqua))

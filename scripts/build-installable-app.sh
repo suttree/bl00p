@@ -5,10 +5,10 @@ project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 developer_dir=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
 install_dir="$project_root/.build/install"
 install_app="$install_dir/bl00p.app"
-version=$(
+version=${APP_VERSION:-$(
     plutil -extract CFBundleShortVersionString raw \
         "$project_root/Resources/Info.plist"
-)
+)}
 archive="$install_dir/bl00p-$version-macos-arm64.zip"
 
 mkdir -p "$project_root/.build/release-home"

@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version to release, without the v prefix
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Resolve release version
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version=${GITHUB_REF_NAME#v}
+          else
+            version=$DISPATCH_VERSION
+          fi
+
+          if ! printf '%s' "$version" |
+              grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'; then
+            echo "Invalid semantic version: $version" >&2
+            exit 1
+          fi
+
+          echo "APP_VERSION=$version" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        run: swift test --disable-sandbox
+
+      - name: Build installable app
+        env:
+          BUILD_NUMBER: ${{ github.run_id }}
+        run: sh scripts/build-installable-app.sh
+
+      - name: Generate signed appcast
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "SPARKLE_PRIVATE_KEY is not configured" >&2
+            exit 1
+          fi
+
+          archive="bl00p-$APP_VERSION-macos-arm64.zip"
+          update_dir="$RUNNER_TEMP/bl00p-update"
+          mkdir -p "$update_dir"
+          cp ".build/install/$archive" "$update_dir/$archive"
+          printf 'See the GitHub release for changes in bl00p %s.\n' \
+              "$APP_VERSION" > "$update_dir/bl00p-$APP_VERSION-macos-arm64.md"
+
+          printf '%s' "$SPARKLE_PRIVATE_KEY" |
+              .build/artifacts/sparkle/Sparkle/bin/generate_appcast \
+                  --ed-key-file - \
+                  --download-url-prefix \
+                  "https://github.com/suttree/bl00p/releases/download/$RELEASE_TAG/" \
+                  --link "https://github.com/suttree/bl00p" \
+                  --maximum-deltas 0 \
+                  --embed-release-notes \
+                  -o "$RUNNER_TEMP/appcast.xml" \
+                  "$update_dir"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+              ".build/install/bl00p-$APP_VERSION-macos-arm64.zip" \
+              "$RUNNER_TEMP/appcast.xml" \
+              --target "$GITHUB_SHA" \
+              --title "bl00p $APP_VERSION" \
+              --generate-notes
