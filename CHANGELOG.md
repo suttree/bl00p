@@ -24,6 +24,8 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Keep the selected provider when adding a bot, including after switching between Claude and Codex.
+- Focus the message composer when the app opens or the user switches bots.
 - Keep loading saved profiles and sessions when a bot profile gains new fields, instead of silently discarding all persisted state on decode failure.
 - Recover from stale Claude conversation identifiers by continuing in a fresh session without discarding the local transcript.
 - Keep Codex lifecycle events connected so idle disconnects are reported correctly.
