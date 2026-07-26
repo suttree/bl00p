@@ -9,6 +9,7 @@ The current prototype includes:
 - Editable role prompts and working directories
 - A Slack-like sidebar with attention badges
 - Automatic light and dark appearances that follow the macOS system setting
+- Signed automatic updates through GitHub Releases, with install and relaunch
 - Consistent, legible typography across conversations, settings, and bot creation
 - Structured messages, commands, findings, and approval cards
 - Real Codex sessions powered by `codex app-server`, with workspace-scoped writes and in-app approvals for commands, file changes, extra permissions, and connected-app mutations
@@ -44,8 +45,11 @@ sh scripts/build-installable-app.sh
 
 The script writes `bl00p.app` and a bundle-preserving ZIP to
 `.build/install/`. The app is ad-hoc signed for local installation: drag the
-app into `/Applications`. Distribution to other Macs requires Developer ID
-signing and Apple notarization.
+app into `/Applications`. GitHub releases use Developer ID signing and Apple
+notarization before the stapled app is archived for distribution.
+
+Release cadence, Sparkle signing, and GitHub Actions setup are documented in
+[docs/RELEASING.md](docs/RELEASING.md).
 
 Claude Code must be installed and authenticated before launching a Claude
 profile:

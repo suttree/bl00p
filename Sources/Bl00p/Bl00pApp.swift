@@ -3,7 +3,13 @@ import SwiftUI
 
 @main
 struct Bl00pApp: App {
-    @StateObject private var model = AppModel()
+    @StateObject private var model: AppModel
+    private let updateController: UpdateController
+
+    init() {
+        _model = StateObject(wrappedValue: AppModel())
+        updateController = UpdateController()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -13,6 +19,10 @@ struct Bl00pApp: App {
         .defaultSize(width: 1240, height: 780)
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
+            CommandGroup(after: .appInfo) {
+                CheckForUpdatesView(updater: updateController.updater)
+            }
+
             CommandGroup(after: .sidebar) {
                 Button("Show Bot Settings") {
                     model.isInspectorVisible.toggle()

@@ -4,6 +4,34 @@ import Testing
 @testable import Bl00p
 
 @Test
+func updateFeedUsesSignedGitHubReleaseAssets() throws {
+    let projectRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let infoURL = projectRoot
+        .appendingPathComponent("Resources")
+        .appendingPathComponent("Info.plist")
+    let data = try Data(contentsOf: infoURL)
+    let info = try #require(
+        PropertyListSerialization.propertyList(from: data, format: nil)
+            as? [String: Any]
+    )
+    let publicKey = try #require(info["SUPublicEDKey"] as? String)
+    let decodedPublicKey = try #require(Data(base64Encoded: publicKey))
+
+    #expect(
+        info["SUFeedURL"] as? String
+            == "https://github.com/suttree/bl00p/releases/latest/download/appcast.xml"
+    )
+    #expect(info["SUEnableAutomaticChecks"] as? Bool == true)
+    #expect(info["SUAutomaticallyUpdate"] as? Bool == true)
+    #expect(info["SUVerifyUpdateBeforeExtraction"] as? Bool == true)
+    #expect(publicKey == "O2mHaTZMsDiYGGPMKTgkR2dR9wuOsOjiCyNiY0UsLhc=")
+    #expect(decodedPublicKey.count == 32)
+}
+
+@Test
 func themeAdaptsToSystemAppearanceWithLegibleBrandSurfaces() throws {
     let light = try #require(NSAppearance(named: .aqua))
     let dark = try #require(NSAppearance(named: .darkAqua))
@@ -496,18 +524,46 @@ func jsonValueAcceptsFoundationJSONObjects() throws {
 
 @Test
 func locatesBundledCodexBeforeBrokenShellShims() throws {
-    let url = try #require(CodexExecutableLocator().locate())
-    #expect(
-        url.path == "/Applications/ChatGPT.app/Contents/Resources/codex"
-            || url.path.contains("/.codex/plugins/.plugin-appserver/")
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-codex-locator-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let bundled = directory
+        .appendingPathComponent("ChatGPT.app/Contents/Resources/codex")
+    let shellShim = directory.appendingPathComponent("bin/codex")
+    try makeExecutable(at: bundled)
+    try makeExecutable(at: shellShim)
+
+    let url = try #require(
+        CodexExecutableLocator(candidateURLs: [bundled, shellShim]).locate()
     )
+    #expect(url == bundled)
 }
 
 @Test
 func locatesInstalledClaudeCLI() throws {
-    let url = try #require(ClaudeExecutableLocator().locate())
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-claude-locator-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let executable = directory.appendingPathComponent("bin/claude")
+    try makeExecutable(at: executable)
+
+    let url = try #require(
+        ClaudeExecutableLocator(candidateURLs: [executable]).locate()
+    )
     #expect(url.lastPathComponent == "claude")
     #expect(FileManager.default.isExecutableFile(atPath: url.path))
+}
+
+private func makeExecutable(at url: URL) throws {
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try Data("#!/bin/sh\nexit 0\n".utf8).write(to: url)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: url.path
+    )
 }
 
 @Test

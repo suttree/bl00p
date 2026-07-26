@@ -1,0 +1,233 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing semantic version tag to release, without the v prefix
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  verify-release-ref:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
+
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Require a reviewed main commit
+        id: release
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          git fetch --force --no-tags \
+              origin refs/heads/main:refs/remotes/origin/main
+
+          workflow_sha=$(git rev-parse "$GITHUB_SHA^{commit}")
+          if ! git merge-base --is-ancestor "$workflow_sha" origin/main; then
+            echo "Workflow commit $workflow_sha is not contained in origin/main" >&2
+            exit 1
+          fi
+
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version=${GITHUB_REF_NAME#v}
+            tag=$GITHUB_REF_NAME
+            release_sha=$(git rev-parse "$GITHUB_REF_NAME^{commit}")
+          else
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "Manual releases must be dispatched from main" >&2
+              exit 1
+            fi
+
+            version=$DISPATCH_VERSION
+            tag=v$version
+            git fetch --force origin \
+                "refs/tags/$tag:refs/tags/$tag"
+            release_sha=$(git rev-parse "$tag^{commit}")
+          fi
+
+          if ! printf '%s' "$version" |
+              grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'; then
+            echo "Invalid semantic version: $version" >&2
+            exit 1
+          fi
+
+          if [ "$tag" != "v$version" ]; then
+            echo "Release tag $tag does not match version $version" >&2
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "$release_sha" origin/main; then
+            echo "Release commit $release_sha is not contained in origin/main" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$release_sha" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: verify-release-ref
+    runs-on: macos-15
+    environment:
+      name: release
+    permissions:
+      contents: write
+    env:
+      APP_VERSION: ${{ needs.verify-release-ref.outputs.version }}
+      RELEASE_TAG: ${{ needs.verify-release-ref.outputs.tag }}
+      RELEASE_SHA: ${{ needs.verify-release-ref.outputs.sha }}
+
+    steps:
+      - name: Check out verified release commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+
+      - name: Run tests
+        run: swift test --disable-sandbox
+
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_DEVELOPER_ID_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE }}
+        run: |
+          if [ -z "$APPLE_DEVELOPER_ID_CERTIFICATE" ] ||
+              [ -z "$APPLE_CERTIFICATE_PASSWORD" ]; then
+            echo "Developer ID certificate secrets are not configured" >&2
+            exit 1
+          fi
+
+          certificate_path="$RUNNER_TEMP/developer-id.p12"
+          keychain_path="$RUNNER_TEMP/bl00p-signing.keychain-db"
+          keychain_password=$(openssl rand -hex 32)
+
+          printf '%s' "$APPLE_DEVELOPER_ID_CERTIFICATE" |
+              openssl base64 -d -A > "$certificate_path"
+          chmod 600 "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain \
+              -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+              -k "$keychain_path" \
+              -P "$APPLE_CERTIFICATE_PASSWORD" \
+              -T /usr/bin/codesign \
+              -T /usr/bin/security
+          security set-key-partition-list \
+              -S apple-tool:,apple: \
+              -s \
+              -k "$keychain_password" \
+              "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+
+          identity=$(
+            security find-identity -v -p codesigning "$keychain_path" |
+                sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' |
+                head -n 1
+          )
+          if [ -z "$identity" ]; then
+            echo "No Developer ID Application identity was imported" >&2
+            exit 1
+          fi
+
+          echo "CODE_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Build Developer ID-signed app
+        env:
+          BUILD_NUMBER: ${{ github.run_id }}
+        run: sh scripts/build-installable-app.sh
+
+      - name: Notarize and staple app
+        env:
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_PRIVATE_KEY: ${{ secrets.APPLE_NOTARY_PRIVATE_KEY }}
+        run: |
+          if [ -z "$APPLE_NOTARY_PRIVATE_KEY" ] ||
+              [ -z "$APPLE_NOTARY_KEY_ID" ] ||
+              [ -z "$APPLE_NOTARY_ISSUER_ID" ]; then
+            echo "Apple notarization secrets are not configured" >&2
+            exit 1
+          fi
+
+          app=".build/install/bl00p.app"
+          archive=".build/install/bl00p-$APP_VERSION-macos-arm64.zip"
+          api_key="$RUNNER_TEMP/AuthKey_$APPLE_NOTARY_KEY_ID.p8"
+          printf '%s' "$APPLE_NOTARY_PRIVATE_KEY" > "$api_key"
+          chmod 600 "$api_key"
+
+          xcrun notarytool submit "$archive" \
+              --key "$api_key" \
+              --key-id "$APPLE_NOTARY_KEY_ID" \
+              --issuer "$APPLE_NOTARY_ISSUER_ID" \
+              --wait
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+
+          rm -f "$archive"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$archive"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv --verbose=4 "$app" 2>&1 |
+              grep -q '^Authority=Developer ID Application:'
+          spctl --assess --type execute --verbose=4 "$app"
+          unzip -tq "$archive"
+
+      - name: Generate and verify signed appcast
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "SPARKLE_PRIVATE_KEY is not configured" >&2
+            exit 1
+          fi
+
+          archive="bl00p-$APP_VERSION-macos-arm64.zip"
+          update_dir="$RUNNER_TEMP/bl00p-update"
+          mkdir -p "$update_dir"
+          cp ".build/install/$archive" "$update_dir/$archive"
+          printf 'See the GitHub release for changes in bl00p %s.\n' \
+              "$APP_VERSION" > "$update_dir/bl00p-$APP_VERSION-macos-arm64.md"
+
+          printf '%s' "$SPARKLE_PRIVATE_KEY" |
+              .build/artifacts/sparkle/Sparkle/bin/generate_appcast \
+                  --ed-key-file - \
+                  --download-url-prefix \
+                  "https://github.com/suttree/bl00p/releases/download/$RELEASE_TAG/" \
+                  --link "https://github.com/suttree/bl00p" \
+                  --maximum-deltas 0 \
+                  --embed-release-notes \
+                  -o "$RUNNER_TEMP/appcast.xml" \
+                  "$update_dir"
+
+          sh scripts/verify-update-signature.sh \
+              "$RUNNER_TEMP/appcast.xml" \
+              ".build/install/$archive"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+              ".build/install/bl00p-$APP_VERSION-macos-arm64.zip" \
+              "$RUNNER_TEMP/appcast.xml" \
+              --target "$RELEASE_SHA" \
+              --title "bl00p $APP_VERSION" \
+              --generate-notes
