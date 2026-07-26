@@ -252,12 +252,20 @@ func codexThreadConfigurationKeepsBotPromptsSeparate() {
     )
 
     #expect(
-        reviewParameters["developerInstructions"]?.stringValue
-            == "Review this code."
+        reviewParameters["developerInstructions"]?.stringValue?
+            .hasPrefix("Review this code.\n\n") == true
     )
     #expect(
-        documentParameters["developerInstructions"]?.stringValue
-            == "Document this code."
+        documentParameters["developerInstructions"]?.stringValue?
+            .hasPrefix("Document this code.\n\n") == true
+    )
+    #expect(
+        reviewParameters["developerInstructions"]?.stringValue?
+            .contains("request elevated permission through Codex") == true
+    )
+    #expect(
+        documentParameters["developerInstructions"]?.stringValue?
+            .contains("Prefer the authenticated GitHub connected app") == true
     )
 }
 
@@ -276,13 +284,48 @@ func codexThreadConfigurationHonorsTheApprovalModeToggle() {
         workingDirectory: "/tmp/project"
     )
     #expect(askParameters["approvalPolicy"]?.stringValue == "on-request")
+    #expect(askParameters["sandbox"]?.stringValue == "workspace-write")
 
     profile.approvalMode = .auto
     let autoParameters = CodexThreadConfiguration.parameters(
         profile: profile,
         workingDirectory: "/tmp/project"
     )
-    #expect(autoParameters["approvalPolicy"]?.stringValue == "never")
+    #expect(autoParameters["approvalPolicy"]?.stringValue == "on-request")
+    #expect(autoParameters["sandbox"]?.stringValue == "workspace-write")
+}
+
+@Test
+func codexApprovalResponsesMatchEachAppServerRequestType() {
+    #expect(
+        CodexApprovalResponse.decision.result(approved: true)
+            == .object(["decision": .string("accept")])
+    )
+    #expect(
+        CodexApprovalResponse.mcpElicitation.result(approved: false)
+            == .object(["action": .string("decline")])
+    )
+
+    let requested: JSONValue = .object([
+        "network": .object(["enabled": .bool(true)]),
+        "fileSystem": .null
+    ])
+    #expect(
+        CodexApprovalResponse.permissions(requested).result(approved: true)
+            == .object([
+                "permissions": .object([
+                    "network": .object(["enabled": .bool(true)])
+                ]),
+                "scope": .string("session")
+            ])
+    )
+    #expect(
+        CodexApprovalResponse.permissions(requested).result(approved: false)
+            == .object([
+                "permissions": .object([:]),
+                "scope": .string("session")
+            ])
+    )
 }
 
 @Test
@@ -630,6 +673,37 @@ func legacyCodexReviewThreadsRestartWithoutLosingTheirTranscript() throws {
     #expect(restored.sessionID == nil)
     #expect(restored.status == .stopped)
     #expect(restored.entries.map(\.text) == ["Previous review output"])
+    try? FileManager.default.removeItem(at: directory)
+}
+
+@MainActor
+@Test
+func codexThreadsFromAnOlderPermissionBoundaryStartFresh() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-codex-permissions-\(UUID().uuidString)", isDirectory: true)
+    let profile = BotProfile.defaults[1]
+    let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    store.save(
+        PersistedAppState(
+            profiles: [profile],
+            sessions: [
+                profile.id: AgentSessionState(
+                    status: .completed,
+                    entries: [.init(kind: .assistant, text: "Keep this transcript")],
+                    sessionID: "read-only-thread",
+                    codexTurnModeVersion: CodexThreadConfiguration.turnModeVersion - 1
+                )
+            ],
+            selectedBotID: profile.id
+        )
+    )
+
+    let model = AppModel(runtime: DemoAgentRuntime(), store: store)
+    let restored = model.session(for: profile.id)
+
+    #expect(restored.sessionID == nil)
+    #expect(restored.status == .stopped)
+    #expect(restored.entries.map(\.text) == ["Keep this transcript"])
     try? FileManager.default.removeItem(at: directory)
 }
 
