@@ -98,13 +98,15 @@ Claude profiles use the installed `claude` executable's `stream-json` mode.
 They inherit Claude's user and project settings, including configured MCP
 servers. The current allowlist supports repository inspection, file edits for
 Builder and Documenter roles, common test commands, and read-only Linear tools.
-Manager actions are always blocked, and Reviewers cannot edit files but can
-inspect the repository. For other actions, Ask pauses in the conversation so
-the user can approve or decline the exact tool call. Auto immediately allows
-only supported, workspace-scoped actions and records each decision in the
-transcript; destructive and publishing commands, outside-workspace paths, and
-Reviewer edits remain blocked. Actions that Auto cannot classify are returned
-to the same explicit approval flow instead of being run automatically.
+Manager actions are always blocked. Reviewers can inspect the repository, but
+do not receive pre-approved shell access; built-in file-edit tools and
+write-capable shell commands are blocked by the runtime policy. For other
+actions, Ask pauses in the conversation so the user can approve or decline the
+exact tool call. Auto immediately allows only supported, workspace-scoped
+actions and records each decision in the transcript; destructive and
+publishing commands, outside-workspace paths, and classified Reviewer writes
+remain blocked. Unclassified non-shell tools return to the explicit approval
+flow instead of being run automatically.
 
 For managed workflows, the plan approval is represented by a dedicated
 approval entry that replaces the Manager's streamed plan entry at the same

@@ -201,8 +201,8 @@ struct ProfileInspectorView: View {
             }
             if profile.role == .reviewer {
                 return profile.approvalMode == .auto
-                    ? "Claude automatically approves supported read-only inspection actions inside this workspace. File edits remain blocked. Changes take effect the next time this bot connects."
-                    : "Claude asks before actions that need approval. File edits remain blocked for Reviewers. Changes take effect the next time this bot connects."
+                    ? "Claude automatically approves supported repository inspection actions. Built-in file-edit tools and write-capable shell commands remain blocked. Mode changes take effect the next time this bot connects."
+                    : "Claude asks before additional inspection actions. Built-in file-edit tools and write-capable shell commands remain blocked. Mode changes take effect the next time this bot connects."
             }
             return profile.approvalMode == .auto
                 ? "Claude automatically approves supported actions inside this workspace. Destructive and publishing actions remain blocked; other unclassified actions require explicit approval. Changes take effect the next time this bot connects."

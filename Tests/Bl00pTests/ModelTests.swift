@@ -905,6 +905,7 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     #expect(displayedPlanEntries.count == 1)
     #expect(displayedPlanEntries.first?.kind == .approval)
     #expect(displayedPlanEntries.first?.id == approvalEntry.id)
+    #expect(displayedPlanEntries.first?.contentFormat == .markdown)
     #expect(approvalEntry.id != runtimePlanEntryID)
     #expect(managerEntries.last?.id == approvalEntry.id)
     #expect(managerEntries.contains(where: { $0.id == olderManagerEntry.id }))
@@ -1521,6 +1522,64 @@ func appStateStoreRotatesPreviousStateIntoBackupOnSave() throws {
 }
 
 @Test
+func appStateStoreLoadsBackupWhenPrimaryIsUnreadable() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-tests-\(UUID().uuidString)", isDirectory: true)
+    let fileURL = directory.appendingPathComponent("state.json")
+    let store = AppStateStore(fileURL: fileURL)
+    let first = BotProfile.defaults[0]
+    let second = BotProfile.defaults[1]
+
+    store.save(
+        PersistedAppState(profiles: [first], sessions: [:], selectedBotID: first.id)
+    )
+    store.save(
+        PersistedAppState(profiles: [second], sessions: [:], selectedBotID: second.id)
+    )
+    try Data("not valid json".utf8).write(to: fileURL, options: .atomic)
+
+    let recovered = try #require(store.load())
+
+    #expect(recovered.selectedBotID == first.id)
+    #expect(!FileManager.default.fileExists(atPath: fileURL.path))
+    let quarantined = try FileManager.default.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: nil
+    ).filter { $0.lastPathComponent.hasPrefix("state.corrupt-") }
+    #expect(quarantined.count == 1)
+
+    try? FileManager.default.removeItem(at: directory)
+}
+
+@Test
+func appStateStorePreservesPrimaryWhenBackupRotationFails() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-tests-\(UUID().uuidString)", isDirectory: true)
+    let fileURL = directory.appendingPathComponent("state.json")
+    let backupURL = directory.appendingPathComponent("state.json.bak")
+    let store = AppStateStore(fileURL: fileURL)
+    let first = BotProfile.defaults[0]
+    let second = BotProfile.defaults[1]
+
+    store.save(
+        PersistedAppState(profiles: [first], sessions: [:], selectedBotID: first.id)
+    )
+    try FileManager.default.createDirectory(
+        at: backupURL,
+        withIntermediateDirectories: true
+    )
+
+    store.save(
+        PersistedAppState(profiles: [second], sessions: [:], selectedBotID: second.id)
+    )
+
+    let preserved = try #require(store.load())
+    #expect(preserved.selectedBotID == first.id)
+
+    try? FileManager.default.removeItem(at: directory)
+}
+
+@Test
 func appStateStoreQuarantinesUndecodableStateInsteadOfDiscardingIt() throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("bl00p-tests-\(UUID().uuidString)", isDirectory: true)
@@ -1539,6 +1598,53 @@ func appStateStoreQuarantinesUndecodableStateInsteadOfDiscardingIt() throws {
     ).filter { $0.lastPathComponent.hasPrefix("state.corrupt-") }
     #expect(quarantined.count == 1)
 
+    try? FileManager.default.removeItem(at: directory)
+}
+
+@MainActor
+@Test
+func legacyPlanApprovalEntriesGainMarkdownMetadataOnRestore() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-tests-\(UUID().uuidString)", isDirectory: true)
+    let manager = BotProfile(
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate."
+    )
+    let entry = TimelineEntry(
+        kind: .approval,
+        title: "Approve implementation plan",
+        text: "## Plan\n\n- Implement the fix",
+        approvalState: .pending
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: manager.id,
+        team: ManagerTeamConfiguration(),
+        request: "Implement the fix",
+        implementationPlan: entry.text,
+        planApprovalEntryID: entry.id
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager],
+            sessions: [
+                manager.id: AgentSessionState(
+                    status: .needsApproval,
+                    entries: [entry]
+                )
+            ],
+            selectedBotID: manager.id,
+            managerWorkflows: [manager.id: workflow]
+        )
+    )
+
+    let model = AppModel(runtime: DemoAgentRuntime(), store: store)
+
+    #expect(model.session(for: manager.id).entries.first?.contentFormat == .markdown)
     try? FileManager.default.removeItem(at: directory)
 }
 
@@ -1663,7 +1769,7 @@ func claudeReviewerInvocationStaysReadOnly() throws {
     #expect(!invocation.arguments.contains("Edit"))
     #expect(!invocation.arguments.contains("Write"))
     #expect(invocation.arguments.contains("Read"))
-    #expect(invocation.arguments.contains("Bash(git diff:*)"))
+    #expect(!invocation.arguments.contains(where: { $0.hasPrefix("Bash(") }))
 }
 
 @Test
@@ -2051,12 +2157,39 @@ func claudeReviewerWriteToolsRemainBlockedInEitherApprovalMode() async {
             #expect(
                 entries.contains(where: {
                     $0.title == "Claude action blocked"
-                        && $0.detail?.contains("Reviewers are read-only") == true
+                        && $0.detail?.contains("file-edit tools") == true
                 })
             )
             #expect(responses.first?["behavior"]?.stringValue == "deny")
         }
     }
+}
+
+@Test
+func claudeLiveRoleChangeCannotInheritBuilderAutoApproval() async {
+    let client = ApprovalStubClaudeClient(
+        toolName: "Edit",
+        toolInput: .object([
+            "file_path": .string("Package.swift")
+        ])
+    )
+    let runtime = testClaudeRuntime(client: client)
+    var profile = claudeProfile(role: .builder, approvalMode: .auto)
+    await launchClaude(runtime, profile: profile)
+
+    profile.role = .reviewer
+    let events = await collectClaudeTurn(runtime, profile: profile)
+    let entries = timelineEntries(in: events)
+    let responses = await client.responses
+
+    #expect(!entries.contains(where: { $0.kind == .approval }))
+    #expect(
+        entries.contains(where: {
+            $0.title == "Claude action blocked"
+                && $0.detail?.contains("file-edit tools") == true
+        })
+    )
+    #expect(responses.first?["behavior"]?.stringValue == "deny")
 }
 
 @Test
@@ -2147,6 +2280,40 @@ func claudeReviewerCanInspectInAskModeButCannotEdit() throws {
 }
 
 @Test
+func claudeReviewerBlocksWriteCapableShellCommandsInBothModes() throws {
+    let workingDirectory = URL(fileURLWithPath: "/tmp/bl00p-reviewer")
+    for mode in ApprovalMode.allCases {
+        for command in [
+            "git diff --output=review.txt",
+            "git grep --open-files-in-pager=touch pattern",
+            "cat README.md > review.txt",
+            "unknown-writer README.md",
+            "swift test",
+            "npm run lint"
+        ] {
+            let request = try #require(
+                ClaudeToolApprovalRequest(request: .object([
+                    "subtype": .string("can_use_tool"),
+                    "tool_name": .string("Bash"),
+                    "input": .object(["command": .string(command)])
+                ]))
+            )
+            if case .deny = ClaudeToolApprovalPolicy.decision(
+                for: request,
+                mode: mode,
+                role: .reviewer,
+                workingDirectory: workingDirectory,
+                stagedAttachmentDirectory: nil
+            ) {
+                // Expected: Reviewer shell writes never reach an approval card.
+            } else {
+                Issue.record("\(command) was not denied in \(mode)")
+            }
+        }
+    }
+}
+
+@Test
 func claudeAutoApprovalRejectsExpandedOrFlagEmbeddedPaths() throws {
     let workingDirectory = URL(
         fileURLWithPath: "/tmp/bl00p-workspace",
@@ -2189,7 +2356,10 @@ func claudeAutoApprovalAsksForUnclassifiedActionsAndMatchesXcodebuildSubcommands
         ClaudeToolApprovalRequest(request: .object([
             "subtype": .string("can_use_tool"),
             "tool_name": .string("mcp__example__inspect"),
-            "input": .object(["resource": .string("repository")])
+            "input": .object([
+                "path": .string("/v1/issues/123"),
+                "resource": .string("repository")
+            ])
         ]))
     )
     let archive = try #require(
@@ -2236,6 +2406,42 @@ func claudeAutoApprovalAsksForUnclassifiedActionsAndMatchesXcodebuildSubcommands
             stagedAttachmentDirectory: nil
         ) == .allow
     )
+}
+
+@Test
+func claudePreapprovedCommandsAndRuntimeClassificationStayAligned() throws {
+    let builderTools = ClaudeToolApprovalPolicy.allowedTools(for: .builder)
+    let reviewerTools = ClaudeToolApprovalPolicy.allowedTools(for: .reviewer)
+    #expect(!reviewerTools.contains(where: { $0.hasPrefix("Bash(") }))
+    #expect(builderTools.contains("Bash(env swift --version:*)"))
+    #expect(builderTools.contains("Bash(xcode-select -p:*)"))
+    #expect(builderTools.contains("Bash(pnpm typecheck:*)"))
+    #expect(builderTools.contains("Bash(yarn typecheck:*)"))
+
+    let workingDirectory = URL(fileURLWithPath: "/tmp/bl00p-workspace")
+    for command in [
+        "env swift --version",
+        "xcode-select -p",
+        "pnpm typecheck",
+        "yarn typecheck"
+    ] {
+        let request = try #require(
+            ClaudeToolApprovalRequest(request: .object([
+                "subtype": .string("can_use_tool"),
+                "tool_name": .string("Bash"),
+                "input": .object(["command": .string(command)])
+            ]))
+        )
+        #expect(
+            ClaudeToolApprovalPolicy.decision(
+                for: request,
+                mode: .auto,
+                role: .builder,
+                workingDirectory: workingDirectory,
+                stagedAttachmentDirectory: nil
+            ) == .allow
+        )
+    }
 }
 
 @Test

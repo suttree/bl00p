@@ -17,7 +17,6 @@ actor ClaudeRuntime: AgentRuntime {
         let executableURL: URL
         let workingDirectory: URL
         let approvalMode: ApprovalMode
-        let role: AgentRole
         var sessionID: String
         var shouldResume: Bool
         var currentClient: (any ClaudeClient)?
@@ -127,7 +126,6 @@ actor ClaudeRuntime: AgentRuntime {
             executableURL: executableURL,
             workingDirectory: workingDirectory,
             approvalMode: profile.approvalMode,
-            role: profile.role,
             sessionID: sessionID,
             shouldResume: resumedID != nil
         )
@@ -425,7 +423,7 @@ actor ClaudeRuntime: AgentRuntime {
         let decision = ClaudeToolApprovalPolicy.decision(
             for: approval,
             mode: session.approvalMode,
-            role: session.role,
+            role: session.pendingTurn?.profile.role ?? .reviewer,
             workingDirectory: session.workingDirectory,
             stagedAttachmentDirectory: session.stagedAttachmentDirectory
         )
@@ -1077,10 +1075,7 @@ struct ClaudeToolApprovalRequest: Sendable {
                 if expanded.hasPrefix("/") {
                     return URL(fileURLWithPath: expanded)
                 }
-                return URL(
-                    fileURLWithPath: expanded,
-                    relativeTo: workingDirectory
-                )
+                return workingDirectory.appendingPathComponent(expanded)
             }
             .map {
                 $0.standardizedFileURL.resolvingSymlinksInPath()
@@ -1168,6 +1163,74 @@ enum ClaudeToolApprovalDecision: Equatable, Sendable {
 }
 
 enum ClaudeToolApprovalPolicy {
+    private static let inspectionTools = [
+        "Read",
+        "Glob",
+        "Grep",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "mcp__linear__get_issue",
+        "mcp__linear__list_issues",
+        "mcp__linear__search_issues",
+        "mcp__linear__get_issue_comments",
+        "mcp__linear__list_comments",
+        "mcp__linear__get_project",
+        "mcp__linear__list_projects",
+        "mcp__linear__get_team",
+        "mcp__linear__list_teams"
+    ]
+    private static let preapprovedShellTools = [
+        "Bash(git status:*)",
+        "Bash(git diff:*)",
+        "Bash(git log:*)",
+        "Bash(git show:*)",
+        "Bash(git rev-parse:*)",
+        "Bash(git merge-base:*)",
+        "Bash(git ls-files:*)",
+        "Bash(git grep:*)",
+        "Bash(swift --version:*)",
+        "Bash(swift test:*)",
+        "Bash(swift build:*)",
+        "Bash(env swift --version:*)",
+        "Bash(xcrun --find swift:*)",
+        "Bash(xcrun swift test:*)",
+        "Bash(xcrun swift build:*)",
+        "Bash(xcode-select -p:*)",
+        "Bash(xcodebuild test:*)",
+        "Bash(xcodebuild build:*)",
+        "Bash(npm test:*)",
+        "Bash(npm run test:*)",
+        "Bash(npm run lint:*)",
+        "Bash(npm run typecheck:*)",
+        "Bash(pnpm test:*)",
+        "Bash(pnpm lint:*)",
+        "Bash(pnpm typecheck:*)",
+        "Bash(yarn test:*)",
+        "Bash(yarn lint:*)",
+        "Bash(yarn typecheck:*)",
+        "Bash(cargo test:*)",
+        "Bash(go test:*)",
+        "Bash(pytest:*)"
+    ]
+    private static let fileWriteTools = [
+        "Edit",
+        "Write",
+        "NotebookEdit",
+        "MultiEdit"
+    ]
+
+    static func allowedTools(for role: AgentRole) -> [String] {
+        var tools = inspectionTools
+        // Reviewer and Manager shell requests must reach the runtime policy:
+        // shell patterns can contain write-capable flags such as --output.
+        if role == .builder || role == .publisher {
+            tools.append(contentsOf: preapprovedShellTools)
+            tools.append(contentsOf: fileWriteTools.filter { $0 != "MultiEdit" })
+        }
+        return tools
+    }
+
     static func decision(
         for approval: ClaudeToolApprovalRequest,
         mode: ApprovalMode,
@@ -1181,16 +1244,79 @@ enum ClaudeToolApprovalPolicy {
             )
         }
         if role == .reviewer,
-           ["Edit", "Write", "NotebookEdit"].contains(approval.toolName) {
+           fileWriteTools.contains(approval.toolName) {
             return .deny(
-                "Claude Reviewers are read-only and cannot escalate permissions."
+                "Claude Reviewers cannot use built-in file-edit tools."
             )
         }
-        guard mode == .auto else { return .ask }
 
         let roots = [workingDirectory, stagedAttachmentDirectory]
             .compactMap { $0 }
             .map(canonicalURL)
+
+        if role == .reviewer, approval.toolName == "Bash" {
+            let shellDecision = bashDecision(
+                for: approval,
+                workingDirectory: workingDirectory,
+                roots: roots,
+                inspectionOnly: true
+            )
+            switch shellDecision {
+            case .allow:
+                return mode == .auto ? .allow : .ask
+            case .deny:
+                return shellDecision
+            case .ask:
+                return .ask
+            }
+        }
+
+        guard mode == .auto else { return .ask }
+
+        switch approval.toolName {
+        case let toolName where fileWriteTools.contains(toolName):
+            let requestedPaths = approval.requestedPaths(
+                relativeTo: workingDirectory
+            )
+            if let outsidePath = requestedPaths.first(where: {
+                !isInsideAllowedRoots($0, roots: roots)
+            }) {
+                return .deny(
+                    "Auto-approval is limited to the selected workspace. This request targets \(outsidePath.path)."
+                )
+            }
+            guard !requestedPaths.isEmpty else {
+                return .deny(
+                    "Auto-approval requires a verifiable file path inside the selected workspace."
+                )
+            }
+            return .allow
+
+        case "Bash":
+            return bashDecision(
+                for: approval,
+                workingDirectory: workingDirectory,
+                roots: roots,
+                inspectionOnly: false
+            )
+
+        default:
+            return .ask
+        }
+    }
+
+    private static func bashDecision(
+        for approval: ClaudeToolApprovalRequest,
+        workingDirectory: URL,
+        roots: [URL],
+        inspectionOnly: Bool
+    ) -> ClaudeToolApprovalDecision {
+        guard let command = approval.toolInput["command"]?.stringValue,
+              !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .deny(
+                "Auto-approval requires a readable shell command."
+            )
+        }
         let requestedPaths = approval.requestedPaths(
             relativeTo: workingDirectory
         )
@@ -1201,38 +1327,19 @@ enum ClaudeToolApprovalPolicy {
                 "Auto-approval is limited to the selected workspace. This request targets \(outsidePath.path)."
             )
         }
-
-        switch approval.toolName {
-        case "Edit", "Write", "NotebookEdit":
-            guard !requestedPaths.isEmpty else {
-                return .deny(
-                    "Auto-approval requires a verifiable file path inside the selected workspace."
-                )
-            }
-            return .allow
-
-        case "Bash":
-            guard let command = approval.toolInput["command"]?.stringValue,
-                  !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                return .deny(
-                    "Auto-approval requires a readable shell command."
-                )
-            }
-            return shellDecision(
-                command,
-                workingDirectory: workingDirectory,
-                roots: roots
-            )
-
-        default:
-            return .ask
-        }
+        return shellDecision(
+            command,
+            workingDirectory: workingDirectory,
+            roots: roots,
+            inspectionOnly: inspectionOnly
+        )
     }
 
     private static func shellDecision(
         _ command: String,
         workingDirectory: URL,
-        roots: [URL]
+        roots: [URL],
+        inspectionOnly: Bool
     ) -> ClaudeToolApprovalDecision {
         let forbiddenSyntax = ["\n", ";", "&&", "||", "|", "`", "$(", ">", "<"]
         guard !forbiddenSyntax.contains(where: command.contains),
@@ -1253,8 +1360,7 @@ enum ClaudeToolApprovalPolicy {
             return .deny("Auto-approval requires a readable shell command.")
         }
 
-        if URL(fileURLWithPath: tokens[0]).lastPathComponent == "env"
-            || tokens[0].contains("=") {
+        if tokens[0].contains("=") {
             return .deny(
                 "Environment-prefixed commands require explicit approval."
             )
@@ -1286,6 +1392,9 @@ enum ClaudeToolApprovalPolicy {
 
         let supported: Bool
         switch executable {
+        case "env":
+            supported = arguments == ["swift", "--version"]
+
         case "grep", "ls", "pwd", "cat", "head", "tail", "wc",
              "stat", "file", "which", "type":
             supported = true
@@ -1305,6 +1414,14 @@ enum ClaudeToolApprovalPolicy {
         case "git":
             supported = !arguments.contains("--ext-diff")
                 && !arguments.contains("--textconv")
+                && !arguments.contains("--output")
+                && !arguments.contains("-O")
+                && !arguments.contains("--open-files-in-pager")
+                && !arguments.contains(where: {
+                    $0.hasPrefix("--output=")
+                        || $0.hasPrefix("-O")
+                        || $0.hasPrefix("--open-files-in-pager=")
+                })
                 && (arguments.first.map {
                 [
                     "status", "diff", "log", "show", "rev-parse",
@@ -1328,6 +1445,9 @@ enum ClaudeToolApprovalPolicy {
 
         case "xcodebuild":
             supported = ["test", "build"].contains(arguments.first ?? "")
+
+        case "xcode-select":
+            supported = arguments == ["-p"]
 
         case "npm":
             supported = arguments.first == "test"
@@ -1353,11 +1473,46 @@ enum ClaudeToolApprovalPolicy {
             supported = false
         }
 
-        return supported
-            ? .allow
-            : .deny(
-                "\(executable) is outside Claude auto-approval's safe command set. Switch to Ask to review it explicitly."
+        let permittedForRole = supported
+            && (!inspectionOnly
+                || isInspectionCommand(
+                    executable: executable,
+                    arguments: arguments
+                ))
+
+        if permittedForRole {
+            return .allow
+        }
+        if inspectionOnly {
+            return .deny(
+                "\(executable) is outside the Claude Reviewer's read-only inspection command set."
             )
+        }
+        return .deny(
+            "\(executable) is outside Claude auto-approval's safe command set. Switch to Ask to review it explicitly."
+        )
+    }
+
+    private static func isInspectionCommand(
+        executable: String,
+        arguments: [String]
+    ) -> Bool {
+        switch executable {
+        case "grep", "ls", "pwd", "cat", "head", "tail", "wc",
+             "stat", "file", "which", "type", "rg", "find", "git":
+            return true
+        case "swift":
+            return arguments == ["--version"]
+        case "env":
+            return arguments == ["swift", "--version"]
+        case "xcrun":
+            return arguments == ["--find", "swift"]
+                || arguments == ["swift", "--version"]
+        case "xcode-select":
+            return arguments == ["-p"]
+        default:
+            return false
+        }
     }
 
     private static func shellPath(
@@ -1392,7 +1547,7 @@ enum ClaudeToolApprovalPolicy {
             return canonicalURL(URL(fileURLWithPath: cleaned))
         }
         return canonicalURL(
-            URL(fileURLWithPath: cleaned, relativeTo: workingDirectory)
+            workingDirectory.appendingPathComponent(cleaned)
         )
     }
 
