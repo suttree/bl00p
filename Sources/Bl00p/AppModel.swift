@@ -83,9 +83,6 @@ final class AppModel: ObservableObject {
             managerWorkflows = saved.managerWorkflows.mapValues { workflow in
                 guard workflow.stage != .completed else { return workflow }
                 var restored = workflow
-                if restored.stage == .verifying {
-                    restored.stage = .publishing
-                }
                 restored.isPaused = true
                 restored.pauseReason =
                     workflow.planApprovalEntryID == nil
@@ -93,10 +90,12 @@ final class AppModel: ObservableObject {
                         : "Waiting for your approval of the implementation plan."
                 return restored
             }
-            for workflow in saved.managerWorkflows.values
-                where workflow.stage == .verifying {
+            var recoveredPublishingWorkflow = false
+            for workflow in managerWorkflows.values
+                where workflow.stage == .publishing {
                 guard let publisherID = workflow.team.publisherProfileID,
                       let package = workflow.latestHandoff else { continue }
+                recoveredPublishingWorkflow = true
                 if let index = profiles.firstIndex(where: {
                     $0.id == publisherID
                 }) {
@@ -105,25 +104,37 @@ final class AppModel: ObservableObject {
                 }
                 var publisherSession =
                     sessions[publisherID] ?? AgentSessionState()
+                publisherSession.status = .stopped
+                publisherSession.sessionID = nil
+                publisherSession.codexTurnModeVersion = nil
                 publisherSession.pendingHandoff = package
-                publisherSession.entries.append(
-                    .init(
-                        kind: .handoff,
-                        title: "Recovered workflow handoff from \(package.sourceName)",
-                        text: package.taskContext,
-                        detail: """
-                        Branch: \(package.branch)
-                        HEAD: \(package.headRevision)
-                        Tests: \(package.testStatus.label)
-                        \(package.testSummary)
-                        Working tree:
-                        \(package.workingTreeSummary)
-                        """
+                publisherSession.worktreeSeedID = nil
+                if !publisherSession.entries.contains(where: {
+                    $0.kind == .handoff
+                        && $0.detail == package.timelineDetail
+                }) {
+                    publisherSession.entries.append(
+                        .init(
+                            kind: .handoff,
+                            title: "Recovered workflow handoff from \(package.sourceName)",
+                            text: package.taskContext,
+                            detail: package.timelineDetail
+                        )
                     )
-                )
+                }
                 sessions[publisherID] = publisherSession
             }
             selectedBotID = saved.selectedBotID ?? saved.profiles.first?.id
+            if recoveredPublishingWorkflow {
+                store.save(
+                    PersistedAppState(
+                        profiles: profiles,
+                        sessions: sessions,
+                        selectedBotID: selectedBotID,
+                        managerWorkflows: managerWorkflows
+                    )
+                )
+            }
         } else {
             profiles = BotProfile.defaults
             sessions = Dictionary(
@@ -625,7 +636,7 @@ final class AppModel: ObservableObject {
                         kind: .handoff,
                         title: "Handoff from \(source.name)",
                         text: package.taskContext,
-                        detail: handoffDetail(package)
+                        detail: package.timelineDetail
                     )
                 )
                 sessions[targetProfileID] = targetSession
@@ -751,17 +762,6 @@ final class AppModel: ObservableObject {
         """
     }
 
-    private func handoffDetail(_ package: GitHandoffPackage) -> String {
-        """
-        Branch: \(package.branch)
-        HEAD: \(package.headRevision)
-        Tests: \(package.testStatus.label)
-        \(package.testSummary)
-        Working tree:
-        \(package.workingTreeSummary)
-        """
-    }
-
     private func validatedTeam(
         for manager: BotProfile
     ) -> ManagerTeamConfiguration? {
@@ -817,8 +817,10 @@ final class AppModel: ObservableObject {
             workflow.team.builderProfileID
         case .reviewing:
             workflow.team.reviewerProfileID
-        case .verifying, .publishing:
+        case .publishing:
             workflow.team.publisherProfileID
+        case .verifying:
+            nil
         case .completed:
             nil
         }
@@ -921,8 +923,20 @@ final class AppModel: ObservableObject {
             )
 
         case .building:
-            guard let next = transitionWorkflow(managerID, to: .reviewing),
-                  let reviewerID = next.team.reviewerProfileID else { return }
+            guard let reviewerID = workflow.team.reviewerProfileID,
+                  profiles.contains(where: {
+                      $0.id == reviewerID && $0.role == .reviewer
+                  }) else {
+                pauseWorkflow(
+                    managerID,
+                    reason: "The assigned Reviewer is no longer available."
+                )
+                return
+            }
+            guard let next = transitionWorkflow(
+                managerID,
+                to: .reviewing
+            ) else { return }
             Task { [weak self] in
                 await self?.dispatchBuilderHandoff(
                     workflow: next,
@@ -933,8 +947,25 @@ final class AppModel: ObservableObject {
             }
 
         case .reviewing:
-            guard let next = transitionWorkflow(managerID, to: .revising),
-                  let builderID = next.team.builderProfileID else { return }
+            guard let builderID = workflow.team.builderProfileID,
+                  profiles.contains(where: {
+                      $0.id == builderID && $0.role == .builder
+                  }) else {
+                pauseWorkflow(
+                    managerID,
+                    reason: "The assigned Builder is no longer available."
+                )
+                return
+            }
+            guard var next = transitionWorkflow(
+                managerID,
+                to: .revising
+            ) else { return }
+            next.reviewSummary = summary
+            next.revisionStartedAt = .now
+            next.updatedAt = .now
+            managerWorkflows[managerID] = next
+            save()
             dispatchWorkflowMessage(
                 from: profileID,
                 to: builderID,
@@ -945,15 +976,28 @@ final class AppModel: ObservableObject {
 
                 \(summary)
 
-                Address every actionable finding in your existing worktree. If the review is clean, verify that explicitly. Run the relevant tests, commit any fixes locally, and finish with a concise summary. Do not push or open a pull request.
+                Address every actionable finding in your existing worktree. If the review is clean, verify that explicitly. Run the relevant tests after this review. Commit any fixes locally, but do not create an empty commit for a clean review. Finish with a concise summary. Do not push or open a pull request.
                 """
             )
 
         case .revising:
-            guard let next = transitionWorkflow(managerID, to: .publishing),
-                  let reviewerID = next.team.reviewerProfileID,
-                  let publisherID = next.team.publisherProfileID else { return }
-            let reviewSummary = latestAssistantText(for: reviewerID)
+            guard let publisherID = workflow.team.publisherProfileID,
+                  profiles.contains(where: {
+                      $0.id == publisherID && $0.role == .publisher
+                  }) else {
+                pauseWorkflow(
+                    managerID,
+                    reason: "The assigned Documenter / PR Writer is no longer available."
+                )
+                return
+            }
+            guard let next = transitionWorkflow(
+                managerID,
+                to: .publishing
+            ) else { return }
+            let reviewSummary =
+                workflow.reviewSummary
+                    ?? "No initial review summary was captured."
             Task { [weak self] in
                 await self?.dispatchRevisedBuilderHandoff(
                     workflow: next,
@@ -964,7 +1008,13 @@ final class AppModel: ObservableObject {
                 )
             }
 
-        case .verifying, .publishing:
+        case .verifying:
+            pauseWorkflow(
+                managerID,
+                reason: "Reload this saved workflow to continue publishing."
+            )
+
+        case .publishing:
             guard let draftURL = latestPullRequestURL(for: profileID) else {
                 pauseWorkflow(
                     managerID,
@@ -1120,7 +1170,7 @@ final class AppModel: ObservableObject {
         guard let package = await prepareBuilderHandoff(
             workflow: workflow,
             builderID: builderID,
-            fallbackStage: .building
+            pass: .initial
         ) else { return }
 
         guard await resetWorkflowRecipient(
@@ -1142,7 +1192,7 @@ final class AppModel: ObservableObject {
     private func prepareBuilderHandoff(
         workflow: ManagerWorkflow,
         builderID: UUID,
-        fallbackStage: ManagerWorkflowStage
+        pass: BuilderHandoffPass
     ) async -> GitHandoffPackage? {
         guard let builder = profiles.first(where: { $0.id == builderID }) else {
             pauseWorkflow(
@@ -1161,33 +1211,51 @@ final class AppModel: ObservableObject {
                 workflow.latestHandoff?.headRevision ?? package.baseRevision
             let lacksRequiredCommit =
                 package.headRevision == previousRevision
+                    && (pass == .initial
+                        || !Self.reviewIsClean(workflow.reviewSummary))
             let hasUncommittedChanges =
                 package.workingTreeSummary != "Clean"
-            let lacksPassingTests = package.testStatus != .passed
+            let hasInvalidTests: Bool
+            switch pass {
+            case .initial:
+                hasInvalidTests = package.testStatus == .failed
+            case .revision:
+                guard let testEvidenceAt = package.testEvidenceAt,
+                      let revisionStartedAt = workflow.revisionStartedAt else {
+                    hasInvalidTests = true
+                    break
+                }
+                hasInvalidTests =
+                    package.testStatus != .passed
+                        || testEvidenceAt < revisionStartedAt
+            }
             guard !lacksRequiredCommit,
                   !hasUncommittedChanges,
-                  !lacksPassingTests else {
+                  !hasInvalidTests else {
                 _ = transitionWorkflow(
                     workflow.managerProfileID,
-                    to: fallbackStage
+                    to: pass.fallbackStage
                 )
                 let reason: String
                 if lacksRequiredCommit {
                     reason =
-                        workflow.latestHandoff == nil
+                        pass == .initial
                             ? "The Builder handoff has no local commit."
                             : "The Builder revision pass has no new local commit."
                 } else if hasUncommittedChanges {
                     reason = "The Builder handoff still has uncommitted changes."
+                } else if pass == .initial {
+                    reason = "The Builder reported failing tests."
                 } else {
-                    reason = "The Builder handoff does not report passing tests."
+                    reason =
+                        "The Builder handoff does not report passing tests from the revision pass."
                 }
                 pauseWorkflow(workflow.managerProfileID, reason: reason)
                 append(
                     .init(
                         kind: .question,
                         title: "Builder handoff is not ready",
-                        text: "\(reason) Ask this bot to finish the work, verify it, and create a local commit."
+                        text: "\(reason) Ask this bot to finish the work, run the required tests, and commit any changes."
                     ),
                     to: builderID
                 )
@@ -1214,7 +1282,7 @@ final class AppModel: ObservableObject {
         guard let package = await prepareBuilderHandoff(
             workflow: workflow,
             builderID: builderID,
-            fallbackStage: .revising
+            pass: .revision
         ) else { return }
         await dispatchPublishing(
             workflow: workflow,
@@ -1228,19 +1296,12 @@ final class AppModel: ObservableObject {
 
     private func dispatchPublishing(
         workflow: ManagerWorkflow,
-        package: GitHandoffPackage?,
+        package: GitHandoffPackage,
         reviewSummary: String,
         revisionSummary: String,
         sourceProfileID: UUID,
         to publisherID: UUID
     ) async {
-        guard let package else {
-            pauseWorkflow(
-                workflow.managerProfileID,
-                reason: "The revised Builder handoff is missing."
-            )
-            return
-        }
         guard await resetWorkflowRecipient(
             publisherID,
             handoff: package,
@@ -1312,7 +1373,7 @@ final class AppModel: ObservableObject {
                     kind: .handoff,
                     title: "Workflow handoff from \(sourceName)",
                     text: handoff.taskContext,
-                    detail: handoffDetail(handoff)
+                    detail: handoff.timelineDetail
                 )
             )
         }
@@ -1391,8 +1452,26 @@ final class AppModel: ObservableObject {
     }
 
     private static let initialReviewInstruction = """
-    You are the Reviewer in a managed bl00p workflow. Review the committed implementation at the attached branch and HEAD. Inspect correctness, regressions, test coverage, security, and unnecessary complexity. Do not edit code. Return a concise list of actionable findings ranked by severity, or state clearly that the review is clean.
+    You are the Reviewer in a managed bl00p workflow. Review the committed implementation at the attached branch and HEAD. Inspect correctness, regressions, test coverage, security, and unnecessary complexity. Do not edit code. Return a concise list of actionable findings ranked by severity. End with exactly `Review status: changes requested` when there are actionable findings, or `Review status: clean` when there are none.
     """
+
+    private static func reviewIsClean(_ summary: String?) -> Bool {
+        summary?.localizedCaseInsensitiveContains(
+            "Review status: clean"
+        ) == true
+    }
+
+    private enum BuilderHandoffPass {
+        case initial
+        case revision
+
+        var fallbackStage: ManagerWorkflowStage {
+            switch self {
+            case .initial: .building
+            case .revision: .revising
+            }
+        }
+    }
 
     private func apply(_ event: AgentEvent, to profileID: UUID) {
         var state = sessions[profileID] ?? AgentSessionState()
