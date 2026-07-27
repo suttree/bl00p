@@ -44,43 +44,78 @@ final class AppModel: ObservableObject {
                     .filter { $0.provider == .codex }
                     .map(\.id)
             )
-            let pendingPlanApprovalManagerIDs = Set(
+            let planningManagerIDs = Set(
                 saved.managerWorkflows.compactMap { managerID, workflow in
-                    workflow.stage == .planning
-                        && workflow.planApprovalEntryID != nil
-                        ? managerID
+                    workflow.stage == .planning ? managerID : nil
+                }
+            )
+            let legacyPermissionBoundaryProfileIDs = Set(
+                saved.sessions.compactMap { profileID, session in
+                    session.entries.last?.text
+                        == "Claude stopped at a permission boundary"
+                        ? profileID
                         : nil
                 }
             )
             sessions = Dictionary(
                 uniqueKeysWithValues: saved.sessions.map { profileID, restoredSession in
                     var session = restoredSession
-                    let endedAtLegacyPermissionBoundary =
-                        session.entries.last?.text == "Claude stopped at a permission boundary"
                     session.entries = session.entries.map(Self.migrateLegacyPermissionEntry)
                     session.entries.removeAll(where: Self.isPrototypeStarterEntry)
-                    if session.status == .launching
-                        || session.status == .working
-                        || session.status == .needsApproval
-                        || session.status == .needsAnswer {
-                        session.status =
-                            session.status == .needsApproval
-                                && pendingPlanApprovalManagerIDs.contains(profileID)
-                                ? .needsApproval
-                                : .stopped
-                    }
-                    if endedAtLegacyPermissionBoundary && session.status == .completed {
+                    if legacyPermissionBoundaryProfileIDs.contains(profileID)
+                        && session.status == .completed {
                         session.status = .needsAnswer
                     }
                     if codexProfileIDs.contains(profileID),
                        session.codexTurnModeVersion != CodexThreadConfiguration.turnModeVersion {
                         session.sessionID = nil
-                        session.status = .stopped
+                        let canRecoverPlanApproval =
+                            planningManagerIDs.contains(profileID)
+                            && (session.status == .completed
+                                || session.status == .needsApproval)
+                        if !canRecoverPlanApproval {
+                            session.status = .stopped
+                        }
                     }
                     return (profileID, session)
                 }
             )
-            managerWorkflows = saved.managerWorkflows.mapValues { workflow in
+            managerWorkflows = saved.managerWorkflows
+            selectedBotID = saved.selectedBotID ?? saved.profiles.first?.id
+            let recoveredPlanApproval = reconcileRestoredWorkflowPlanApprovals()
+            let pendingPlanApprovalManagerIDs = Set(
+                managerWorkflows.compactMap { managerID, workflow in
+                    workflow.stage == .planning
+                        && sessions[managerID]?.entries.contains(where: {
+                            $0.id == workflow.planApprovalEntryID
+                                && $0.kind == .approval
+                                && $0.approvalState == .pending
+                        }) == true
+                        ? managerID
+                        : nil
+                }
+            )
+            sessions = Dictionary(
+                uniqueKeysWithValues: sessions.map { profileID, restoredSession in
+                    var session = restoredSession
+                    if session.status == .launching
+                        || session.status == .working
+                        || session.status == .needsApproval
+                        || session.status == .needsAnswer {
+                        if !legacyPermissionBoundaryProfileIDs.contains(
+                            profileID
+                        ) {
+                            session.status =
+                                session.status == .needsApproval
+                                    && pendingPlanApprovalManagerIDs.contains(profileID)
+                                    ? .needsApproval
+                                    : .stopped
+                        }
+                    }
+                    return (profileID, session)
+                }
+            )
+            managerWorkflows = managerWorkflows.mapValues { workflow in
                 guard workflow.stage != .completed else { return workflow }
                 var restored = workflow
                 restored.isPaused = true
@@ -90,7 +125,9 @@ final class AppModel: ObservableObject {
                         : "Waiting for your approval of the implementation plan."
                 return restored
             }
-            selectedBotID = saved.selectedBotID ?? saved.profiles.first?.id
+            if recoveredPlanApproval {
+                save()
+            }
         } else {
             profiles = BotProfile.defaults
             sessions = Dictionary(
@@ -882,9 +919,18 @@ final class AppModel: ObservableObject {
 
         switch workflow.stage {
         case .planning:
+            guard let completedPlan = latestAssistantResponse(
+                for: profileID
+            ) else {
+                pauseWorkflow(
+                    managerID,
+                    reason: "The Manager finished without a complete implementation plan."
+                )
+                return
+            }
             requestWorkflowPlanApproval(
                 managerID,
-                implementationPlan: summary
+                implementationPlan: completedPlan
             )
 
         case .building:
@@ -1010,40 +1056,190 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private static let workflowPlanApprovalTitle =
+        "Approve implementation plan"
+    private static let workflowPlanApprovalDetail =
+        "Approve to hand this plan to the Builder and continue the managed workflow. Decline to pause and send revision feedback."
+    private static let workflowPlanApprovalPauseReason =
+        "Waiting for your approval of the implementation plan."
+
+    private func reconcileRestoredWorkflowPlanApprovals() -> Bool {
+        var changed = false
+        for managerID in Array(managerWorkflows.keys) {
+            if reconcileWorkflowPlanApproval(managerID) {
+                changed = true
+            }
+            guard var workflow = managerWorkflows[managerID],
+                  workflow.stage == .planning,
+                  var state = sessions[managerID] else {
+                continue
+            }
+            let pendingPlanEntries = state.entries.filter {
+                $0.kind == .approval
+                    && $0.title == Self.workflowPlanApprovalTitle
+                    && $0.approvalState == .pending
+            }
+            let hasCoherentApproval =
+                state.status == .needsApproval
+                && workflow.implementationPlan?.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                ).isEmpty == false
+                && pendingPlanEntries.count == 1
+                && pendingPlanEntries.first?.id
+                    == workflow.planApprovalEntryID
+                && pendingPlanEntries.first?.text
+                    == workflow.implementationPlan
+            guard !hasCoherentApproval,
+                  workflow.planApprovalEntryID != nil
+                    || !pendingPlanEntries.isEmpty else {
+                continue
+            }
+
+            workflow.planApprovalEntryID = nil
+            workflow.updatedAt = .now
+            if state.status == .completed {
+                state.status = .stopped
+            }
+            state.entries.removeAll(where: {
+                $0.kind == .approval
+                    && $0.title == Self.workflowPlanApprovalTitle
+                    && $0.approvalState == .pending
+            })
+            managerWorkflows[managerID] = workflow
+            sessions[managerID] = state
+            changed = true
+        }
+        return changed
+    }
+
+    @discardableResult
+    private func reconcileWorkflowPlanApproval(
+        _ managerID: UUID,
+        completedPlan: String? = nil
+    ) -> Bool {
+        guard var workflow = managerWorkflows[managerID],
+              workflow.stage == .planning,
+              var state = sessions[managerID],
+              state.status == .completed || state.status == .needsApproval else {
+            return false
+        }
+
+        let pendingPlanEntries = state.entries.filter {
+            $0.kind == .approval
+                && $0.title == Self.workflowPlanApprovalTitle
+                && $0.approvalState == .pending
+        }
+        let restoredPlan: String?
+        if let completedPlan {
+            restoredPlan = completedPlan
+        } else if state.status == .completed {
+            restoredPlan = latestAssistantResponse(for: managerID)
+        } else {
+            restoredPlan =
+                workflow.implementationPlan
+                ?? pendingPlanEntries.last?.text
+                ?? latestAssistantResponse(for: managerID)
+        }
+
+        guard let restoredPlan,
+              !restoredPlan.trimmingCharacters(
+                  in: .whitespacesAndNewlines
+              ).isEmpty else {
+            return false
+        }
+
+        let matchingPendingEntries = pendingPlanEntries.filter {
+            $0.text == restoredPlan
+        }
+        if completedPlan == nil,
+           matchingPendingEntries.isEmpty,
+           state.entries.contains(where: {
+               $0.kind == .approval
+                   && $0.title == Self.workflowPlanApprovalTitle
+                   && $0.text == restoredPlan
+                   && $0.approvalState != nil
+                   && $0.approvalState != .pending
+           }) {
+            return false
+        }
+        if let referencedID = workflow.planApprovalEntryID,
+           let referencedEntry = state.entries.first(where: {
+               $0.id == referencedID
+           }),
+           referencedEntry.approvalState != nil,
+           referencedEntry.approvalState != .pending {
+            return false
+        }
+
+        let approvalID: UUID
+        if let referencedID = workflow.planApprovalEntryID,
+           matchingPendingEntries.contains(where: {
+               $0.id == referencedID
+           }) {
+            approvalID = referencedID
+        } else if let existingEntry = matchingPendingEntries.last {
+            approvalID = existingEntry.id
+        } else if let referencedID = workflow.planApprovalEntryID,
+                  !state.entries.contains(where: { $0.id == referencedID }) {
+            approvalID = referencedID
+        } else {
+            approvalID = UUID()
+        }
+
+        let previousWorkflow = workflow
+        let previousStatus = state.status
+        let previousUnreadCompletion = state.hasUnreadCompletion
+        let previousEntries = state.entries
+
+        var approvalEntry =
+            matchingPendingEntries.last(where: { $0.id == approvalID })
+            ?? TimelineEntry(
+                id: approvalID,
+                kind: .approval,
+                text: restoredPlan
+            )
+        approvalEntry.kind = .approval
+        approvalEntry.title = Self.workflowPlanApprovalTitle
+        approvalEntry.text = restoredPlan
+        approvalEntry.detail = Self.workflowPlanApprovalDetail
+        approvalEntry.approvalState = .pending
+        state.entries.removeAll(where: {
+            $0.kind == .approval
+                && $0.title == Self.workflowPlanApprovalTitle
+                && $0.approvalState == .pending
+        })
+        state.entries.append(approvalEntry)
+        state.status = .needsApproval
+        state.hasUnreadCompletion = false
+
+        workflow.implementationPlan = restoredPlan
+        workflow.planApprovalEntryID = approvalID
+        workflow.isPaused = true
+        workflow.pauseReason = Self.workflowPlanApprovalPauseReason
+
+        let changed = workflow != previousWorkflow
+            || state.status != previousStatus
+            || state.hasUnreadCompletion != previousUnreadCompletion
+            || state.entries != previousEntries
+        if changed {
+            workflow.updatedAt = .now
+        }
+        sessions[managerID] = state
+        managerWorkflows[managerID] = workflow
+        return changed
+    }
+
     private func requestWorkflowPlanApproval(
         _ managerID: UUID,
         implementationPlan: String
     ) {
-        guard var workflow = managerWorkflows[managerID],
-              workflow.stage == .planning else {
+        let previousStatus = sessions[managerID]?.status ?? .stopped
+        guard reconcileWorkflowPlanApproval(
+            managerID,
+            completedPlan: implementationPlan
+        ) else {
             return
         }
-
-        let approvalID = UUID()
-        workflow.implementationPlan = implementationPlan
-        workflow.planApprovalEntryID = approvalID
-        workflow.isPaused = true
-        workflow.pauseReason =
-            "Waiting for your approval of the implementation plan."
-        workflow.updatedAt = .now
-
-        var state = sessions[managerID] ?? AgentSessionState()
-        let previousStatus = state.status
-        state.status = .needsApproval
-        state.hasUnreadCompletion = false
-        state.entries.append(
-            .init(
-                id: approvalID,
-                kind: .approval,
-                title: "Approve implementation plan",
-                text: implementationPlan,
-                detail: "Approve to hand this plan to the Builder and continue the managed workflow. Decline to pause and send revision feedback.",
-                approvalState: .pending
-            )
-        )
-
-        sessions[managerID] = state
-        managerWorkflows[managerID] = workflow
         save()
 
         if notificationsArePrepared,
@@ -1319,10 +1515,21 @@ final class AppModel: ObservableObject {
         performSend(runtimeMessage, to: targetProfileID)
     }
 
-    private func latestAssistantText(for profileID: UUID) -> String {
+    private func latestAssistantResponse(
+        for profileID: UUID
+    ) -> String? {
         sessions[profileID]?.entries
-            .last(where: { $0.kind == .assistant && !$0.text.isEmpty })?
+            .last(where: {
+                $0.kind == .assistant
+                    && !$0.text.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    ).isEmpty
+            })?
             .text
+    }
+
+    private func latestAssistantText(for profileID: UUID) -> String {
+        latestAssistantResponse(for: profileID)
             ?? "No assistant summary was captured."
     }
 
