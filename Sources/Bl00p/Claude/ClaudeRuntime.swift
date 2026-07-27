@@ -33,19 +33,29 @@ actor ClaudeRuntime: AgentRuntime {
     }
 
     private let locator: ClaudeExecutableLocator
-    private let authenticationStatusOverride: (@Sendable (URL) -> AuthenticationStatus)?
+    private let preflight: ProviderPreflightCache
+    private let authenticationProbe:
+        @Sendable (URL) -> ClaudeAuthenticationStatus
     private let clientFactory: @Sendable (URL) -> any ClaudeClient
     private var sessions: [UUID: Session] = [:]
 
     init(
         locator: ClaudeExecutableLocator = ClaudeExecutableLocator(),
-        authenticationStatus: (@Sendable (URL) -> AuthenticationStatus)? = nil,
+        preflight: ProviderPreflightCache = ProviderPreflightCache(),
+        authenticationProbe:
+            (@Sendable (URL) -> ClaudeAuthenticationStatus)? = nil,
+        authenticationStatus:
+            (@Sendable (URL) -> ClaudeAuthenticationStatus)? = nil,
         clientFactory: @escaping @Sendable (URL) -> any ClaudeClient = {
             ClaudeCLIClient(executableURL: $0)
         }
     ) {
         self.locator = locator
-        authenticationStatusOverride = authenticationStatus
+        self.preflight = preflight
+        self.authenticationProbe =
+            authenticationProbe
+                ?? authenticationStatus
+                ?? Self.authenticationStatus
         self.clientFactory = clientFactory
     }
 
@@ -72,7 +82,10 @@ actor ClaudeRuntime: AgentRuntime {
             return pair.stream
         }
 
-        guard let executableURL = locator.locate() else {
+        let locator = locator
+        guard let executableURL = await preflight.executable(
+            using: { locator.locate() }
+        ) else {
             pair.continuation.yield(
                 .entry(
                     .init(
@@ -87,7 +100,10 @@ actor ClaudeRuntime: AgentRuntime {
             return pair.stream
         }
 
-        switch authenticationStatus(executableURL: executableURL) {
+        switch await preflight.claudeAuthentication(
+            for: executableURL,
+            using: authenticationProbe
+        ) {
         case .loggedOut:
             pair.continuation.yield(
                 .entry(
@@ -184,7 +200,7 @@ actor ClaudeRuntime: AgentRuntime {
         do {
             try await launchClient(for: profile.id)
         } catch {
-            failTurnToStart(profileID: profile.id, error: error)
+            await failTurnToStart(profileID: profile.id, error: error)
         }
 
         return pair.stream
@@ -311,8 +327,15 @@ actor ClaudeRuntime: AgentRuntime {
         }
     }
 
-    private func failTurnToStart(profileID: UUID, error: any Error) {
+    private func failTurnToStart(
+        profileID: UUID,
+        error: any Error
+    ) async {
         guard var session = sessions[profileID] else { return }
+        await preflight.invalidateClaudeAuthentication(
+            for: session.executableURL
+        )
+        await preflight.invalidateExecutable(session.executableURL)
         session.currentContinuation?.yield(
             .entry(
                 .init(
@@ -373,7 +396,7 @@ actor ClaudeRuntime: AgentRuntime {
             )
 
         case "transport_closed":
-            handleTransportClosed(event, profileID: profileID)
+            await handleTransportClosed(event, profileID: profileID)
 
         default:
             break
@@ -676,12 +699,15 @@ actor ClaudeRuntime: AgentRuntime {
             do {
                 try await launchClient(for: profileID)
             } catch {
-                failTurnToStart(profileID: profileID, error: error)
+                await failTurnToStart(profileID: profileID, error: error)
             }
             return
         }
 
         if failed {
+            await preflight.invalidateClaudeAuthentication(
+                for: session.executableURL
+            )
             yield(
                 .entry(
                     .init(
@@ -738,8 +764,15 @@ actor ClaudeRuntime: AgentRuntime {
         sessions[profileID] = session
     }
 
-    private func handleTransportClosed(_ event: JSONValue, profileID: UUID) {
+    private func handleTransportClosed(
+        _ event: JSONValue,
+        profileID: UUID
+    ) async {
         guard var session = sessions[profileID] else { return }
+        await preflight.invalidateClaudeAuthentication(
+            for: session.executableURL
+        )
+        await preflight.invalidateExecutable(session.executableURL)
         defer {
             clearTurnState(&session)
             sessions[profileID] = session
@@ -878,11 +911,9 @@ actor ClaudeRuntime: AgentRuntime {
         }
     }
 
-    private func authenticationStatus(executableURL: URL) -> AuthenticationStatus {
-        if let authenticationStatusOverride {
-            return authenticationStatusOverride(executableURL)
-        }
-
+    private static func authenticationStatus(
+        executableURL: URL
+    ) -> ClaudeAuthenticationStatus {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = executableURL
@@ -930,11 +961,6 @@ actor ClaudeRuntime: AgentRuntime {
     private func emptyStream() -> AsyncStream<AgentEvent> {
         AsyncStream { $0.finish() }
     }
-}
-enum AuthenticationStatus: Sendable {
-    case loggedIn
-    case loggedOut
-    case unavailable(String)
 }
 
 enum ClaudeResumeRecovery {

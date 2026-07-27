@@ -13,7 +13,8 @@ The current prototype includes:
 - Consistent, legible typography across conversations, settings, and bot creation
 - Structured messages, commands, findings, and approval cards
 - Optional Manager bots that coordinate a persistent Builder → Reviewer →
-  Builder fixes → Documenter / PR Writer workflow
+  conditional Builder fixes and Reviewer re-check → Documenter / PR Writer
+  workflow
 - Isolated managed Git worktrees for implementation bots, with handoff packages
   that carry branch, task, working-tree, and test context to the next bot
 - Real Codex sessions powered by `codex app-server`, with workspace-scoped writes and in-app approvals for commands, file changes, extra permissions, and connected-app mutations
@@ -73,20 +74,26 @@ persisted workflow with this sequence:
 2. You approve the implementation plan before it is handed to the team.
 3. The Builder works in an isolated branch and commits a tested change locally.
 4. The Reviewer performs a read-only review.
-5. The Builder addresses the findings and commits the fixes.
-6. The Documenter receives the revised Builder handoff, runs final verification,
-   updates documentation, commits, pushes, and opens a draft PR.
-7. The Manager reports the draft PR link and delivery summary.
+5. If the Reviewer requests changes (or its structured result is missing), the
+   Builder addresses the findings and the Reviewer verifies the updated commit.
+   A clean review skips both extra turns.
+6. The Documenter updates documentation, commits, pushes, and opens a draft PR.
+7. bl00p completes the workflow directly from the recorded branch, test
+   evidence, Reviewer result, Documenter summary, and draft PR URL.
 
-There is one Reviewer pass per managed delivery. Before the Documenter is
-dispatched, bl00p requires a clean Builder worktree, a new revision commit
-(unless the Reviewer explicitly reports a clean review), and fresh passing
-test evidence from the revision pass. Saved workflows recover these handoff
-requirements across app restarts without discarding an already-running
-Documenter session.
+Before each Reviewer pass, bl00p requires a clean Builder worktree, the
+appropriate committed revision, and passing test evidence. Revision passes
+must include fresh passing test evidence recorded after the review began.
+Saved workflows recover these handoff requirements across app restarts without
+discarding an already-running Documenter session.
 
 Questions, failures, and approval requests pause the workflow for the user.
 Leaving any team assignment unset keeps that Manager in standalone chat mode.
+Clean workflows use four agent turns; workflows with one requested-changes
+round use six, and workflows with two rounds use eight. If findings remain
+after two revision rounds, bl00p pauses the loop for user direction instead of
+continuing indefinitely. Reviewer protocol markers are kept out of the
+user-visible findings and completion summary.
 
 For an unattended managed workflow, configure its Claude Reviewer with **Auto**
 approval mode. A Reviewer in **Ask** mode pauses when it first requests a shell
@@ -106,6 +113,14 @@ Reviewer, and Documenter threads use workspace-scoped execution and route
 elevated and connected-app actions through bl00p's approval cards. Manager
 threads are non-escalatable and read-only so bl00p alone owns delegation to
 the configured team. Threads resume from their saved thread ID when possible.
+Successful executable discovery and Claude authentication checks are cached
+until a launch, turn, or transport failure invalidates them, so moved provider
+executables and expired authentication can be detected again without
+restarting bl00p. State writes are coalesced off the main actor, use
+last-write-wins revisioning, and are flushed when the app quits (with a short
+timeout so a slow write cannot block termination). Performance logs contain
+stage durations plus provider, model, role, and cold/warm identifiers only;
+prompts, generated content, and filesystem paths are never included.
 
 Claude profiles use the installed `claude` executable's `stream-json` mode.
 They inherit Claude's user and project settings, including configured MCP

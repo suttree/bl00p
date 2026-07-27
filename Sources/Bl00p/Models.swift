@@ -427,7 +427,7 @@ enum ManagerWorkflowStage: String, Codable, CaseIterable, Sendable {
         // occurrences directly to publishing.
         case .verifying: "Legacy workflow"
         case .publishing: "Documenting & publishing"
-        case .reporting: "Reporting"
+        case .reporting: "Finishing"
         case .completed: "Complete"
         }
     }
@@ -466,6 +466,38 @@ enum ManagerWorkflowStage: String, Codable, CaseIterable, Sendable {
     }
 }
 
+enum ReviewDisposition: String, Sendable {
+    case clean
+    case changesRequested
+
+    static let marker = "BL00P_REVIEW_DISPOSITION:"
+
+    static func parse(from response: String) -> ReviewDisposition? {
+        let matchingLines = response
+            .split(whereSeparator: \.isNewline)
+            .map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .filter { $0.hasPrefix(marker) }
+        guard matchingLines.count == 1 else { return nil }
+        let value = matchingLines[0]
+            .dropFirst(marker.count)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return ReviewDisposition(rawValue: value)
+    }
+
+    static func removingProtocolLines(from response: String) -> String {
+        response
+            .components(separatedBy: .newlines)
+            .filter {
+                !$0.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .hasPrefix(marker)
+            }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var managerProfileID: UUID
@@ -476,6 +508,9 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     var stage: ManagerWorkflowStage
     var branch: String?
     var pullRequestURL: String?
+    var verificationSummary: String?
+    var publisherSummary: String?
+    var revisionRounds: Int?
     var latestHandoff: GitHandoffPackage?
     var reviewSummary: String?
     var revisionStartedAt: Date?
@@ -494,6 +529,9 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         stage: ManagerWorkflowStage = .planning,
         branch: String? = nil,
         pullRequestURL: String? = nil,
+        verificationSummary: String? = nil,
+        publisherSummary: String? = nil,
+        revisionRounds: Int = 0,
         latestHandoff: GitHandoffPackage? = nil,
         reviewSummary: String? = nil,
         revisionStartedAt: Date? = nil,
@@ -511,6 +549,9 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         self.stage = stage
         self.branch = branch
         self.pullRequestURL = pullRequestURL
+        self.verificationSummary = verificationSummary
+        self.publisherSummary = publisherSummary
+        self.revisionRounds = revisionRounds
         self.latestHandoff = latestHandoff
         self.reviewSummary = reviewSummary
         self.revisionStartedAt = revisionStartedAt
