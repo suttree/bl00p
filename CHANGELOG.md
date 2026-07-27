@@ -11,7 +11,11 @@ All notable changes to bl00p are documented in this file.
 - Add automatic light and dark appearances across every app surface.
 - Add in-app approval cards for individual Claude tool calls, returning each
   approval or rejection to the active Claude session.
-- Add a per-bot approval mode toggle for Codex bots, letting commands and file changes auto-approve instead of prompting.
+- Add a per-bot approval mode toggle for Claude and Codex bots. Claude Auto
+  mode is limited to supported workspace-scoped actions and keeps destructive,
+  publishing, and read-only role boundaries enforced. Reviewers can inspect
+  repositories without automatic write access, while unclassified actions
+  return to explicit approval.
 - Add model selection when creating or configuring Claude and Codex bots.
 - Add image attachments through drag and drop, with previews in the composer and conversation timeline.
 - Add macOS notifications and a Dock badge when a bot finishes, fails, asks a question, or needs approval.
@@ -61,6 +65,8 @@ All notable changes to bl00p are documented in this file.
 - Cover active-window notification suppression independently from Dock badge
   updates.
 - Expand coverage for notifications, Dock badges, model and prompt isolation, image attachments, session recovery, state migration, composer sizing, automatic reconnects, and long-lived runtime streams.
-- Cover the Codex approval mode toggle and backward-compatible decoding of bot profiles missing newer fields.
+- Cover the Claude and Codex approval mode toggles, scoped automatic Claude
+  decisions, read-only role boundaries, and backward-compatible decoding of
+  bot profiles missing newer fields.
 - Cover Manager plan approval, visible team dispatch, restart persistence,
   read-only Codex configuration, and role-specific avatar colors.
