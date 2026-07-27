@@ -189,6 +189,10 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
     var worktree: GitWorktreeOwnership?
     var managerTeam: ManagerTeamConfiguration?
 
+    var canSelectApprovalMode: Bool {
+        provider != .claude || role != .manager
+    }
+
     init(
         id: UUID = UUID(),
         name: String,
@@ -548,6 +552,10 @@ enum ApprovalState: String, Codable, Sendable {
     case declined
 }
 
+enum TimelineContentFormat: String, Codable, Sendable {
+    case markdown
+}
+
 struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var kind: TimelineKind
@@ -558,6 +566,7 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
     var approvalState: ApprovalState?
     var attachments: [ImageAttachment]?
     var deliveryFailed: Bool?
+    var contentFormat: TimelineContentFormat?
 
     init(
         id: UUID = UUID(),
@@ -568,7 +577,8 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
         timestamp: Date = .now,
         approvalState: ApprovalState? = nil,
         attachments: [ImageAttachment]? = nil,
-        deliveryFailed: Bool? = nil
+        deliveryFailed: Bool? = nil,
+        contentFormat: TimelineContentFormat? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -579,6 +589,7 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
         self.approvalState = approvalState
         self.attachments = attachments
         self.deliveryFailed = deliveryFailed
+        self.contentFormat = contentFormat
     }
 }
 

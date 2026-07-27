@@ -11,7 +11,12 @@ All notable changes to bl00p are documented in this file.
 - Add automatic light and dark appearances across every app surface.
 - Add in-app approval cards for individual Claude tool calls, returning each
   approval or rejection to the active Claude session.
-- Add a per-bot approval mode toggle for Codex bots, letting commands and file changes auto-approve instead of prompting.
+- Add a per-bot approval mode toggle for Claude and Codex bots. Claude Auto
+  mode is limited to supported workspace-scoped actions and keeps destructive,
+  publishing, and role boundaries enforced. Reviewers can inspect repositories
+  without pre-approved shell access; built-in edits and write-capable shell
+  commands remain blocked. Configure Claude Reviewers in Auto mode for
+  unattended managed workflows; Ask mode pauses on the first shell inspection.
 - Add model selection when creating or configuring Claude and Codex bots.
 - Add image attachments through drag and drop, with previews in the composer and conversation timeline.
 - Add macOS notifications and a Dock badge when a bot finishes, fails, asks a question, or needs approval.
@@ -41,6 +46,9 @@ All notable changes to bl00p are documented in this file.
 - Preserve resumable Documenter sessions across restart, restore revision
   validation for older saved workflows, and avoid treating generic tool output
   as test evidence.
+- Show each managed implementation plan only once in its approval card,
+  preserving Markdown formatting and preventing later runtime updates from
+  replacing the approval state.
 - Keep the selected provider when adding a bot, including after switching between Claude and Codex.
 - Focus the message composer when the app opens or the user switches bots.
 - Keep loading saved profiles and sessions when a bot profile gains new fields, instead of silently discarding all persisted state on decode failure.
@@ -54,12 +62,20 @@ All notable changes to bl00p are documented in this file.
 - Stage Claude image attachments in an isolated temporary directory and remove them after each turn.
 - Keep Manager sessions plan-only and read-only, prevent hidden delegation,
   and reserve team dispatch for bl00p's visible managed workflow.
+- Keep Claude Reviewers read-only by denying built-in edits, write-capable shell
+  commands, and test-running commands in every approval mode; Manager profiles
+  cannot run shell commands.
+- Quarantine unreadable saved state instead of letting the next autosave
+  overwrite it with defaults, and rotate a `state.json.bak` backup on every
+  save so one bad write can't destroy the only copy of prior state.
 
 ### Tests
 
 - Cover active-window notification suppression independently from Dock badge
   updates.
 - Expand coverage for notifications, Dock badges, model and prompt isolation, image attachments, session recovery, state migration, composer sizing, automatic reconnects, and long-lived runtime streams.
-- Cover the Codex approval mode toggle and backward-compatible decoding of bot profiles missing newer fields.
+- Cover the Claude and Codex approval mode toggles, scoped automatic Claude
+  decisions, read-only role boundaries, and backward-compatible decoding of
+  bot profiles missing newer fields.
 - Cover Manager plan approval, visible team dispatch, restart persistence,
   read-only Codex configuration, and role-specific avatar colors.

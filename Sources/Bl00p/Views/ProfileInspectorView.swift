@@ -129,7 +129,7 @@ struct ProfileInspectorView: View {
                     }
                 }
 
-                if profile.provider == .codex {
+                if profile.provider == .codex || profile.provider == .claude {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("APPROVALS")
                             .font(.bl00p(.caption2, weight: .bold))
@@ -143,12 +143,9 @@ struct ProfileInspectorView: View {
                         }
                         .labelsHidden()
                         .pickerStyle(.segmented)
+                        .disabled(!profile.canSelectApprovalMode)
 
-                        Text(
-                            profile.approvalMode == .auto
-                                ? "Codex can edit this workspace and runs approved actions without asking. Only takes effect the next time this bot connects."
-                                : "Codex can edit this workspace and asks before actions that need extra access, including GitHub changes."
-                        )
+                        Text(approvalModeDescription)
                             .font(.bl00p(.caption1))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -179,7 +176,7 @@ struct ProfileInspectorView: View {
                 Text(
                     profile.provider == .codex
                         ? "Codex receives this prompt as developer instructions when the session launches."
-                        : "Claude receives this prompt through its resumable CLI session. Destructive git and publishing actions remain blocked."
+                        : "Claude receives this prompt through its resumable CLI session. Structured approvals enforce read-only roles and keep elevated actions visible."
                 )
                     .font(.bl00p(.caption1))
                     .foregroundStyle(.secondary)
@@ -195,6 +192,26 @@ struct ProfileInspectorView: View {
             get: { profile.modelID ?? "" },
             set: { profile.modelID = $0.isEmpty ? nil : $0 }
         )
+    }
+
+    private var approvalModeDescription: String {
+        if profile.provider == .claude {
+            if profile.role == .manager {
+                return "Claude Managers remain read-only and cannot escalate permissions. Approval mode is unavailable for this role."
+            }
+            if profile.role == .reviewer {
+                return profile.approvalMode == .auto
+                    ? "Claude automatically approves supported repository inspection actions. Built-in file-edit tools and write-capable shell commands remain blocked. Mode changes take effect the next time this bot connects."
+                    : "Claude asks before additional inspection actions. Built-in file-edit tools and write-capable shell commands remain blocked. Mode changes take effect the next time this bot connects."
+            }
+            return profile.approvalMode == .auto
+                ? "Claude automatically approves supported actions inside this workspace. Destructive and publishing actions remain blocked; other unclassified actions require explicit approval. Changes take effect the next time this bot connects."
+                : "Claude asks before actions that need approval through its structured permission protocol. Changes take effect the next time this bot connects."
+        }
+
+        return profile.approvalMode == .auto
+            ? "Codex can edit this workspace and runs approved actions without asking. Only takes effect the next time this bot connects."
+            : "Codex can edit this workspace and asks before actions that need extra access, including GitHub changes."
     }
 
     private func teamSelection(

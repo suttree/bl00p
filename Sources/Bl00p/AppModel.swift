@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SwiftUI
+import os
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -19,6 +20,7 @@ final class AppModel: ObservableObject {
     private var runGenerations: [UUID: UUID] = [:]
     private var connectedProfileIDs: Set<UUID> = []
     private var inFlightUserEntryIDs: [UUID: UUID] = [:]
+    private var planningTurnAssistantEntryIDs: [UUID: Set<UUID>] = [:]
     private var notificationsArePrepared = false
 
     init(
@@ -57,7 +59,9 @@ final class AppModel: ObservableObject {
                     var session = restoredSession
                     let endedAtLegacyPermissionBoundary =
                         session.entries.last?.text == "Claude stopped at a permission boundary"
-                    session.entries = session.entries.map(Self.migrateLegacyPermissionEntry)
+                    session.entries = session.entries
+                        .map(Self.migrateLegacyPermissionEntry)
+                        .map(Self.migrateLegacyPlanApprovalEntry)
                     session.entries.removeAll(where: Self.isPrototypeStarterEntry)
                     if session.status == .launching
                         || session.status == .working
@@ -239,6 +243,7 @@ final class AppModel: ObservableObject {
         }
         connectedProfileIDs.remove(profileID)
         inFlightUserEntryIDs.removeValue(forKey: profileID)
+        planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
         runGenerations[profileID] = UUID()
         for index in profiles.indices where profiles[index].id != profileID {
             guard var team = profiles[index].managerTeam else { continue }
@@ -264,6 +269,11 @@ final class AppModel: ObservableObject {
                     workflow.team.reviewerProfileID,
                     workflow.team.publisherProfileID
                   ].contains(profileID) else { continue }
+            if let activeProfileID = expectedProfileID(for: workflow) {
+                planningTurnAssistantEntryIDs.removeValue(
+                    forKey: activeProfileID
+                )
+            }
             workflow.isPaused = true
             workflow.pauseReason = "A bot assigned to this workflow was deleted."
             workflow.updatedAt = .now
@@ -344,6 +354,7 @@ final class AppModel: ObservableObject {
     func stop(_ profileID: UUID) {
         guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
         connectedProfileIDs.remove(profileID)
+        planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
         runGenerations[profileID] = UUID()
         Task {
             await runtime.stop(profile: runtimeProfile(for: profile))
@@ -508,6 +519,10 @@ final class AppModel: ObservableObject {
                 ),
                 handoff: pendingHandoff
             )
+            if managerWorkflows[profileID]?.stage == .planning,
+               managerWorkflows[profileID]?.planApprovalEntryID == nil {
+                planningTurnAssistantEntryIDs[profileID] = []
+            }
             let responseStream = await runtime.respond(
                 to: runtimeMessage,
                 attachments: attachments,
@@ -852,12 +867,19 @@ final class AppModel: ObservableObject {
 
         for managerID in matchingManagerIDs {
             switch status {
-            case .needsApproval, .needsAnswer, .failed:
+            case .needsApproval, .needsAnswer:
+                pauseWorkflow(
+                    managerID,
+                    reason: "\(profileName(profileID)) needs attention: \(status.label)."
+                )
+            case .failed:
+                planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
                 pauseWorkflow(
                     managerID,
                     reason: "\(profileName(profileID)) needs attention: \(status.label)."
                 )
             case .stopped:
+                planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
                 if previousStatus == .working || previousStatus == .launching {
                     pauseWorkflow(
                         managerID,
@@ -924,15 +946,34 @@ final class AppModel: ObservableObject {
     ) {
         guard let workflow = managerWorkflows[managerID],
               expectedProfileID(for: workflow) == profileID else { return }
-        let summary = latestAssistantText(for: profileID)
 
-        switch workflow.stage {
-        case .planning:
+        if workflow.stage == .planning {
+            let capturedEntryIDs =
+                planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
+                ?? []
+            guard let planEntry = sessions[profileID]?.entries.last(where: {
+                capturedEntryIDs.contains($0.id)
+                    && $0.kind == .assistant
+                    && !$0.text.isEmpty
+            }) else {
+                pauseWorkflow(
+                    managerID,
+                    reason: "\(profileName(profileID)) finished the planning turn without returning an implementation plan. Send feedback to try again."
+                )
+                return
+            }
             requestWorkflowPlanApproval(
                 managerID,
-                implementationPlan: summary
+                implementationPlan: planEntry.text,
+                replacingAssistantEntryID: planEntry.id
             )
+            return
+        }
 
+        let summary = latestAssistantText(for: profileID)
+        switch workflow.stage {
+        case .planning:
+            break
         case .building:
             guard let reviewerID = workflow.team.reviewerProfileID,
                   profiles.contains(where: {
@@ -1093,10 +1134,15 @@ final class AppModel: ObservableObject {
 
     private func requestWorkflowPlanApproval(
         _ managerID: UUID,
-        implementationPlan: String
+        implementationPlan: String,
+        replacingAssistantEntryID assistantEntryID: UUID
     ) {
         guard var workflow = managerWorkflows[managerID],
-              workflow.stage == .planning else {
+              workflow.stage == .planning,
+              var state = sessions[managerID],
+              let entryIndex = state.entries.firstIndex(where: {
+                  $0.id == assistantEntryID && $0.kind == .assistant
+              }) else {
             return
         }
 
@@ -1108,19 +1154,23 @@ final class AppModel: ObservableObject {
             "Waiting for your approval of the implementation plan."
         workflow.updatedAt = .now
 
-        var state = sessions[managerID] ?? AgentSessionState()
         let previousStatus = state.status
         state.status = .needsApproval
         state.hasUnreadCompletion = false
-        state.entries.append(
+        let assistantTimestamp = state.entries[entryIndex].timestamp
+        state.entries.remove(at: entryIndex)
+        state.entries.insert(
             .init(
                 id: approvalID,
                 kind: .approval,
                 title: "Approve implementation plan",
                 text: implementationPlan,
                 detail: "Approve to hand this plan to the Builder and continue the managed workflow. Decline to pause and send revision feedback.",
-                approvalState: .pending
-            )
+                timestamp: assistantTimestamp,
+                approvalState: .pending,
+                contentFormat: .markdown
+            ),
+            at: entryIndex
         )
 
         sessions[managerID] = state
@@ -1424,10 +1474,14 @@ final class AppModel: ObservableObject {
         performSend(runtimeMessage, to: targetProfileID)
     }
 
+    private func latestAssistantEntry(for profileID: UUID) -> TimelineEntry? {
+        sessions[profileID]?.entries.last(where: {
+            $0.kind == .assistant && !$0.text.isEmpty
+        })
+    }
+
     private func latestAssistantText(for profileID: UUID) -> String {
-        sessions[profileID]?.entries
-            .last(where: { $0.kind == .assistant && !$0.text.isEmpty })?
-            .text
+        latestAssistantEntry(for: profileID)?.text
             ?? "No assistant summary was captured."
     }
 
@@ -1521,11 +1575,19 @@ final class AppModel: ObservableObject {
             }
         case .entry(let entry):
             state.entries.append(entry)
+            if entry.kind == .assistant,
+               planningTurnAssistantEntryIDs[profileID] != nil {
+                planningTurnAssistantEntryIDs[profileID]?.insert(entry.id)
+            }
         case .upsertEntry(let entry):
             if let index = state.entries.firstIndex(where: { $0.id == entry.id }) {
                 state.entries[index] = entry
             } else {
                 state.entries.append(entry)
+            }
+            if entry.kind == .assistant,
+               planningTurnAssistantEntryIDs[profileID] != nil {
+                planningTurnAssistantEntryIDs[profileID]?.insert(entry.id)
             }
         case .approvalResolved(let entryID, let approvalState):
             if let index = state.entries.firstIndex(where: { $0.id == entryID }) {
@@ -1636,10 +1698,24 @@ final class AppModel: ObservableObject {
         migrated.detail = ClaudePermissionDenials.readableLegacyDetail(entry.detail)
         return migrated
     }
+
+    private static func migrateLegacyPlanApprovalEntry(
+        _ entry: TimelineEntry
+    ) -> TimelineEntry {
+        guard entry.kind == .approval,
+              entry.title == "Approve implementation plan",
+              entry.contentFormat == nil else {
+            return entry
+        }
+        var migrated = entry
+        migrated.contentFormat = .markdown
+        return migrated
+    }
 }
 
 struct AppStateStore: Sendable {
     private let fileURL: URL?
+    private let logger = Logger(subsystem: "dev.bl00p.app", category: "persistence")
 
     init(fileURL: URL? = nil) {
         if let fileURL {
@@ -1656,24 +1732,88 @@ struct AppStateStore: Sendable {
             .appendingPathComponent("state.json", isDirectory: false)
     }
 
+    /// A previously-saved state that fails to decode (e.g. after a schema change) is
+    /// moved aside instead of silently discarded. The last known-good backup is then
+    /// loaded so a decode or interrupted-write failure cannot reset the app to defaults.
     func load() -> PersistedAppState? {
-        guard let fileURL,
-              let data = try? Data(contentsOf: fileURL) else { return nil }
-        return try? JSONDecoder.iso8601.decode(PersistedAppState.self, from: data)
+        guard let fileURL else { return nil }
+        let backupURL = backupURL(for: fileURL)
+
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            do {
+                return try decodeState(at: fileURL)
+            } catch {
+                logger.error("Failed to decode saved state, quarantining it: \(error)")
+                quarantineUnreadableState(at: fileURL)
+            }
+        }
+
+        guard FileManager.default.fileExists(atPath: backupURL.path) else {
+            return nil
+        }
+        do {
+            return try decodeState(at: backupURL)
+        } catch {
+            logger.error("Failed to decode backup state: \(error)")
+            return nil
+        }
     }
 
+    /// The previous primary is copied atomically to `state.json.bak` before an
+    /// atomic primary replacement. If either write fails, the existing primary
+    /// remains available and the active coding session continues.
     func save(_ state: PersistedAppState) {
         guard let fileURL,
               let data = try? JSONEncoder.pretty.encode(state) else { return }
 
+        let fileManager = FileManager.default
+        let directory = fileURL.deletingLastPathComponent()
+        let backupURL = backupURL(for: fileURL)
+
         do {
-            try FileManager.default.createDirectory(
-                at: fileURL.deletingLastPathComponent(),
+            try fileManager.createDirectory(
+                at: directory,
                 withIntermediateDirectories: true
             )
+            if fileManager.fileExists(atPath: fileURL.path) {
+                let previousData = try Data(contentsOf: fileURL)
+                try previousData.write(to: backupURL, options: .atomic)
+            }
             try data.write(to: fileURL, options: .atomic)
         } catch {
             // Persistence failure should not interrupt an active coding session.
+            logger.error("Failed to save state: \(error)")
+        }
+    }
+
+    private func decodeState(at url: URL) throws -> PersistedAppState {
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder.iso8601.decode(PersistedAppState.self, from: data)
+    }
+
+    private func backupURL(for fileURL: URL) -> URL {
+        fileURL.deletingLastPathComponent()
+            .appendingPathComponent("\(fileURL.lastPathComponent).bak")
+    }
+
+    private func quarantineUnreadableState(at fileURL: URL) {
+        let timestamp = ISO8601DateFormatter().string(from: .now)
+            .replacingOccurrences(of: ":", with: "-")
+        let quarantineURL = fileURL.deletingLastPathComponent()
+            .appendingPathComponent("state.corrupt-\(timestamp).json")
+        do {
+            try FileManager.default.removeItemIfPresent(at: quarantineURL)
+            try FileManager.default.moveItem(at: fileURL, to: quarantineURL)
+        } catch {
+            logger.error("Failed to quarantine unreadable state: \(error)")
+        }
+    }
+}
+
+private extension FileManager {
+    func removeItemIfPresent(at url: URL) throws {
+        if fileExists(atPath: url.path) {
+            try removeItem(at: url)
         }
     }
 }
