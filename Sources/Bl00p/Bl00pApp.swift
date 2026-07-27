@@ -40,16 +40,28 @@ struct Bl00pApp: App {
 @MainActor
 private final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     weak var model: AppModel?
+    private var didReplyToTermination = false
 
     func applicationShouldTerminate(
         _ sender: NSApplication
     ) -> NSApplication.TerminateReply {
         guard let model else { return .terminateNow }
+        didReplyToTermination = false
         Task {
             await model.flushPersistence()
-            sender.reply(toApplicationShouldTerminate: true)
+            finishTermination(sender)
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            finishTermination(sender)
         }
         return .terminateLater
+    }
+
+    private func finishTermination(_ sender: NSApplication) {
+        guard !didReplyToTermination else { return }
+        didReplyToTermination = true
+        sender.reply(toApplicationShouldTerminate: true)
     }
 }
 

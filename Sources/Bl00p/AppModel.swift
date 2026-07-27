@@ -22,6 +22,7 @@ final class AppModel: ObservableObject {
     private var notificationsArePrepared = false
     private var persistenceRevision: UInt64 = 0
     private var launchedProfileIDs: Set<UUID> = []
+    private var turnEntryStartIndices: [UUID: Int] = [:]
     private var workflowStageStartedAt: [UUID: ContinuousClock.Instant] = [:]
 
     init(
@@ -103,9 +104,29 @@ final class AppModel: ObservableObject {
             selectedBotID = BotProfile.defaults.first?.id
         }
         let restoredAt = ContinuousClock.now
+        var legacyReportingManagerIDs: [UUID] = []
         for (managerID, workflow) in managerWorkflows
             where workflow.stage != .completed {
-            workflowStageStartedAt[managerID] = restoredAt
+            let elapsedMilliseconds = Int64(
+                max(0, Date.now.timeIntervalSince(workflow.updatedAt) * 1_000)
+            )
+            workflowStageStartedAt[managerID] = restoredAt.advanced(
+                by: .milliseconds(-elapsedMilliseconds)
+            )
+            if workflow.stage == .reporting,
+               workflow.pullRequestURL != nil {
+                legacyReportingManagerIDs.append(managerID)
+            }
+        }
+        for managerID in legacyReportingManagerIDs {
+            guard let workflow = managerWorkflows[managerID],
+                  let draftURL = workflow.pullRequestURL else { continue }
+            completeWorkflow(
+                managerID,
+                publisherSummary: workflow.publisherSummary
+                    ?? "Delivery prepared by the Documenter / PR Writer.",
+                draftURL: draftURL
+            )
         }
     }
 
@@ -199,6 +220,7 @@ final class AppModel: ObservableObject {
             }
         }
         connectedProfileIDs.remove(profileID)
+        launchedProfileIDs.remove(profileID)
         inFlightUserEntryIDs.removeValue(forKey: profileID)
         runGenerations[profileID] = UUID()
         for index in profiles.indices where profiles[index].id != profileID {
@@ -274,6 +296,7 @@ final class AppModel: ObservableObject {
         let generation = UUID()
         runGenerations[profileID] = generation
         connectedProfileIDs.remove(profileID)
+        launchedProfileIDs.remove(profileID)
         inFlightUserEntryIDs.removeValue(forKey: profileID)
         if var resumedSession = sessions[profileID], previousThreadID != nil {
             resumedSession.status = .stopped
@@ -313,6 +336,7 @@ final class AppModel: ObservableObject {
     func stop(_ profileID: UUID) {
         guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
         connectedProfileIDs.remove(profileID)
+        launchedProfileIDs.remove(profileID)
         runGenerations[profileID] = UUID()
         Task {
             await runtime.stop(profile: runtimeProfile(for: profile))
@@ -427,6 +451,9 @@ final class AppModel: ObservableObject {
         sessions[profileID] = updatedSession
         save()
         let turnStartedAt = ContinuousClock.now
+        if shouldLaunch {
+            launchedProfileIDs.remove(profileID)
+        }
 
         Task { [weak self] in
             guard let self else { return }
@@ -491,6 +518,8 @@ final class AppModel: ObservableObject {
                 attachments: attachments,
                 profile: preparedProfile
             )
+            turnEntryStartIndices[profileID] =
+                sessions[profileID]?.entries.count ?? 0
             var recordedFirstOutput = false
             for await event in responseStream {
                 guard runGenerations[profileID] == generation else { return }
@@ -629,6 +658,7 @@ final class AppModel: ObservableObject {
                 )
                 await runtime.stop(profile: runtimeProfile(for: target))
                 connectedProfileIDs.remove(targetProfileID)
+                launchedProfileIDs.remove(targetProfileID)
                 runGenerations[targetProfileID] = UUID()
 
                 if let targetIndex = profiles.firstIndex(
@@ -961,7 +991,12 @@ final class AppModel: ObservableObject {
     ) {
         guard let workflow = managerWorkflows[managerID],
               expectedProfileID(for: workflow) == profileID else { return }
-        let summary = latestAssistantText(for: profileID)
+        let reviewOutput: ReviewOutput? =
+            workflow.stage == .reviewing || workflow.stage == .verifying
+                ? latestReviewOutput(for: profileID)
+                : nil
+        let summary = reviewOutput?.summary
+            ?? latestAssistantText(for: profileID)
 
         switch workflow.stage {
         case .planning:
@@ -985,7 +1020,7 @@ final class AppModel: ObservableObject {
             }
 
         case .reviewing:
-            if ReviewDisposition.parse(from: summary) == .clean {
+            if reviewOutput?.disposition == .clean {
                 beginPublishing(
                     managerID,
                     reviewSummary: summary,
@@ -1014,7 +1049,7 @@ final class AppModel: ObservableObject {
             }
 
         case .verifying:
-            if ReviewDisposition.parse(from: summary) == .clean {
+            if reviewOutput?.disposition == .clean {
                 beginPublishing(
                     managerID,
                     reviewSummary: summary,
@@ -1075,8 +1110,41 @@ final class AppModel: ObservableObject {
         reviewSummary: String,
         reviewerID: UUID
     ) {
-        guard let next = transitionWorkflow(managerID, to: .revising),
-              let builderID = next.team.builderProfileID else { return }
+        guard var workflow = managerWorkflows[managerID],
+              let builderID = workflow.team.builderProfileID,
+              profiles.contains(where: {
+                  $0.id == builderID && $0.role == .builder
+              }) else {
+            pauseWorkflow(
+                managerID,
+                reason: "The assigned Builder is no longer available."
+            )
+            return
+        }
+        let revisionRounds = workflow.revisionRounds ?? 0
+        guard revisionRounds < Self.maximumRevisionRounds else {
+            pauseWorkflow(
+                managerID,
+                reason: "The review still has outstanding findings after \(revisionRounds) revision rounds."
+            )
+            append(
+                .init(
+                    kind: .question,
+                    title: "Review loop needs attention",
+                    text: "The automated revision limit was reached. Review the outstanding findings and tell the team how to proceed.",
+                    detail: reviewSummary
+                ),
+                to: managerID,
+                immediately: true
+            )
+            return
+        }
+        workflow.revisionRounds = revisionRounds + 1
+        workflow.updatedAt = .now
+        managerWorkflows[managerID] = workflow
+        guard transitionWorkflow(managerID, to: .revising) != nil else {
+            return
+        }
         dispatchWorkflowMessage(
             from: reviewerID,
             to: builderID,
@@ -1097,12 +1165,22 @@ final class AppModel: ObservableObject {
         reviewSummary: String,
         reviewerID: UUID
     ) {
+        guard let workflow = managerWorkflows[managerID],
+              let publisherID = workflow.team.publisherProfileID,
+              profiles.contains(where: {
+                  $0.id == publisherID && $0.role == .publisher
+              }) else {
+            pauseWorkflow(
+                managerID,
+                reason: "The assigned Documenter / PR Writer is no longer available."
+            )
+            return
+        }
         guard var next = transitionWorkflow(
             managerID,
             to: .publishing,
             persist: false
-        ),
-              let publisherID = next.team.publisherProfileID else { return }
+        ) else { return }
         next.verificationSummary = reviewSummary
         next.updatedAt = .now
         managerWorkflows[managerID] = next
@@ -1151,6 +1229,7 @@ final class AppModel: ObservableObject {
             .joined(separator: "\n")
         )
         var managerSession = sessions[managerID] ?? AgentSessionState()
+        managerSession.status = .completed
         managerSession.entries.append(completionEntry)
         sessions[managerID] = managerSession
         save(immediately: true)
@@ -1389,6 +1468,7 @@ final class AppModel: ObservableObject {
         ) else { return false }
 
         connectedProfileIDs.remove(profileID)
+        launchedProfileIDs.remove(profileID)
         runGenerations[profileID] = UUID()
         await runtime.stop(profile: runtimeProfile(for: profile))
 
@@ -1482,6 +1562,30 @@ final class AppModel: ObservableObject {
         performSend(runtimeMessage, to: targetProfileID)
     }
 
+    private struct ReviewOutput {
+        let disposition: ReviewDisposition?
+        let summary: String
+    }
+
+    private func latestReviewOutput(for profileID: UUID) -> ReviewOutput {
+        let entries = sessions[profileID]?.entries ?? []
+        let startIndex = min(
+            turnEntryStartIndices[profileID] ?? 0,
+            entries.count
+        )
+        let response = entries[startIndex...]
+            .filter { $0.kind == .assistant && !$0.text.isEmpty }
+            .map(\.text)
+            .joined(separator: "\n\n")
+        let summary = ReviewDisposition.removingProtocolLines(from: response)
+        return ReviewOutput(
+            disposition: ReviewDisposition.parse(from: response),
+            summary: summary.isEmpty
+                ? "No reviewer summary was captured."
+                : summary
+        )
+    }
+
     private func latestAssistantText(for profileID: UUID) -> String {
         sessions[profileID]?.entries
             .last(where: { $0.kind == .assistant && !$0.text.isEmpty })?
@@ -1529,6 +1633,8 @@ final class AppModel: ObservableObject {
     BL00P_REVIEW_DISPOSITION: changesRequested
     """
 
+    private static let maximumRevisionRounds = 2
+
     private static let verificationInstruction = """
     Re-check the updated committed implementation at the attached branch and HEAD. Confirm that every earlier finding is resolved and that the reported tests support the change. Do not edit code. Return any remaining actionable findings, or state clearly that the change is ready for documentation and publishing.
 
@@ -1554,6 +1660,7 @@ final class AppModel: ObservableObject {
             statusTransition = (previousStatus, status)
             if status == .failed || status == .stopped {
                 connectedProfileIDs.remove(profileID)
+                launchedProfileIDs.remove(profileID)
             }
             if status == .failed,
                let entryID = inFlightUserEntryIDs.removeValue(
@@ -1621,6 +1728,11 @@ final class AppModel: ObservableObject {
                 from: statusTransition.from,
                 to: statusTransition.to
             )
+            if statusTransition.to == .completed
+                || statusTransition.to == .failed
+                || statusTransition.to == .stopped {
+                turnEntryStartIndices.removeValue(forKey: profileID)
+            }
         }
     }
 
@@ -1717,8 +1829,8 @@ final class AppModel: ObservableObject {
     }
 }
 
-final class AppStateStore: @unchecked Sendable {
-    private let fileURL: URL?
+final class AppStateStore: Sendable {
+    let fileURL: URL?
     private let persistence: AppStatePersistenceQueue
 
     init(
@@ -1753,21 +1865,6 @@ final class AppStateStore: @unchecked Sendable {
         return try? JSONDecoder.iso8601.decode(PersistedAppState.self, from: data)
     }
 
-    func save(_ state: PersistedAppState) {
-        guard let fileURL,
-              let data = try? JSONEncoder.compactState.encode(state) else { return }
-
-        do {
-            try FileManager.default.createDirectory(
-                at: fileURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try data.write(to: fileURL, options: .atomic)
-        } catch {
-            // Persistence failure should not interrupt an active coding session.
-        }
-    }
-
     func enqueue(
         _ state: PersistedAppState,
         revision: UInt64,
@@ -1790,9 +1887,6 @@ final class AppStateStore: @unchecked Sendable {
         await persistence.flush(state, revision: revision)
     }
 
-    func flushPending() async {
-        await persistence.flushPending()
-    }
 }
 
 private extension JSONDecoder {

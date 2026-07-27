@@ -84,7 +84,8 @@ persisted workflow with this sequence:
 Questions, failures, and approval requests pause the workflow for the user.
 Leaving any team assignment unset keeps that Manager in standalone chat mode.
 Clean workflows use four agent turns; workflows with one requested-changes
-round use six.
+round use six. If findings remain after two revision rounds, bl00p pauses the
+loop for user direction instead of continuing indefinitely.
 
 ## Runtime boundary
 

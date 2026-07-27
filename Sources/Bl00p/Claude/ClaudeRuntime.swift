@@ -319,14 +319,10 @@ actor ClaudeRuntime: AgentRuntime {
         error: any Error
     ) async {
         guard var session = sessions[profileID] else { return }
-        let failure = error.localizedDescription.lowercased()
-        if failure.contains("not logged in")
-            || failure.contains("authentication")
-            || failure.contains("run /login") {
-            await preflight.invalidateClaudeAuthentication(
-                for: session.executableURL
-            )
-        }
+        await preflight.invalidateClaudeAuthentication(
+            for: session.executableURL
+        )
+        await preflight.invalidateExecutable(session.executableURL)
         session.currentContinuation?.yield(
             .entry(
                 .init(
@@ -395,7 +391,7 @@ actor ClaudeRuntime: AgentRuntime {
             )
 
         case "transport_closed":
-            handleTransportClosed(event, profileID: profileID)
+            await handleTransportClosed(event, profileID: profileID)
 
         default:
             break
@@ -618,11 +614,9 @@ actor ClaudeRuntime: AgentRuntime {
         }
 
         if failed {
-            if result == "Not logged in · Please run /login" {
-                await preflight.invalidateClaudeAuthentication(
-                    for: session.executableURL
-                )
-            }
+            await preflight.invalidateClaudeAuthentication(
+                for: session.executableURL
+            )
             yield(
                 .entry(
                     .init(
@@ -687,8 +681,15 @@ actor ClaudeRuntime: AgentRuntime {
         sessions[profileID] = session
     }
 
-    private func handleTransportClosed(_ event: JSONValue, profileID: UUID) {
+    private func handleTransportClosed(
+        _ event: JSONValue,
+        profileID: UUID
+    ) async {
         guard var session = sessions[profileID] else { return }
+        await preflight.invalidateClaudeAuthentication(
+            for: session.executableURL
+        )
+        await preflight.invalidateExecutable(session.executableURL)
         defer {
             session.currentClient = nil
             session.listenerTask = nil

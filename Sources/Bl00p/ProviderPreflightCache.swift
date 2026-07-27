@@ -40,4 +40,10 @@ actor ProviderPreflightCache {
     func invalidateClaudeAuthentication(for executableURL: URL) {
         authenticatedExecutables.remove(executableURL)
     }
+
+    func invalidateExecutable(_ staleURL: URL) {
+        guard executableURL == staleURL else { return }
+        executableURL = nil
+        authenticatedExecutables.remove(staleURL)
+    }
 }

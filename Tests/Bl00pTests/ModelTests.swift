@@ -547,7 +547,15 @@ func persistedStateRoundTrips() throws {
                 pendingHandoff: handoff
             )
         ],
-        selectedBotID: profile.id
+        selectedBotID: profile.id,
+        managerWorkflows: [
+            profile.id: ManagerWorkflow(
+                managerProfileID: profile.id,
+                team: ManagerTeamConfiguration(),
+                request: "Persist the retry cap",
+                revisionRounds: 2
+            )
+        ]
     )
 
     let data = try JSONEncoder().encode(state)
@@ -558,6 +566,7 @@ func persistedStateRoundTrips() throws {
     #expect(decoded.sessions[profile.id]?.entries.first?.text == "Done")
     #expect(decoded.profiles.first?.worktree?.branch == handoff.branch)
     #expect(decoded.sessions[profile.id]?.pendingHandoff == handoff)
+    #expect(decoded.managerWorkflows[profile.id]?.revisionRounds == 2)
 }
 
 @Test
@@ -706,7 +715,7 @@ func handoffPackageIsDeliveredWithTheRecipientsNextMessage() async throws {
     let store = AppStateStore(
         fileURL: directory.appendingPathComponent("state.json")
     )
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: [source, target],
             sessions: [
@@ -823,7 +832,7 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     let store = AppStateStore(
         fileURL: directory.appendingPathComponent("state.json")
     )
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: [manager, builder, reviewer, publisher],
             sessions: Dictionary(
@@ -996,6 +1005,40 @@ func cleanManagedWorkflowUsesExactlyFourAgentTurns() async throws {
 
 @MainActor
 @Test
+func reviewerDispositionCanArriveInASeparateAssistantBlock() async throws {
+    let harness = try makeManagedWorkflowHarness(
+        reviewerResponseBlocks: [[
+            "No actionable findings across the completed review.",
+            "BL00P_REVIEW_DISPOSITION: clean"
+        ]]
+    )
+    defer { try? FileManager.default.removeItem(at: harness.directory) }
+
+    try await runManagedWorkflow(harness)
+
+    let workflow = try #require(
+        harness.model.workflow(for: harness.managerID)
+    )
+    let calls = await harness.runtime.calls
+    #expect(workflow.stage == .completed)
+    #expect(
+        workflow.verificationSummary
+            == "No actionable findings across the completed review."
+    )
+    #expect(
+        calls.map(\.role) == [.manager, .builder, .reviewer, .publisher]
+    )
+    #expect(!calls[3].message.contains(ReviewDisposition.marker))
+    let completion = try #require(
+        harness.model.session(for: harness.managerID).entries.last(where: {
+            $0.text == "Managed workflow complete"
+        })
+    )
+    #expect(completion.detail?.contains(ReviewDisposition.marker) == false)
+}
+
+@MainActor
+@Test
 func malformedReviewDispositionConservativelyUsesFixAndVerificationTurns() async throws {
     let harness = try makeManagedWorkflowHarness(
         reviewerResponses: [
@@ -1016,8 +1059,67 @@ func malformedReviewDispositionConservativelyUsesFixAndVerificationTurns() async
             == [.manager, .builder, .reviewer, .builder, .reviewer, .publisher]
     )
     #expect(calls[3].message.contains("Treat this conservatively"))
+    #expect(!calls[3].message.contains(ReviewDisposition.marker))
     #expect(calls[4].message.contains("Re-check the updated"))
     #expect(harness.model.workflow(for: harness.managerID)?.stage == .completed)
+}
+
+@MainActor
+@Test
+func managedWorkflowPausesAfterTwoUnresolvedRevisionRounds() async throws {
+    let unresolved = """
+    A blocking finding remains.
+    BL00P_REVIEW_DISPOSITION: changesRequested
+    """
+    let harness = try makeManagedWorkflowHarness(
+        reviewerResponses: [unresolved, unresolved, unresolved]
+    )
+    defer { try? FileManager.default.removeItem(at: harness.directory) }
+
+    harness.model.send("Speed up orchestration", to: harness.managerID)
+    for _ in 0..<100
+        where harness.model.session(for: harness.managerID).status
+            != .needsApproval {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    let approval = try #require(
+        harness.model.session(for: harness.managerID).entries.last(where: {
+            $0.kind == .approval && $0.approvalState == .pending
+        })
+    )
+    harness.model.resolveApproval(
+        approval.id,
+        approved: true,
+        for: harness.managerID
+    )
+    for _ in 0..<200 {
+        if harness.model.workflow(for: harness.managerID)?.isPaused == true,
+           harness.model.workflow(for: harness.managerID)?.revisionRounds == 2 {
+            break
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let workflow = try #require(
+        harness.model.workflow(for: harness.managerID)
+    )
+    let calls = await harness.runtime.calls
+    #expect(workflow.stage == .verifying)
+    #expect(workflow.isPaused)
+    #expect(workflow.revisionRounds == 2)
+    #expect(
+        workflow.pauseReason?.contains("after 2 revision rounds") == true
+    )
+    #expect(
+        calls.map(\.role)
+            == [.manager, .builder, .reviewer, .builder, .reviewer, .builder, .reviewer]
+    )
+    #expect(!calls.map(\.role).contains(.publisher))
+    #expect(
+        harness.model.session(for: harness.managerID).entries.contains(where: {
+            $0.title == "Review loop needs attention"
+        })
+    )
 }
 
 @MainActor
@@ -1050,7 +1152,7 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
     let store = AppStateStore(
         fileURL: directory.appendingPathComponent("state.json")
     )
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: [manager, builder, reviewer, publisher],
             sessions: Dictionary(
@@ -1126,7 +1228,7 @@ func managerWithoutATeamRemainsAStandaloneBot() async throws {
     let store = AppStateStore(
         fileURL: directory.appendingPathComponent("state.json")
     )
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: [manager],
             sessions: [manager.id: AgentSessionState()],
@@ -1187,7 +1289,7 @@ func managedPublishingPausesUntilADraftPRURLIsReturned() async throws {
     let store = AppStateStore(
         fileURL: directory.appendingPathComponent("state.json")
     )
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: [manager, builder, reviewer, publisher],
             sessions: [
@@ -1223,6 +1325,146 @@ func managedPublishingPausesUntilADraftPRURLIsReturned() async throws {
 
 @MainActor
 @Test
+func cleanReviewPausesBeforeTransitionWhenPublisherWasDeleted() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-missing-publisher-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    var builder = BotProfile.defaults[0]
+    var reviewer = BotProfile.defaults[1]
+    builder.id = UUID()
+    reviewer.id = UUID()
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builder.id,
+        reviewerProfileID: reviewer.id,
+        publisherProfileID: nil
+    )
+    let manager = BotProfile(
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: manager.id,
+        team: team,
+        request: "Ship safely",
+        stage: .reviewing
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    try store.saveFixture(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer],
+            sessions: [
+                manager.id: AgentSessionState(),
+                builder.id: AgentSessionState(),
+                reviewer.id: AgentSessionState()
+            ],
+            selectedBotID: reviewer.id,
+            managerWorkflows: [manager.id: workflow]
+        )
+    )
+    let runtime = OrchestrationRecordingRuntime(
+        reviewerResponses: [
+            """
+            Review clean.
+            BL00P_REVIEW_DISPOSITION: clean
+            """
+        ]
+    )
+    let model = AppModel(runtime: runtime, store: store)
+
+    model.send("Finish the review", to: reviewer.id)
+    for _ in 0..<50
+        where model.workflow(for: manager.id)?.pauseReason
+            != "The assigned Documenter / PR Writer is no longer available." {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let paused = try #require(model.workflow(for: manager.id))
+    #expect(paused.stage == .reviewing)
+    #expect(paused.isPaused)
+    #expect(
+        paused.pauseReason
+            == "The assigned Documenter / PR Writer is no longer available."
+    )
+}
+
+@MainActor
+@Test
+func legacyReportingWorkflowCompletesDuringRestore() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-legacy-reporting-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    var builder = BotProfile.defaults[0]
+    var reviewer = BotProfile.defaults[1]
+    var publisher = BotProfile.defaults[2]
+    builder.id = UUID()
+    reviewer.id = UUID()
+    publisher.id = UUID()
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builder.id,
+        reviewerProfileID: reviewer.id,
+        publisherProfileID: publisher.id
+    )
+    let manager = BotProfile(
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: manager.id,
+        team: team,
+        request: "Restore delivery",
+        stage: .reporting,
+        branch: "bl00p/legacy-reporting",
+        pullRequestURL: "https://github.com/suttree/bl00p/pull/77",
+        verificationSummary: "Review clean.",
+        publisherSummary: "Draft PR prepared."
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    try store.saveFixture(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer, publisher],
+            sessions: Dictionary(
+                uniqueKeysWithValues: [manager, builder, reviewer, publisher]
+                    .map { ($0.id, AgentSessionState()) }
+            ),
+            selectedBotID: manager.id,
+            managerWorkflows: [manager.id: workflow]
+        )
+    )
+
+    let model = AppModel(runtime: DemoAgentRuntime(), store: store)
+    let restored = try #require(model.workflow(for: manager.id))
+
+    #expect(restored.stage == .completed)
+    #expect(
+        restored.pullRequestURL
+            == "https://github.com/suttree/bl00p/pull/77"
+    )
+    #expect(
+        model.session(for: manager.id).entries.last?.text
+            == "Managed workflow complete"
+    )
+}
+
+@MainActor
+@Test
 func deletingAnAssignedBotClearsTheManagersStaleTeamReference() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(
@@ -1251,7 +1493,7 @@ func deletingAnAssignedBotClearsTheManagersStaleTeamReference() async throws {
     let store = AppStateStore(
         fileURL: directory.appendingPathComponent("state.json")
     )
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: [manager, builder, reviewer, publisher],
             sessions: Dictionary(
@@ -1317,7 +1559,7 @@ func implementationBotRunsInsideItsOwnedWorktree() async throws {
     let store = AppStateStore(
         fileURL: directory.appendingPathComponent("state.json")
     )
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: [profile],
             sessions: [profile.id: AgentSessionState()],
@@ -1364,7 +1606,7 @@ func appStateStoreReadsWhatItWrites() throws {
     )
     let store = AppStateStore(fileURL: fileURL)
 
-    store.save(expected)
+    try store.saveFixture(expected)
     let actual = try #require(store.load())
 
     #expect(actual.selectedBotID == expected.selectedBotID)
@@ -1483,9 +1725,9 @@ func fiveHundredEventStreamIsNotBlockedBySlowPersistence() async throws {
         .appendingPathComponent(
             "bl00p-500-events-\(UUID().uuidString)",
             isDirectory: true
-        )
+    )
     defer { try? FileManager.default.removeItem(at: directory) }
-    let writer = CountingStateWriter(delay: .milliseconds(250))
+    let writer = BlockingStateWriter()
     let store = AppStateStore(
         fileURL: directory.appendingPathComponent("state.json"),
         writer: writer
@@ -1493,19 +1735,21 @@ func fiveHundredEventStreamIsNotBlockedBySlowPersistence() async throws {
     let runtime = FiveHundredEventRuntime()
     let model = AppModel(runtime: runtime, store: store)
     let profileID = try #require(model.profiles.first?.id)
-    let startedAt = ContinuousClock.now
 
     model.send("Stream a large result", to: profileID)
-    for _ in 0..<200
-        where model.session(for: profileID).status != .completed {
+    for _ in 0..<200 {
+        if model.session(for: profileID).status == .completed,
+           await writer.startedWriteCount > 0 {
+            break
+        }
         try await Task.sleep(for: .milliseconds(5))
     }
-    let ingestionDuration = startedAt.duration(to: .now)
 
     #expect(model.session(for: profileID).status == .completed)
     #expect(model.session(for: profileID).entries.count == 501)
-    #expect(ingestionDuration < .milliseconds(200))
     #expect(await writer.startedWriteCount > 0)
+    #expect(await writer.writeCount == 0)
+    await writer.release()
     await model.flushPersistence()
 }
 
@@ -1572,6 +1816,49 @@ func repeatedClaudeLaunchesReuseSuccessfulAuthenticationProbe() async throws {
     await runtime.stop(profile: profile)
 
     #expect(probe.authenticationProbeCount == 1)
+}
+
+@Test
+func claudeRuntimeFailureInvalidatesCachedPreflight() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-claude-invalidation-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let executable = directory.appendingPathComponent("claude")
+    try makeExecutable(at: executable)
+    let probe = LockedPreflightProbe()
+    let runtime = ClaudeRuntime(
+        locator: ClaudeExecutableLocator(candidateURLs: [executable]),
+        authenticationProbe: { _ in
+            probe.recordAuthenticationProbe()
+            return .loggedIn
+        }
+    )
+    var profile = BotProfile.defaults[0]
+    profile.workingDirectory = directory.path
+
+    let launch = await runtime.start(
+        profile: profile,
+        resumeThreadID: nil
+    )
+    for await _ in launch {}
+    let response = await runtime.respond(
+        to: "Trigger the failing test executable",
+        attachments: [],
+        profile: profile
+    )
+    for await _ in response {}
+
+    let relaunch = await runtime.start(
+        profile: profile,
+        resumeThreadID: nil
+    )
+    for await _ in relaunch {}
+    await runtime.stop(profile: profile)
+
+    #expect(probe.authenticationProbeCount == 2)
 }
 
 @Test
@@ -1980,7 +2267,7 @@ func activeSessionsRestoreAsStopped() throws {
         .appendingPathComponent("bl00p-restore-\(UUID().uuidString)", isDirectory: true)
     let profile = BotProfile.defaults[1]
     let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: [profile],
             sessions: [
@@ -2009,7 +2296,7 @@ func legacyCodexReviewThreadsRestartWithoutLosingTheirTranscript() throws {
         .appendingPathComponent("bl00p-codex-mode-\(UUID().uuidString)", isDirectory: true)
     let profile = BotProfile.defaults[1]
     let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: [profile],
             sessions: [
@@ -2039,7 +2326,7 @@ func codexThreadsFromAnOlderPermissionBoundaryStartFresh() throws {
         .appendingPathComponent("bl00p-codex-permissions-\(UUID().uuidString)", isDirectory: true)
     let profile = BotProfile.defaults[1]
     let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: [profile],
             sessions: [
@@ -2070,7 +2357,7 @@ func prototypeStarterCardsAreRemovedWhenStateIsRestored() throws {
         .appendingPathComponent("bl00p-starters-\(UUID().uuidString)", isDirectory: true)
     let profile = BotProfile.defaults[1]
     let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: [profile],
             sessions: [
@@ -2114,7 +2401,7 @@ func legacyPermissionBoundaryIsRestoredAsReadableAttention() throws {
     let rawDenial = """
     {"tool_name":"Bash","tool_input":{"description":"Run tests","command":"xcrun swift test"}}
     """
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: [profile],
             sessions: [
@@ -2156,7 +2443,7 @@ func legacyDefaultNamesMigrateButCustomNamesRemain() throws {
     builder.name = "Claude Builder"
     var reviewer = BotProfile.defaults[1]
     reviewer.name = "Security pass"
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: [builder, reviewer],
             sessions: [
@@ -2226,7 +2513,7 @@ func resumingAStoppedBotKeepsItsExistingTranscript() async throws {
         .appendingPathComponent("bl00p-resume-\(UUID().uuidString)", isDirectory: true)
     let profile = BotProfile.defaults[0]
     let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: [profile],
             sessions: [
@@ -2262,7 +2549,7 @@ func persistedCompletedBotReconnectsBeforeItsNextMessage() async throws {
         .appendingPathComponent("bl00p-reconnect-\(UUID().uuidString)", isDirectory: true)
     let profile = BotProfile.defaults[0]
     let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: [profile],
             sessions: [
@@ -2326,7 +2613,7 @@ func failedMessageCanRetryInPlaceWithItsAttachments() async throws {
     let profile = BotProfile.defaults[0]
     let earlierEntry = TimelineEntry(kind: .user, text: "Earlier message")
     let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: [profile],
             sessions: [
@@ -2545,6 +2832,34 @@ private actor CountingStateWriter: PersistedStateWriting {
     }
 }
 
+private actor BlockingStateWriter: PersistedStateWriting {
+    private var isReleased = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var states: [PersistedAppState] = []
+    private(set) var startedWriteCount = 0
+
+    var writeCount: Int {
+        states.count
+    }
+
+    func write(_ state: PersistedAppState) async {
+        startedWriteCount += 1
+        if !isReleased {
+            await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
+        }
+        states.append(state)
+    }
+
+    func release() {
+        isReleased = true
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
+    }
+}
+
 private final class LockedPreflightProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var executableProbes = 0
@@ -2614,6 +2929,18 @@ private actor FiveHundredEventRuntime: AgentRuntime {
     }
 
     func stop(profile: BotProfile) async {}
+}
+
+private extension AppStateStore {
+    func saveFixture(_ state: PersistedAppState) throws {
+        let fileURL = try #require(fileURL)
+        let data = try JSONEncoder.compactState.encode(state)
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try data.write(to: fileURL, options: .atomic)
+    }
 }
 
 private func runGit(_ arguments: [String], in directory: URL) throws {
@@ -2728,7 +3055,8 @@ private struct ManagedWorkflowHarness {
 
 @MainActor
 private func makeManagedWorkflowHarness(
-    reviewerResponses: [String]
+    reviewerResponses: [String] = [],
+    reviewerResponseBlocks: [[String]]? = nil
 ) throws -> ManagedWorkflowHarness {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(
@@ -2802,7 +3130,7 @@ private func makeManagedWorkflowHarness(
     let store = AppStateStore(
         fileURL: directory.appendingPathComponent("state.json")
     )
-    store.save(
+    try store.saveFixture(
         PersistedAppState(
             profiles: profiles,
             sessions: Dictionary(
@@ -2813,9 +3141,16 @@ private func makeManagedWorkflowHarness(
             selectedBotID: managerID
         )
     )
-    let runtime = OrchestrationRecordingRuntime(
-        reviewerResponses: reviewerResponses
-    )
+    let runtime: OrchestrationRecordingRuntime
+    if let reviewerResponseBlocks {
+        runtime = OrchestrationRecordingRuntime(
+            reviewerResponseBlocks: reviewerResponseBlocks
+        )
+    } else {
+        runtime = OrchestrationRecordingRuntime(
+            reviewerResponses: reviewerResponses
+        )
+    }
     let model = AppModel(
         runtime: runtime,
         worktrees: StubWorktreeManager(
@@ -2869,7 +3204,7 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
     private(set) var calls: [Call] = []
     private(set) var approvalResolutionCount = 0
     private var roleResponseCounts: [AgentRole: Int] = [:]
-    private let reviewerResponses: [String]
+    private let reviewerResponses: [[String]]
 
     init(
         reviewerResponses: [String] = [
@@ -2884,6 +3219,11 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
         ]
     ) {
         self.reviewerResponses = reviewerResponses
+            .map { [$0] }
+    }
+
+    init(reviewerResponseBlocks: [[String]]) {
+        self.reviewerResponses = reviewerResponseBlocks
     }
 
     func start(
@@ -2911,29 +3251,37 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
         let count = roleResponseCounts[profile.role, default: 0]
         roleResponseCounts[profile.role] = count + 1
 
-        let response: String
+        let responses: [String]
         switch profile.role {
         case .manager:
-            response = count == 0
-                ? "Implement the feature with persistence and tests."
-                : "Complete: [draft PR](https://github.com/suttree/bl00p/pull/99)"
+            responses = [
+                count == 0
+                    ? "Implement the feature with persistence and tests."
+                    : "Complete: [draft PR](https://github.com/suttree/bl00p/pull/99)"
+            ]
         case .builder:
-            response = count == 0
-                ? "Implementation committed and tests passed."
-                : "Review finding fixed, committed, and tests passed."
+            responses = [
+                count == 0
+                    ? "Implementation committed and tests passed."
+                    : "Review finding fixed, committed, and tests passed."
+            ]
         case .reviewer:
-            response = reviewerResponses[
+            responses = reviewerResponses[
                 min(count, reviewerResponses.count - 1)
             ]
         case .publisher:
-            response = "Documentation committed. Draft PR: https://github.com/suttree/bl00p/pull/99"
+            responses = [
+                "Documentation committed. Draft PR: https://github.com/suttree/bl00p/pull/99"
+            ]
         }
 
         return AsyncStream { continuation in
             continuation.yield(.status(.working))
-            continuation.yield(
-                .entry(.init(kind: .assistant, text: response))
-            )
+            for response in responses {
+                continuation.yield(
+                    .entry(.init(kind: .assistant, text: response))
+                )
+            }
             continuation.yield(.status(.completed))
             continuation.finish()
         }

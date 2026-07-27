@@ -183,6 +183,7 @@ actor CodexAppServerRuntime: AgentRuntime {
             // continuation to report through; see `closeSession`.
         } catch {
             await client.stop()
+            await preflight.invalidateExecutable(executableURL)
             sessions[profile.id]?.listenerTask?.cancel()
             sessions[profile.id] = nil
             pair.continuation.yield(

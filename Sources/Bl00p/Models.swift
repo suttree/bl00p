@@ -420,7 +420,7 @@ enum ManagerWorkflowStage: String, Codable, CaseIterable, Sendable {
         case .revising: 3
         case .verifying: 4
         case .publishing: 5
-        case .reporting: 6
+        case .reporting: 5
         case .completed: 6
         }
     }
@@ -430,8 +430,9 @@ enum ReviewDisposition: String, Sendable {
     case clean
     case changesRequested
 
+    static let marker = "BL00P_REVIEW_DISPOSITION:"
+
     static func parse(from response: String) -> ReviewDisposition? {
-        let marker = "BL00P_REVIEW_DISPOSITION:"
         let matchingLines = response
             .split(whereSeparator: \.isNewline)
             .map {
@@ -443,6 +444,17 @@ enum ReviewDisposition: String, Sendable {
             .dropFirst(marker.count)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return ReviewDisposition(rawValue: value)
+    }
+
+    static func removingProtocolLines(from response: String) -> String {
+        response
+            .components(separatedBy: .newlines)
+            .filter {
+                !$0.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .hasPrefix(marker)
+            }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -458,6 +470,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     var pullRequestURL: String?
     var verificationSummary: String?
     var publisherSummary: String?
+    var revisionRounds: Int?
     var latestHandoff: GitHandoffPackage?
     var isPaused: Bool
     var pauseReason: String?
@@ -476,6 +489,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         pullRequestURL: String? = nil,
         verificationSummary: String? = nil,
         publisherSummary: String? = nil,
+        revisionRounds: Int = 0,
         latestHandoff: GitHandoffPackage? = nil,
         isPaused: Bool = false,
         pauseReason: String? = nil,
@@ -493,6 +507,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         self.pullRequestURL = pullRequestURL
         self.verificationSummary = verificationSummary
         self.publisherSummary = publisherSummary
+        self.revisionRounds = revisionRounds
         self.latestHandoff = latestHandoff
         self.isPaused = isPaused
         self.pauseReason = pauseReason
