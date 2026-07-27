@@ -1,5 +1,9 @@
+#if os(macOS)
 import AppKit
 import SwiftUI
+#else
+import SwiftOpenUI
+#endif
 
 struct ConversationView: View {
     @ObservedObject var model: AppModel
@@ -93,7 +97,7 @@ struct ConversationView: View {
                     }
                 )
             }
-            .background(Color(nsColor: .textBackgroundColor))
+            .background(Color.bl00pTextBackground)
             .task(id: sessionID) {
                 draft = model.sessions[sessionID]?.draft ?? ""
                 attachments = []
@@ -133,10 +137,10 @@ struct ConversationView: View {
                 Text(closeError ?? "")
             }
         } else {
-            ContentUnavailableView(
-                "No Bot Selected",
+            Bl00pUnavailableView(
+                title: "No Bot Selected",
                 systemImage: "bubble.left.and.exclamationmark.bubble.right",
-                description: Text("Choose or add a bot to begin.")
+                description: "Choose or add a bot to begin."
             )
         }
     }
@@ -514,14 +518,21 @@ private struct ConversationHeader: View {
             }
 
             Button(action: showSettings) {
+                #if os(macOS)
                 Image(systemName: "slider.horizontal.3")
+                #else
+                // "slider.horizontal.3" has no Material Symbols mapping;
+                // "gearshape" (-> "settings") reads the same for a settings
+                // affordance and is already mapped.
+                Image(systemName: "gearshape")
+                #endif
             }
             .buttonStyle(.bordered)
             .help("Bot settings")
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
-        .background(.bar)
+        .background(Color.bl00pControlBackground)
     }
 
     private var directoryLabel: String {
@@ -547,27 +558,29 @@ private struct TranscriptView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
+                #if os(macOS)
                 LazyVStack(alignment: .leading, spacing: 18) {
-                    ForEach(entries) { entry in
-                        TimelineEntryView(
-                            entry: entry,
-                            profile: profile,
-                            canRetryFailedMessage: canRetryFailedMessage,
-                            retry: retry,
-                            resolveApproval: resolveApproval
-                        )
-                        .id(entry.id)
-                    }
-
-                    Color.clear
-                        .frame(height: 24)
-                        .id(sessionID)
+                    transcriptContent
                 }
                 .scrollTargetLayout()
                 .padding(.horizontal, 32)
                 .padding(.top, 24)
                 .frame(maxWidth: 884)
                 .frame(maxWidth: .infinity)
+                #else
+                // SwiftOpenUI's LazyVStack only offers a data-driven
+                // initializer, not a free-form ViewBuilder one, so the
+                // scroll-to-bottom sentinel view below can't share it with
+                // the entries. A plain VStack renders every entry eagerly
+                // instead of only the visible ones.
+                VStack(alignment: .leading, spacing: 18) {
+                    transcriptContent
+                }
+                .padding(.horizontal, 32)
+                .padding(.top, 24)
+                .frame(maxWidth: 884)
+                .frame(maxWidth: .infinity)
+                #endif
             }
             .scrollPosition(id: $scrollPosition)
             .task(id: sessionID) {
@@ -586,6 +599,24 @@ private struct TranscriptView: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private var transcriptContent: some View {
+        ForEach(entries) { entry in
+            TimelineEntryView(
+                entry: entry,
+                profile: profile,
+                canRetryFailedMessage: canRetryFailedMessage,
+                retry: retry,
+                resolveApproval: resolveApproval
+            )
+            .id(entry.id)
+        }
+
+        Color.clear
+            .frame(height: 24)
+            .id(sessionID)
     }
 }
 
@@ -745,7 +776,7 @@ private struct TimelineEntryView: View {
         }
         .padding(14)
         .background(
-            Color(nsColor: .controlBackgroundColor),
+            Color.bl00pControlBackground,
             in: RoundedRectangle(cornerRadius: 13, style: .continuous)
         )
         .overlay {
@@ -880,7 +911,7 @@ private struct ToolCallCard: View {
         }
         .padding(14)
         .background(
-            Color(nsColor: .controlBackgroundColor),
+            Color.bl00pControlBackground,
             in: RoundedRectangle(cornerRadius: 13, style: .continuous)
         )
         .overlay {
@@ -894,16 +925,7 @@ private struct AttachmentThumbnail: View {
     let attachment: ImageAttachment
 
     var body: some View {
-        Group {
-            if let image = NSImage(contentsOfFile: attachment.path) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Image(systemName: "photo")
-                    .font(.system(size: 20))
-            }
-        }
+        AttachmentImageView(path: attachment.path)
         .frame(width: 72, height: 58)
         .background(.white.opacity(0.18))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -967,7 +989,7 @@ private struct ComposerView: View {
                         }
                     }
                     .background(
-                        Color(nsColor: .controlBackgroundColor),
+                        Color.bl00pControlBackground,
                         in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                     )
                     .overlay {
@@ -1009,7 +1031,7 @@ private struct ComposerView: View {
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 18)
-        .background(.bar)
+        .background(Color.bl00pControlBackground)
         .overlay {
             if isDropTargeted {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -1054,13 +1076,9 @@ private struct ComposerView: View {
 
     private func attachmentChip(_ attachment: ImageAttachment) -> some View {
         HStack(spacing: 7) {
-            if let image = NSImage(contentsOfFile: attachment.path) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: 28, height: 28)
-                    .clipShape(RoundedRectangle(cornerRadius: 5))
-            }
+            AttachmentImageView(path: attachment.path)
+                .frame(width: 28, height: 28)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
 
             Text(attachment.filename)
                 .font(.bl00p(.caption1, weight: .medium))
@@ -1078,7 +1096,7 @@ private struct ComposerView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .background(
-            Color(nsColor: .controlBackgroundColor),
+            Color.bl00pControlBackground,
             in: RoundedRectangle(cornerRadius: 8, style: .continuous)
         )
     }
@@ -1089,7 +1107,8 @@ private struct ComposerView: View {
             let standardized = url.standardizedFileURL
             guard standardized.isFileURL,
                   !existingPaths.contains(standardized.path),
-                  NSImage(contentsOf: standardized) != nil else { return nil }
+                  AttachmentImageValidation.isLoadableImage(at: standardized)
+            else { return nil }
             return ImageAttachment(path: standardized.path)
         }
         attachments.append(contentsOf: additions)
@@ -1111,6 +1130,7 @@ private struct MarkdownMessageView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
 
                 case .code(let code):
+                    #if os(macOS)
                     ScrollView(.horizontal) {
                         Text(code)
                             .font(.bl00p(.body, design: .monospaced))
@@ -1120,12 +1140,26 @@ private struct MarkdownMessageView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(
-                        Color(nsColor: .controlBackgroundColor),
+                        Color.bl00pControlBackground,
                         in: RoundedRectangle(
                             cornerRadius: 10,
                             style: .continuous
                         )
                     )
+                    #else
+                    Text(code)
+                        .font(.bl00p(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(
+                            Color.bl00pControlBackground,
+                            in: RoundedRectangle(
+                                cornerRadius: 10,
+                                style: .continuous
+                            )
+                        )
+                    #endif
                     .overlay {
                         RoundedRectangle(
                             cornerRadius: 10,
@@ -1368,10 +1402,12 @@ enum ComposerTextMetrics {
             return ComposerLimits.maximumEditorHeight
         }
 
+        let availableWidth = max(80, width - 36)
+
+        #if os(macOS)
         let font = NSFont.systemFont(
             ofSize: NSFont.preferredFont(forTextStyle: .body).pointSize + 2
         )
-        let availableWidth = max(80, width - 36)
         let measuredText = (text.isEmpty ? " " : text) + "\u{200B}"
         let bounds = (measuredText as NSString).boundingRect(
             with: NSSize(
@@ -1381,9 +1417,18 @@ enum ComposerTextMetrics {
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: font]
         )
+        let measuredHeight = ceil(bounds.height) + 6
+        #else
+        let measuredHeight = PortableTextMetrics.wrappedHeight(
+            for: text,
+            width: availableWidth,
+            pointSize: Bl00pTextStyle.body.pointSize + 2
+        ) + 6
+        #endif
+
         return min(
             ComposerLimits.maximumEditorHeight,
-            max(24, ceil(bounds.height) + 6)
+            max(24, measuredHeight)
         )
     }
 }

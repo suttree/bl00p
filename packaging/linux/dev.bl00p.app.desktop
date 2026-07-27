@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=bl00p
+Comment=A control room for running coding agents through an implementation, review, and publishing loop
+Exec=bl00p
+Icon=dev.bl00p.app
+Terminal=false
+Categories=Development;
+StartupWMClass=bl00p

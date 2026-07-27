@@ -1,12 +1,24 @@
-import AppKit
 import Foundation
+
+#if os(macOS)
+import AppKit
 import UserNotifications
+#endif
 
 enum AppWindowActivity {
+    #if os(macOS)
     @MainActor
     static var isActive: Bool {
         NSApplication.shared.isActive && NSApplication.shared.keyWindow != nil
     }
+    #else
+    /// The GTK4 backend does not surface window focus, so bl00p cannot tell
+    /// whether its window is frontmost. Reporting `false` means attention
+    /// notices are always delivered to the desktop: a redundant notification
+    /// is a smaller failure than a silently dropped one.
+    @MainActor
+    static var isActive: Bool { false }
+    #endif
 }
 
 enum AgentAttentionNotice: Equatable, Sendable {
@@ -59,6 +71,16 @@ enum AgentAttentionNotice: Equatable, Sendable {
             )
         }
     }
+
+    #if !os(macOS)
+    /// Maps to freedesktop notification urgency levels.
+    var urgency: String {
+        switch self {
+        case .needsAnswer, .needsApproval, .failed: "critical"
+        case .completed: "normal"
+        }
+    }
+    #endif
 }
 
 @MainActor
@@ -67,6 +89,8 @@ protocol AgentNotificationDelivering {
     func post(_ notice: AgentAttentionNotice, for profile: BotProfile)
     func setBadgeCount(_ count: Int)
 }
+
+#if os(macOS)
 
 final class AppNotificationController:
     NSObject,
@@ -134,3 +158,69 @@ final class AppNotificationController:
         completionHandler()
     }
 }
+
+#else
+
+/// Delivers attention notices through the freedesktop notification daemon.
+///
+/// `notify-send` is used rather than a direct D-Bus binding so bl00p keeps its
+/// dependency surface to the GTK4 stack it already links. It ships in
+/// `libnotify-bin`, which is present on a default Kali install.
+final class AppNotificationController: AgentNotificationDelivering, @unchecked Sendable {
+    static let shared = AppNotificationController()
+
+    /// Replacing a bot's previous notice keeps one queued item per bot instead
+    /// of stacking every status change in the notification tray.
+    private var replacementIDs: [UUID: String] = [:]
+    private let queue = DispatchQueue(label: "bl00p.notifications")
+
+    private init() {}
+
+    func requestAuthorization() {
+        // The freedesktop notification spec has no authorization step.
+    }
+
+    func post(_ notice: AgentAttentionNotice, for profile: BotProfile) {
+        let content = notice.content(for: profile)
+        let replacementID = replacementIDs[profile.id] ?? profile.id.uuidString
+        replacementIDs[profile.id] = replacementID
+
+        var arguments = [
+            "notify-send",
+            "--app-name=bl00p",
+            "--urgency=\(notice.urgency)",
+            "--icon=bl00p",
+            "--hint=string:desktop-entry:bl00p",
+            content.title,
+            content.body
+        ]
+
+        // `--replace-id` needs a numeric handle; derive a stable one per bot.
+        arguments.insert(
+            "--replace-id=\(abs(replacementID.hashValue % 100_000) + 1)",
+            at: 3
+        )
+
+        queue.async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = arguments
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {
+                // A missing notification daemon must never take down a session.
+            }
+        }
+    }
+
+    func setBadgeCount(_ count: Int) {
+        // No portable launcher badge exists across the Kali desktops. The
+        // sidebar attention badges remain the in-app signal.
+    }
+}
+
+#endif

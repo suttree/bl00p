@@ -1,7 +1,11 @@
-import AppKit
 import Foundation
+
+#if os(macOS)
+import AppKit
 import SwiftUI
-import os
+#else
+import SwiftOpenUI
+#endif
 
 private struct BuilderImplementationHandoff: Sendable {
     let approvalEntryID: UUID
@@ -808,15 +812,10 @@ final class AppModel: ObservableObject {
     }
 
     func chooseWorkingDirectory(for profileID: UUID) {
-        let panel = NSOpenPanel()
-        panel.title = "Choose a working directory"
-        panel.message = "bl00p will launch this bot in the selected folder."
-        panel.prompt = "Choose"
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-
-        if panel.runModal() == .OK, let path = panel.url?.path,
+        if let path = DirectoryChooser.chooseDirectory(
+            title: "Choose a working directory",
+            message: "bl00p will launch this bot in the selected folder."
+           ),
            let index = profiles.firstIndex(where: { $0.id == profileID }) {
             profiles[index].workingDirectory = path
             profiles[index].worktree = nil
@@ -3501,7 +3500,7 @@ final class AppModel: ObservableObject {
                 state.hasUnreadCompletion =
                     selectedBotID != ownerProfileID
                         || selectedSessionID(for: ownerProfileID) != profileID
-                        || !NSApplication.shared.isActive
+                        || !AppWindowActivity.isActive
             }
         case .entry(let entry):
             state.entries.append(entry)
@@ -3696,7 +3695,7 @@ final class AppModel: ObservableObject {
 final class AppStateStore: Sendable {
     let fileURL: URL?
     private let persistence: AppStatePersistenceQueue
-    private let logger = Logger(subsystem: "dev.bl00p.app", category: "persistence")
+    private let logger = Bl00pLogger(subsystem: "dev.bl00p.app", category: "persistence")
 
     init(
         fileURL: URL? = nil,

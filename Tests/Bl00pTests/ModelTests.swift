@@ -1,4 +1,8 @@
+#if os(macOS)
 import AppKit
+#else
+import SwiftOpenUI
+#endif
 import Foundation
 import Testing
 @testable import Bl00p
@@ -31,6 +35,7 @@ func updateFeedUsesSignedGitHubReleaseAssets() throws {
     #expect(decodedPublicKey.count == 32)
 }
 
+#if os(macOS)
 @Test
 func themeAdaptsToSystemAppearanceWithLegibleBrandSurfaces() throws {
     let light = try #require(NSAppearance(named: .aqua))
@@ -96,6 +101,55 @@ func avatarBackgroundUsesPinkForManagersAndMintForOtherRoles() throws {
         }
     }
 }
+#else
+// `Bl00pTheme`'s `adaptive()` colors resolve against `Bl00pAppearance.current`,
+// which is read once at process launch (there is no live-appearance
+// resolution API on the GTK4 backend to force both light and dark the way
+// `NSAppearance.performAsCurrentDrawingAppearance` does above). These tests
+// exercise the constants and explicitly-parameterized functions that do not
+// depend on that fixed, launch-time value.
+@Test
+func themeBrandSurfacesUseTheExpectedHotPink() {
+    for surface in [Bl00pTheme.accent, Bl00pTheme.userBubble, Bl00pTheme.hotPink] {
+        #expect(abs(surface.red - 1.00) < 0.001)
+        #expect(abs(surface.green - 105.0 / 255.0) < 0.001)
+        #expect(abs(surface.blue - 180.0 / 255.0) < 0.001)
+    }
+    #expect(abs(Bl00pTheme.userBubbleText.red - 1.00) < 0.001)
+    #expect(abs(Bl00pTheme.userBubbleText.green - 1.00) < 0.001)
+    #expect(abs(Bl00pTheme.userBubbleText.blue - 1.00) < 0.001)
+}
+
+@Test
+func sidebarColorsDifferBetweenLightAndDark() {
+    #expect(
+        Bl00pTheme.sidebarColors(for: .light)
+            != Bl00pTheme.sidebarColors(for: .dark)
+    )
+    #expect(
+        Bl00pTheme.sidebarTop(for: .light) == Bl00pTheme.sidebarLightTop
+    )
+    #expect(
+        Bl00pTheme.sidebarTop(for: .dark) == Bl00pTheme.sidebarDarkTop
+    )
+    #expect(contrastRatio(Bl00pTheme.userBubble, Bl00pTheme.avatarInk) >= 4.5)
+}
+
+@Test
+func avatarBackgroundUsesPinkForManagersAndMintForOtherRoles() {
+    #expect(Bl00pTheme.avatarBackground(for: .manager) == Bl00pTheme.hotPink)
+    #expect(
+        contrastRatio(
+            Bl00pTheme.avatarBackground(for: .manager),
+            Bl00pTheme.avatarInk
+        ) >= 4.5
+    )
+
+    for role in AgentRole.allCases where role != .manager {
+        #expect(Bl00pTheme.avatarBackground(for: role) == Bl00pTheme.mint)
+    }
+}
+#endif
 
 @Test
 func defaultProfilesCoverTheLoop() {
@@ -104,6 +158,7 @@ func defaultProfilesCoverTheLoop() {
     #expect(BotProfile.defaults.map(\.name) == ["Claude", "Codex", "Claude"])
 }
 
+#if os(macOS)
 private func contrastRatio(_ first: NSColor, _ second: NSColor) -> CGFloat {
     let firstLuminance = relativeLuminance(first)
     let secondLuminance = relativeLuminance(second)
@@ -132,6 +187,27 @@ private func relativeLuminance(_ color: NSColor) -> CGFloat {
         + 0.7152 * components[1]
         + 0.0722 * components[2]
 }
+#else
+private func contrastRatio(_ first: Color, _ second: Color) -> Double {
+    let firstLuminance = relativeLuminance(first)
+    let secondLuminance = relativeLuminance(second)
+    let lighter = max(firstLuminance, secondLuminance)
+    let darker = min(firstLuminance, secondLuminance)
+    return (lighter + 0.05) / (darker + 0.05)
+}
+
+private func relativeLuminance(_ color: Color) -> Double {
+    let components = [color.red, color.green, color.blue]
+        .map { component in
+            component <= 0.04045
+                ? component / 12.92
+                : pow((component + 0.055) / 1.055, 2.4)
+        }
+    return 0.2126 * components[0]
+        + 0.7152 * components[1]
+        + 0.0722 * components[2]
+}
+#endif
 
 @Test
 func providersChooseSensibleHiddenRolesForNewBots() {

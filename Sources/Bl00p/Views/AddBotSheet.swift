@@ -1,4 +1,8 @@
+#if os(macOS)
 import SwiftUI
+#else
+import SwiftOpenUI
+#endif
 
 struct AddBotSheet: View {
     @Environment(\.dismiss) private var dismiss

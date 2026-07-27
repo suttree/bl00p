@@ -1,4 +1,8 @@
+#if os(macOS)
 import SwiftUI
+#else
+import SwiftOpenUI
+#endif
 
 struct ProfileInspectorView: View {
     @Binding var profile: BotProfile
@@ -165,7 +169,7 @@ struct ProfileInspectorView: View {
                         .frame(minHeight: 220)
                         .padding(8)
                         .background(
-                            Color(nsColor: .controlBackgroundColor),
+                            Color.bl00pControlBackground,
                             in: RoundedRectangle(cornerRadius: 10)
                         )
                         .overlay {
@@ -185,7 +189,7 @@ struct ProfileInspectorView: View {
             }
             .padding(18)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.bl00pWindowBackground)
     }
 
     private var modelSelection: Binding<String> {

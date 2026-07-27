@@ -1,6 +1,8 @@
 # bl00p
 
-bl00p (“bot loop”) is a native macOS control room for running coding agents through an implementation, review, and publishing loop while keeping a human in control.
+bl00p (“bot loop”) is a control room for running coding agents through an implementation, review, and publishing loop while keeping a human in control.
+
+This fork ([suttree/bl00p](https://github.com/suttree/bl00p) is upstream) targets Linux — built and tested on Kali — using [SwiftOpenUI](https://github.com/codelynx/SwiftOpenUI)'s GTK4 backend in place of AppKit/SwiftUI. The macOS build path is kept working alongside it; `Package.swift` and most `#if os(macOS)` branches in `Sources/Bl00p` select the platform automatically.
 
 The current prototype includes:
 
@@ -9,8 +11,7 @@ The current prototype includes:
 - Builder, reviewer, and PR-writer roles
 - Editable role prompts and working directories
 - A Slack-like sidebar with attention badges
-- Automatic light and dark appearances that follow the macOS system setting
-- Signed automatic updates through GitHub Releases, with install and relaunch
+- Automatic light and dark appearances that follow the system setting (macOS: live; Linux: read once at launch from `org.gnome.desktop.interface color-scheme`)
 - Consistent, legible typography across conversations, settings, and bot creation
 - Structured messages, commands, findings, and approval cards
 - Optional Manager bots that coordinate a persistent Builder → Reviewer →
@@ -26,7 +27,41 @@ The current prototype includes:
   can resume with the original plan, review findings, publishing context, and
   draft PR details intact
 
-## Run the prototype
+## Run the prototype (Linux)
+
+Requires Swift 6.0+ and GTK4 development headers. On Kali/Debian:
+
+```sh
+sudo apt install swiftlang libgtk-4-dev
+```
+
+```sh
+swift run
+```
+
+Run tests with `swift test`. `codex` and `claude` are located on `PATH` or in
+their usual per-user install directories (`~/.local/bin`, `~/.npm-global/bin`);
+see `Sources/Bl00p/Claude/ClaudeExecutableLocator.swift` and
+`Sources/Bl00p/Codex/CodexExecutableLocator.swift`.
+
+### Build an installable `.deb`
+
+```sh
+sh scripts/build-installable-deb.sh
+```
+
+The script writes `bl00p_<version>_<arch>.deb` to `.build/deb/`. Install it
+with `sudo apt install ./.build/deb/bl00p_*.deb` (or `sudo dpkg -i` followed by
+`sudo apt -f install` for dependency resolution). There is no signed
+auto-update feed on Linux — `apt` owns installation, and bl00p's in-app
+"Check for Updates" only points you at the latest GitHub release; see
+`Sources/Bl00p/UpdateController.swift`.
+
+Directory selection uses `zenity` if present, falling back to `kdialog`;
+desktop notifications use `notify-send` (`libnotify-bin`). Both are optional —
+bl00p degrades gracefully without them.
+
+## Run the prototype (macOS)
 
 The installed Xcode toolchain is required because the standalone Command Line Tools installation may not match the current macOS SDK.
 
@@ -45,7 +80,7 @@ open .build/bl00p.app
 
 Run tests by replacing `swift build` with `swift test`.
 
-## Build an installable release
+### Build an installable release
 
 Build, package, sign, and verify an optimized app bundle with:
 
@@ -59,7 +94,10 @@ app into `/Applications`. GitHub releases use Developer ID signing and Apple
 notarization before the stapled app is archived for distribution.
 
 Release cadence, Sparkle signing, and GitHub Actions setup are documented in
-[docs/RELEASING.md](docs/RELEASING.md).
+[docs/RELEASING.md](docs/RELEASING.md). This applies to the macOS build only —
+Sparkle is a macOS-only dependency and is not linked into the Linux build.
+
+## Claude Code authentication
 
 Claude Code must be installed and authenticated before launching a Claude
 profile:
