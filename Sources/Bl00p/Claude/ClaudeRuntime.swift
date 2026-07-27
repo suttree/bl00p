@@ -16,9 +16,11 @@ actor ClaudeRuntime: AgentRuntime {
     private struct Session {
         let executableURL: URL
         let workingDirectory: URL
+        let approvalMode: ApprovalMode
+        let role: AgentRole
         var sessionID: String
         var shouldResume: Bool
-        var currentClient: ClaudeCLIClient?
+        var currentClient: (any ClaudeClient)?
         var currentContinuation: AsyncStream<AgentEvent>.Continuation?
         var listenerTask: Task<Void, Never>?
         var currentAttemptID: UUID?
@@ -28,10 +30,25 @@ actor ClaudeRuntime: AgentRuntime {
         var receivedResult = false
         var stagedAttachmentDirectory: URL?
         var pendingApprovals: [UUID: PendingApproval] = [:]
+        var handledControlRequestIDs: Set<String> = []
     }
 
-    private let locator = ClaudeExecutableLocator()
+    private let locator: ClaudeExecutableLocator
+    private let authenticationStatusOverride: (@Sendable (URL) -> AuthenticationStatus)?
+    private let clientFactory: @Sendable (URL) -> any ClaudeClient
     private var sessions: [UUID: Session] = [:]
+
+    init(
+        locator: ClaudeExecutableLocator = ClaudeExecutableLocator(),
+        authenticationStatus: (@Sendable (URL) -> AuthenticationStatus)? = nil,
+        clientFactory: @escaping @Sendable (URL) -> any ClaudeClient = {
+            ClaudeCLIClient(executableURL: $0)
+        }
+    ) {
+        self.locator = locator
+        authenticationStatusOverride = authenticationStatus
+        self.clientFactory = clientFactory
+    }
 
     func start(
         profile: BotProfile,
@@ -109,6 +126,8 @@ actor ClaudeRuntime: AgentRuntime {
         sessions[profile.id] = Session(
             executableURL: executableURL,
             workingDirectory: workingDirectory,
+            approvalMode: profile.approvalMode,
+            role: profile.role,
             sessionID: sessionID,
             shouldResume: resumedID != nil
         )
@@ -160,6 +179,7 @@ actor ClaudeRuntime: AgentRuntime {
         session.assistantTexts.removeAll()
         session.receivedResult = false
         session.pendingApprovals.removeAll()
+        session.handledControlRequestIDs.removeAll()
         sessions[profile.id] = session
         pair.continuation.yield(.status(.working))
 
@@ -255,7 +275,7 @@ actor ClaudeRuntime: AgentRuntime {
         }
 
         let attemptID = UUID()
-        let client = ClaudeCLIClient(executableURL: session.executableURL)
+        let client = clientFactory(session.executableURL)
         let invocation = try ClaudeInvocation(
             sessionID: session.sessionID,
             resume: session.shouldResume,
@@ -404,7 +424,56 @@ actor ClaudeRuntime: AgentRuntime {
 
         guard !session.pendingApprovals.values.contains(where: {
             $0.requestID == requestID
-        }) else { return }
+        }),
+        !session.handledControlRequestIDs.contains(requestID) else { return }
+
+        session.handledControlRequestIDs.insert(requestID)
+        sessions[profileID] = session
+
+        if session.role == .manager {
+            do {
+                try await client.respond(
+                    to: requestID,
+                    result: ClaudeToolApprovalResponse.managerBoundary
+                )
+                yield(
+                    .entry(approval.managerBoundaryEntry()),
+                    profileID: profileID
+                )
+            } catch {
+                await failAutomaticControlResponse(
+                    profileID: profileID,
+                    text: "Could not enforce Claude's read-only Manager boundary",
+                    action: approval.primaryAction,
+                    error: error
+                )
+            }
+            return
+        }
+
+        if session.approvalMode == .auto {
+            do {
+                try await client.respond(
+                    to: requestID,
+                    result: ClaudeToolApprovalResponse.result(
+                        approved: true,
+                        toolInput: approval.toolInput
+                    )
+                )
+                yield(
+                    .entry(approval.autoApprovalEntry()),
+                    profileID: profileID
+                )
+            } catch {
+                await failAutomaticControlResponse(
+                    profileID: profileID,
+                    text: "Could not auto-approve Claude's action",
+                    action: approval.primaryAction,
+                    error: error
+                )
+            }
+            return
+        }
 
         let entry = approval.timelineEntry()
         session.pendingApprovals[entry.id] = PendingApproval(
@@ -414,6 +483,43 @@ actor ClaudeRuntime: AgentRuntime {
         sessions[profileID] = session
         session.currentContinuation?.yield(.entry(entry))
         session.currentContinuation?.yield(.status(.needsApproval))
+    }
+
+    private func failAutomaticControlResponse(
+        profileID: UUID,
+        text: String,
+        action: String,
+        error: any Error
+    ) async {
+        guard var session = sessions[profileID] else { return }
+        let client = session.currentClient
+        session.currentContinuation?.yield(
+            .entry(
+                .init(
+                    kind: .system,
+                    title: "Claude permission response failed",
+                    text: text,
+                    detail: "\(action)\n\(error.localizedDescription)"
+                )
+            )
+        )
+        session.currentContinuation?.yield(.status(.failed))
+        session.currentContinuation?.finish()
+        session.currentContinuation = nil
+        session.currentClient = nil
+        session.listenerTask?.cancel()
+        session.listenerTask = nil
+        session.currentAttemptID = nil
+        session.pendingTurn = nil
+        session.pendingApprovals.removeAll()
+        if let directory = session.stagedAttachmentDirectory {
+            try? FileManager.default.removeItem(at: directory)
+            session.stagedAttachmentDirectory = nil
+        }
+        sessions[profileID] = session
+        if let client {
+            await client.stop()
+        }
     }
 
     private func handleControlCancellation(
@@ -779,6 +885,10 @@ actor ClaudeRuntime: AgentRuntime {
     }
 
     private func authenticationStatus(executableURL: URL) -> AuthenticationStatus {
+        if let authenticationStatusOverride {
+            return authenticationStatusOverride(executableURL)
+        }
+
         let process = Process()
         let pipe = Pipe()
         process.executableURL = executableURL
@@ -827,7 +937,7 @@ actor ClaudeRuntime: AgentRuntime {
         AsyncStream { $0.finish() }
     }
 }
-private enum AuthenticationStatus {
+enum AuthenticationStatus: Sendable {
     case loggedIn
     case loggedOut
     case unavailable(String)
@@ -932,7 +1042,27 @@ struct ClaudeToolApprovalRequest: Sendable {
         )
     }
 
-    private var primaryAction: String {
+    func autoApprovalEntry(id: UUID = UUID()) -> TimelineEntry {
+        .init(
+            id: id,
+            kind: .system,
+            title: "Auto-approved Claude action",
+            text: primaryAction,
+            detail: detail
+        )
+    }
+
+    func managerBoundaryEntry(id: UUID = UUID()) -> TimelineEntry {
+        .init(
+            id: id,
+            kind: .system,
+            title: "Claude action blocked",
+            text: primaryAction,
+            detail: "Claude Managers are read-only and cannot escalate permissions."
+        )
+    }
+
+    var primaryAction: String {
         toolInput["command"]?.stringValue
             ?? toolInput["file_path"]?.stringValue
             ?? toolInput["notebook_path"]?.stringValue
@@ -959,6 +1089,13 @@ struct ClaudeToolApprovalRequest: Sendable {
 }
 
 enum ClaudeToolApprovalResponse {
+    static let managerBoundary: JSONValue = .object([
+        "behavior": .string("deny"),
+        "message": .string(
+            "Claude Managers are read-only and cannot escalate permissions in bl00p."
+        )
+    ])
+
     static func result(
         approved: Bool,
         toolInput: JSONValue

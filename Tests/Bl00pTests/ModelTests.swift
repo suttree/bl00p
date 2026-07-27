@@ -514,6 +514,7 @@ func botProfileDecodesLegacyJSONMissingApprovalMode() throws {
 @Test
 func persistedStateRoundTrips() throws {
     var profile = BotProfile.defaults[0]
+    profile.approvalMode = .auto
     profile.worktree = GitWorktreeOwnership(
         ownerProfileID: profile.id,
         repositoryPath: "/tmp/project",
@@ -554,6 +555,7 @@ func persistedStateRoundTrips() throws {
     let decoded = try JSONDecoder().decode(PersistedAppState.self, from: data)
 
     #expect(decoded.profiles == [profile])
+    #expect(decoded.profiles.first?.approvalMode == .auto)
     #expect(decoded.sessions[profile.id]?.status == .completed)
     #expect(decoded.sessions[profile.id]?.entries.first?.text == "Done")
     #expect(decoded.profiles.first?.worktree?.branch == handoff.branch)
@@ -1591,6 +1593,145 @@ func claudeCLIClientCompletesThePermissionRoundTrip() async throws {
 }
 
 @Test
+func claudeAskModeIsCapturedWhenTheSessionStarts() async throws {
+    let client = ApprovalStubClaudeClient()
+    let runtime = testClaudeRuntime(client: client)
+    var profile = BotProfile(
+        name: "Claude Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement the change.",
+        workingDirectory: FileManager.default.temporaryDirectory.path,
+        approvalMode: .ask
+    )
+    await launchClaude(runtime, profile: profile)
+
+    profile.approvalMode = .auto
+    let events = await collectClaudeTurn(
+        runtime,
+        profile: profile,
+        approveRequests: true
+    )
+    let entries = timelineEntries(in: events)
+    let statuses = agentStatuses(in: events)
+    let responses = await client.responses
+
+    #expect(entries.contains(where: {
+        $0.kind == .approval && $0.approvalState == .pending
+    }))
+    #expect(statuses.contains(.needsApproval))
+    #expect(statuses.last == .completed)
+    #expect(
+        responses.first?["behavior"]?.stringValue == "allow"
+    )
+}
+
+@Test
+func claudeAutoModeApprovesWithoutPausingAndAddsAnAuditEntry() async throws {
+    let client = ApprovalStubClaudeClient()
+    let runtime = testClaudeRuntime(client: client)
+    let profile = BotProfile(
+        name: "Claude Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement the change.",
+        workingDirectory: FileManager.default.temporaryDirectory.path,
+        approvalMode: .auto
+    )
+    await launchClaude(runtime, profile: profile)
+
+    let events = await collectClaudeTurn(runtime, profile: profile)
+    let entries = timelineEntries(in: events)
+    let statuses = agentStatuses(in: events)
+    let responses = await client.responses
+    let auditEntry = entries.first(where: {
+        $0.title == "Auto-approved Claude action"
+    })
+
+    #expect(!entries.contains(where: { $0.kind == .approval }))
+    #expect(!statuses.contains(.needsApproval))
+    #expect(statuses.last == .completed)
+    #expect(auditEntry?.kind == .system)
+    #expect(auditEntry?.text == "git push origin feature/example")
+    #expect(
+        responses.first?["behavior"]?.stringValue == "allow"
+    )
+}
+
+@Test
+func claudeAutoResponseFailuresFailTheTurnVisibly() async throws {
+    let client = ApprovalStubClaudeClient(failResponses: true)
+    let runtime = testClaudeRuntime(client: client)
+    let profile = BotProfile(
+        name: "Claude Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement the change.",
+        workingDirectory: FileManager.default.temporaryDirectory.path,
+        approvalMode: .auto
+    )
+    await launchClaude(runtime, profile: profile)
+
+    let events = await collectClaudeTurn(runtime, profile: profile)
+    let entries = timelineEntries(in: events)
+    let statuses = agentStatuses(in: events)
+    let failureEntry = entries.first(where: {
+        $0.title == "Claude permission response failed"
+    })
+
+    #expect(failureEntry?.text == "Could not auto-approve Claude's action")
+    #expect(
+        failureEntry?.detail?.contains("simulated response failure") == true
+    )
+    #expect(statuses.last == .failed)
+}
+
+@Test
+func claudeManagersRemainReadOnlyWhenAutoModeIsSelected() async throws {
+    let client = ApprovalStubClaudeClient(
+        toolName: "Edit",
+        toolInput: .object([
+            "file_path": .string("/tmp/project/Package.swift")
+        ])
+    )
+    let runtime = testClaudeRuntime(client: client)
+    let profile = BotProfile(
+        name: "Claude Manager",
+        provider: .claude,
+        role: .manager,
+        instructions: "Coordinate the team.",
+        workingDirectory: FileManager.default.temporaryDirectory.path,
+        approvalMode: .auto
+    )
+    await launchClaude(runtime, profile: profile)
+
+    let events = await collectClaudeTurn(runtime, profile: profile)
+    let entries = timelineEntries(in: events)
+    let responses = await client.responses
+    let invocation = try ClaudeInvocation(
+        sessionID: UUID().uuidString,
+        resume: false,
+        profile: profile,
+        prompt: "Coordinate this change."
+    )
+
+    #expect(!entries.contains(where: { $0.kind == .approval }))
+    #expect(
+        entries.contains(where: {
+            $0.title == "Claude action blocked"
+                && $0.detail?.contains("read-only") == true
+        })
+    )
+    #expect(
+        responses.first?["behavior"]?.stringValue == "deny"
+    )
+    #expect(invocation.arguments.contains("--permission-prompt-tool"))
+    #expect(!invocation.arguments.contains("bypassPermissions"))
+    #expect(!invocation.arguments.contains("Edit"))
+    #expect(!invocation.arguments.contains("Write"))
+}
+
+@Test
 func missingClaudeConversationTriggersFreshSessionRecovery() throws {
     let event = try JSONDecoder().decode(
         JSONValue.self,
@@ -2202,6 +2343,151 @@ func idleDisconnectDoesNotMakeACompletedMessageRetryable() async throws {
     #expect(model.session(for: profileID).status == .failed)
     #expect(userEntry.deliveryFailed != true)
     try? FileManager.default.removeItem(at: directory)
+}
+
+private func testClaudeRuntime(
+    client: ApprovalStubClaudeClient
+) -> ClaudeRuntime {
+    ClaudeRuntime(
+        locator: ClaudeExecutableLocator(
+            candidateURLs: [URL(fileURLWithPath: "/usr/bin/true")]
+        ),
+        authenticationStatus: { _ in .loggedIn },
+        clientFactory: { _ in client }
+    )
+}
+
+private func launchClaude(
+    _ runtime: ClaudeRuntime,
+    profile: BotProfile
+) async {
+    let stream = await runtime.start(profile: profile, resumeThreadID: nil)
+    for await _ in stream {}
+}
+
+private func collectClaudeTurn(
+    _ runtime: ClaudeRuntime,
+    profile: BotProfile,
+    approveRequests: Bool = false
+) async -> [AgentEvent] {
+    let stream = await runtime.respond(
+        to: "Publish the branch",
+        attachments: [],
+        profile: profile
+    )
+    var events: [AgentEvent] = []
+
+    for await event in stream {
+        events.append(event)
+        if approveRequests,
+           case .entry(let entry) = event,
+           entry.kind == .approval {
+            let resolution = await runtime.resolveApproval(
+                entryID: entry.id,
+                approved: true,
+                profile: profile
+            )
+            for await resolutionEvent in resolution {
+                events.append(resolutionEvent)
+            }
+        }
+    }
+    return events
+}
+
+private func timelineEntries(in events: [AgentEvent]) -> [TimelineEntry] {
+    events.compactMap { event in
+        switch event {
+        case .entry(let entry), .upsertEntry(let entry):
+            entry
+        default:
+            nil
+        }
+    }
+}
+
+private func agentStatuses(in events: [AgentEvent]) -> [AgentStatus] {
+    events.compactMap { event in
+        guard case .status(let status) = event else { return nil }
+        return status
+    }
+}
+
+private enum ApprovalStubError: LocalizedError {
+    case responseFailed
+
+    var errorDescription: String? {
+        "simulated response failure"
+    }
+}
+
+private actor ApprovalStubClaudeClient: ClaudeClient {
+    nonisolated let messages: AsyncStream<JSONValue>
+
+    private let messageContinuation: AsyncStream<JSONValue>.Continuation
+    private let toolName: String
+    private let toolInput: JSONValue
+    private let failResponses: Bool
+    private(set) var responses: [JSONValue] = []
+
+    init(
+        toolName: String = "Bash",
+        toolInput: JSONValue = .object([
+            "command": .string("git push origin feature/example")
+        ]),
+        failResponses: Bool = false
+    ) {
+        let pair = AsyncStream.makeStream(of: JSONValue.self)
+        messages = pair.stream
+        messageContinuation = pair.continuation
+        self.toolName = toolName
+        self.toolInput = toolInput
+        self.failResponses = failResponses
+    }
+
+    func connect(arguments: [String], workingDirectory: URL) async throws {}
+
+    func send(_ message: JSONValue) throws {
+        messageContinuation.yield(
+            .object([
+                "type": .string("control_request"),
+                "request_id": .string("permission-1"),
+                "request": .object([
+                    "subtype": .string("can_use_tool"),
+                    "tool_name": .string(toolName),
+                    "input": toolInput,
+                    "tool_use_id": .string("toolu_1")
+                ])
+            ])
+        )
+    }
+
+    func finishInput() {
+        messageContinuation.finish()
+    }
+
+    func respond(to requestID: String, result: JSONValue) throws {
+        guard !failResponses else {
+            throw ApprovalStubError.responseFailed
+        }
+        responses.append(result)
+        messageContinuation.yield(
+            .object([
+                "type": .string("result"),
+                "is_error": .bool(false),
+                "result": result["behavior"] ?? .string("completed"),
+                "permission_denials": .array([])
+            ])
+        )
+    }
+
+    func respondError(to requestID: String, message: String) throws {
+        throw ClaudeCLIError.control(message)
+    }
+
+    func stop() {
+        messageContinuation.finish()
+    }
 }
 
 private func runGit(_ arguments: [String], in directory: URL) throws {
