@@ -95,8 +95,11 @@ They inherit Claude's user and project settings, including configured MCP
 servers. The current allowlist supports repository inspection, file edits for
 Builder and Documenter roles, common test commands, and read-only Linear tools.
 Manager and Reviewer roles cannot edit files. Actions outside that allowlist
-pause in the conversation, where the user can approve or decline the exact
-tool call before Claude continues.
+follow the profile's approval mode. Ask pauses in the conversation so the user
+can approve or decline the exact tool call. Auto immediately allows
+only supported, workspace-scoped actions and records each decision in the
+transcript; destructive and publishing commands, outside-workspace paths,
+unsupported tools, and read-only role escalations remain blocked.
 
 ## Roadmap
 

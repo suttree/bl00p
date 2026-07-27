@@ -326,15 +326,7 @@ actor ClaudeRuntime: AgentRuntime {
         )
         session.currentContinuation?.yield(.status(.failed))
         session.currentContinuation?.finish()
-        session.currentContinuation = nil
-        session.currentClient = nil
-        session.listenerTask = nil
-        session.currentAttemptID = nil
-        session.pendingTurn = nil
-        if let directory = session.stagedAttachmentDirectory {
-            try? FileManager.default.removeItem(at: directory)
-            session.stagedAttachmentDirectory = nil
-        }
+        clearTurnState(&session, cancelListener: true)
         sessions[profileID] = session
     }
 
@@ -430,28 +422,16 @@ actor ClaudeRuntime: AgentRuntime {
         session.handledControlRequestIDs.insert(requestID)
         sessions[profileID] = session
 
-        if session.role == .manager {
-            do {
-                try await client.respond(
-                    to: requestID,
-                    result: ClaudeToolApprovalResponse.managerBoundary
-                )
-                yield(
-                    .entry(approval.managerBoundaryEntry()),
-                    profileID: profileID
-                )
-            } catch {
-                await failAutomaticControlResponse(
-                    profileID: profileID,
-                    text: "Could not enforce Claude's read-only Manager boundary",
-                    action: approval.primaryAction,
-                    error: error
-                )
-            }
-            return
-        }
+        let decision = ClaudeToolApprovalPolicy.decision(
+            for: approval,
+            mode: session.approvalMode,
+            role: session.role,
+            workingDirectory: session.workingDirectory,
+            stagedAttachmentDirectory: session.stagedAttachmentDirectory
+        )
 
-        if session.approvalMode == .auto {
+        switch decision {
+        case .allow:
             do {
                 try await client.respond(
                     to: requestID,
@@ -473,16 +453,37 @@ actor ClaudeRuntime: AgentRuntime {
                 )
             }
             return
-        }
 
-        let entry = approval.timelineEntry()
-        session.pendingApprovals[entry.id] = PendingApproval(
-            requestID: requestID,
-            toolInput: approval.toolInput
-        )
-        sessions[profileID] = session
-        session.currentContinuation?.yield(.entry(entry))
-        session.currentContinuation?.yield(.status(.needsApproval))
+        case .deny(let reason):
+            do {
+                try await client.respond(
+                    to: requestID,
+                    result: ClaudeToolApprovalResponse.deniedByPolicy(reason)
+                )
+                yield(
+                    .entry(approval.blockedEntry(reason: reason)),
+                    profileID: profileID
+                )
+            } catch {
+                await failAutomaticControlResponse(
+                    profileID: profileID,
+                    text: "Could not enforce Claude's approval boundary",
+                    action: approval.primaryAction,
+                    error: error
+                )
+            }
+            return
+
+        case .ask:
+            let entry = approval.timelineEntry()
+            session.pendingApprovals[entry.id] = PendingApproval(
+                requestID: requestID,
+                toolInput: approval.toolInput
+            )
+            sessions[profileID] = session
+            session.currentContinuation?.yield(.entry(entry))
+            session.currentContinuation?.yield(.status(.needsApproval))
+        }
     }
 
     private func failAutomaticControlResponse(
@@ -505,17 +506,7 @@ actor ClaudeRuntime: AgentRuntime {
         )
         session.currentContinuation?.yield(.status(.failed))
         session.currentContinuation?.finish()
-        session.currentContinuation = nil
-        session.currentClient = nil
-        session.listenerTask?.cancel()
-        session.listenerTask = nil
-        session.currentAttemptID = nil
-        session.pendingTurn = nil
-        session.pendingApprovals.removeAll()
-        if let directory = session.stagedAttachmentDirectory {
-            try? FileManager.default.removeItem(at: directory)
-            session.stagedAttachmentDirectory = nil
-        }
+        clearTurnState(&session, cancelListener: true)
         sessions[profileID] = session
         if let client {
             await client.stop()
@@ -668,6 +659,7 @@ actor ClaudeRuntime: AgentRuntime {
             session.listenerTask = nil
             session.currentAttemptID = nil
             session.receivedResult = false
+            session.handledControlRequestIDs.removeAll()
             session.pendingTurn?.didFallBackToFreshSession = true
             sessions[profileID] = session
 
@@ -743,31 +735,15 @@ actor ClaudeRuntime: AgentRuntime {
             )
         )
         session.currentContinuation?.finish()
-        session.currentContinuation = nil
-        session.currentClient = nil
-        session.listenerTask = nil
-        session.currentAttemptID = nil
-        session.pendingTurn = nil
         session.shouldResume = true
-        if let directory = session.stagedAttachmentDirectory {
-            try? FileManager.default.removeItem(at: directory)
-            session.stagedAttachmentDirectory = nil
-        }
+        clearTurnState(&session)
         sessions[profileID] = session
     }
 
     private func handleTransportClosed(_ event: JSONValue, profileID: UUID) {
         guard var session = sessions[profileID] else { return }
         defer {
-            session.currentClient = nil
-            session.listenerTask = nil
-            session.currentAttemptID = nil
-            session.pendingTurn = nil
-            session.pendingApprovals.removeAll()
-            if let directory = session.stagedAttachmentDirectory {
-                try? FileManager.default.removeItem(at: directory)
-                session.stagedAttachmentDirectory = nil
-            }
+            clearTurnState(&session)
             sessions[profileID] = session
         }
 
@@ -797,6 +773,26 @@ actor ClaudeRuntime: AgentRuntime {
         session.currentContinuation?.yield(.status(.failed))
         session.currentContinuation?.finish()
         session.currentContinuation = nil
+    }
+
+    private func clearTurnState(
+        _ session: inout Session,
+        cancelListener: Bool = false
+    ) {
+        if cancelListener {
+            session.listenerTask?.cancel()
+        }
+        session.currentContinuation = nil
+        session.currentClient = nil
+        session.listenerTask = nil
+        session.currentAttemptID = nil
+        session.pendingTurn = nil
+        session.pendingApprovals.removeAll()
+        session.handledControlRequestIDs.removeAll()
+        if let directory = session.stagedAttachmentDirectory {
+            try? FileManager.default.removeItem(at: directory)
+            session.stagedAttachmentDirectory = nil
+        }
     }
 
     private func toolEntry(
@@ -1052,13 +1048,16 @@ struct ClaudeToolApprovalRequest: Sendable {
         )
     }
 
-    func managerBoundaryEntry(id: UUID = UUID()) -> TimelineEntry {
+    func blockedEntry(
+        id: UUID = UUID(),
+        reason: String
+    ) -> TimelineEntry {
         .init(
             id: id,
             kind: .system,
             title: "Claude action blocked",
             text: primaryAction,
-            detail: "Claude Managers are read-only and cannot escalate permissions."
+            detail: reason
         )
     }
 
@@ -1068,6 +1067,55 @@ struct ClaudeToolApprovalRequest: Sendable {
             ?? toolInput["notebook_path"]?.stringValue
             ?? title
             ?? toolName
+    }
+
+    func requestedPaths(relativeTo workingDirectory: URL) -> [URL] {
+        let inputPaths = Self.pathStrings(in: toolInput)
+        return (inputPaths + [blockedPath].compactMap { $0 })
+            .map { path in
+                let expanded = (path as NSString).expandingTildeInPath
+                if expanded.hasPrefix("/") {
+                    return URL(fileURLWithPath: expanded)
+                }
+                return URL(
+                    fileURLWithPath: expanded,
+                    relativeTo: workingDirectory
+                )
+            }
+            .map {
+                $0.standardizedFileURL.resolvingSymlinksInPath()
+            }
+    }
+
+    private static func pathStrings(in value: JSONValue) -> [String] {
+        switch value {
+        case .object(let object):
+            return object.flatMap { key, nestedValue in
+                let normalizedKey = key.lowercased()
+                if [
+                    "path", "paths", "file_path", "file_paths",
+                    "notebook_path", "directory", "working_directory", "cwd"
+                ].contains(normalizedKey) {
+                    return stringValues(in: nestedValue)
+                }
+                return pathStrings(in: nestedValue)
+            }
+        case .array(let values):
+            return values.flatMap(pathStrings)
+        case .string, .number, .bool, .null:
+            return []
+        }
+    }
+
+    private static func stringValues(in value: JSONValue) -> [String] {
+        switch value {
+        case .string(let string):
+            return [string]
+        case .array(let values):
+            return values.flatMap(stringValues)
+        case .object, .number, .bool, .null:
+            return []
+        }
     }
 
     private var detail: String? {
@@ -1089,12 +1137,12 @@ struct ClaudeToolApprovalRequest: Sendable {
 }
 
 enum ClaudeToolApprovalResponse {
-    static let managerBoundary: JSONValue = .object([
-        "behavior": .string("deny"),
-        "message": .string(
-            "Claude Managers are read-only and cannot escalate permissions in bl00p."
-        )
-    ])
+    static func deniedByPolicy(_ reason: String) -> JSONValue {
+        .object([
+            "behavior": .string("deny"),
+            "message": .string(reason)
+        ])
+    }
 
     static func result(
         approved: Bool,
@@ -1110,6 +1158,243 @@ enum ClaudeToolApprovalResponse {
             "behavior": .string("deny"),
             "message": .string("The user declined this action in bl00p.")
         ])
+    }
+}
+
+enum ClaudeToolApprovalDecision: Equatable, Sendable {
+    case ask
+    case allow
+    case deny(String)
+}
+
+enum ClaudeToolApprovalPolicy {
+    static func decision(
+        for approval: ClaudeToolApprovalRequest,
+        mode: ApprovalMode,
+        role: AgentRole,
+        workingDirectory: URL,
+        stagedAttachmentDirectory: URL?
+    ) -> ClaudeToolApprovalDecision {
+        if role == .manager {
+            return .deny(
+                "Claude Managers are read-only and cannot escalate permissions."
+            )
+        }
+        if role == .reviewer {
+            return .deny(
+                "Claude Reviewers are read-only and cannot escalate permissions."
+            )
+        }
+        guard mode == .auto else { return .ask }
+
+        let roots = [workingDirectory, stagedAttachmentDirectory]
+            .compactMap { $0 }
+            .map(canonicalURL)
+        let requestedPaths = approval.requestedPaths(
+            relativeTo: workingDirectory
+        )
+        if let outsidePath = requestedPaths.first(where: {
+            !isInsideAllowedRoots($0, roots: roots)
+        }) {
+            return .deny(
+                "Auto-approval is limited to the selected workspace. This request targets \(outsidePath.path)."
+            )
+        }
+
+        switch approval.toolName {
+        case "Edit", "Write", "NotebookEdit":
+            guard !requestedPaths.isEmpty else {
+                return .deny(
+                    "Auto-approval requires a verifiable file path inside the selected workspace."
+                )
+            }
+            return .allow
+
+        case "Bash":
+            guard let command = approval.toolInput["command"]?.stringValue,
+                  !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return .deny(
+                    "Auto-approval requires a readable shell command."
+                )
+            }
+            return shellDecision(
+                command,
+                workingDirectory: workingDirectory,
+                roots: roots
+            )
+
+        default:
+            return .deny(
+                "\(approval.toolName) is not supported by Claude auto-approval. Switch to Ask to review this action explicitly."
+            )
+        }
+    }
+
+    private static func shellDecision(
+        _ command: String,
+        workingDirectory: URL,
+        roots: [URL]
+    ) -> ClaudeToolApprovalDecision {
+        let forbiddenSyntax = ["\n", ";", "&&", "||", "|", "`", "$(", ">", "<"]
+        guard !forbiddenSyntax.contains(where: command.contains) else {
+            return .deny(
+                "Compound commands, shell expansion, and redirection require explicit approval."
+            )
+        }
+
+        let tokens = command
+            .split(whereSeparator: \.isWhitespace)
+            .map {
+                String($0).trimmingCharacters(
+                    in: CharacterSet(charactersIn: "\"'")
+                )
+            }
+        guard !tokens.isEmpty else {
+            return .deny("Auto-approval requires a readable shell command.")
+        }
+
+        if URL(fileURLWithPath: tokens[0]).lastPathComponent == "env"
+            || tokens[0].contains("=") {
+            return .deny(
+                "Environment-prefixed commands require explicit approval."
+            )
+        }
+        guard let executableToken = tokens.first else {
+            return .deny("Auto-approval requires a readable shell command.")
+        }
+        guard !executableToken.contains("/") else {
+            return .deny(
+                "Commands launched through an explicit executable path require explicit approval."
+            )
+        }
+        let executable = URL(fileURLWithPath: executableToken).lastPathComponent
+        let arguments = Array(tokens.dropFirst())
+
+        let pathArguments = arguments.compactMap {
+            shellPath(
+                from: $0,
+                relativeTo: workingDirectory
+            )
+        }
+        if let outsidePath = pathArguments.first(where: {
+            !isInsideAllowedRoots($0, roots: roots)
+        }) {
+            return .deny(
+                "Auto-approved shell commands cannot access paths outside the selected workspace: \(outsidePath.path)."
+            )
+        }
+
+        let supported: Bool
+        switch executable {
+        case "grep", "ls", "pwd", "cat", "head", "tail", "wc",
+             "stat", "file", "which", "type":
+            supported = true
+
+        case "rg":
+            supported = !arguments.contains("--pre")
+                && !arguments.contains(where: { $0.hasPrefix("--pre=") })
+
+        case "find":
+            supported = !arguments.contains(where: {
+                [
+                    "-delete", "-exec", "-execdir", "-ok", "-okdir",
+                    "-fprint", "-fls", "-fprintf"
+                ].contains($0)
+            })
+
+        case "git":
+            supported = !arguments.contains("--ext-diff")
+                && !arguments.contains("--textconv")
+                && (arguments.first.map {
+                [
+                    "status", "diff", "log", "show", "rev-parse",
+                    "merge-base", "ls-files", "grep"
+                ].contains($0)
+            } ?? false)
+
+        case "swift":
+            supported = ["test", "build", "--version"].contains(
+                arguments.first ?? ""
+            )
+
+        case "xcrun":
+            if arguments.first == "swift" {
+                supported = ["test", "build", "--version"].contains(
+                    arguments.dropFirst().first ?? ""
+                )
+            } else {
+                supported = arguments.prefix(2) == ["--find", "swift"]
+            }
+
+        case "xcodebuild":
+            supported = arguments.contains("test") || arguments.contains("build")
+
+        case "npm":
+            supported = arguments.first == "test"
+                || arguments.prefix(2) == ["run", "test"]
+                || arguments.prefix(2) == ["run", "lint"]
+                || arguments.prefix(2) == ["run", "typecheck"]
+
+        case "pnpm", "yarn":
+            supported = ["test", "lint", "typecheck"].contains(
+                arguments.first ?? ""
+            )
+
+        case "cargo":
+            supported = arguments.first == "test"
+
+        case "go":
+            supported = arguments.first == "test"
+
+        case "pytest":
+            supported = true
+
+        default:
+            supported = false
+        }
+
+        return supported
+            ? .allow
+            : .deny(
+                "\(executable) is outside Claude auto-approval's safe command set. Switch to Ask to review it explicitly."
+            )
+    }
+
+    private static func shellPath(
+        from argument: String,
+        relativeTo workingDirectory: URL
+    ) -> URL? {
+        let cleaned = argument.trimmingCharacters(
+            in: CharacterSet(charactersIn: "\"',")
+        )
+        guard !cleaned.isEmpty,
+              !cleaned.hasPrefix("-"),
+              !cleaned.contains("=") else {
+            return nil
+        }
+        guard !cleaned.hasPrefix("~") else {
+            return URL(fileURLWithPath: cleaned)
+        }
+        if cleaned.hasPrefix("/") {
+            return canonicalURL(URL(fileURLWithPath: cleaned))
+        }
+        return canonicalURL(
+            URL(fileURLWithPath: cleaned, relativeTo: workingDirectory)
+        )
+    }
+
+    private static func isInsideAllowedRoots(
+        _ url: URL,
+        roots: [URL]
+    ) -> Bool {
+        let candidate = canonicalURL(url).path
+        return roots.contains { root in
+            candidate == root.path || candidate.hasPrefix(root.path + "/")
+        }
+    }
+
+    private static func canonicalURL(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath()
     }
 }
 

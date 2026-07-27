@@ -143,6 +143,11 @@ struct ProfileInspectorView: View {
                         }
                         .labelsHidden()
                         .pickerStyle(.segmented)
+                        .disabled(
+                            profile.provider == .claude
+                                && (profile.role == .manager
+                                    || profile.role == .reviewer)
+                        )
 
                         Text(approvalModeDescription)
                             .font(.bl00p(.caption1))
@@ -175,7 +180,7 @@ struct ProfileInspectorView: View {
                 Text(
                     profile.provider == .codex
                         ? "Codex receives this prompt as developer instructions when the session launches."
-                        : "Claude receives this prompt through its resumable CLI session. Destructive git and publishing actions remain blocked."
+                        : "Claude receives this prompt through its resumable CLI session. Structured approvals enforce read-only roles and keep elevated actions visible."
                 )
                     .font(.bl00p(.caption1))
                     .foregroundStyle(.secondary)
@@ -195,12 +200,12 @@ struct ProfileInspectorView: View {
 
     private var approvalModeDescription: String {
         if profile.provider == .claude {
-            if profile.role == .manager {
-                return "Claude Managers remain read-only and cannot escalate permissions. The selected mode takes effect the next time this bot connects."
+            if profile.role == .manager || profile.role == .reviewer {
+                return "Claude \(profile.role.displayName)s remain read-only and cannot escalate permissions. Approval mode is unavailable for this role."
             }
             return profile.approvalMode == .auto
-                ? "Claude automatically approves supported actions through its structured permission protocol. Only takes effect the next time this bot connects."
-                : "Claude asks before actions that need approval through its structured permission protocol."
+                ? "Claude automatically approves supported actions inside this workspace. Destructive, publishing, and unsupported actions remain blocked. Changes take effect the next time this bot connects."
+                : "Claude asks before actions that need approval through its structured permission protocol. Changes take effect the next time this bot connects."
         }
 
         return profile.approvalMode == .auto

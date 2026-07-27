@@ -1652,7 +1652,7 @@ func claudeAutoModeApprovesWithoutPausingAndAddsAnAuditEntry() async throws {
     #expect(!statuses.contains(.needsApproval))
     #expect(statuses.last == .completed)
     #expect(auditEntry?.kind == .system)
-    #expect(auditEntry?.text == "git push origin feature/example")
+    #expect(auditEntry?.text == "rg -n TODO Sources")
     #expect(
         responses.first?["behavior"]?.stringValue == "allow"
     )
@@ -1687,48 +1687,193 @@ func claudeAutoResponseFailuresFailTheTurnVisibly() async throws {
 }
 
 @Test
-func claudeManagersRemainReadOnlyWhenAutoModeIsSelected() async throws {
+func claudeAutoModeBlocksDestructiveCommands() async {
+    for command in [
+        "git push --force origin feature/example",
+        "rm -rf .build/cache",
+        "python3 -c 'import os; os.remove(\"Package.swift\")'"
+    ] {
+        let client = ApprovalStubClaudeClient(
+            toolInput: .object([
+                "command": .string(command)
+            ])
+        )
+        let runtime = testClaudeRuntime(client: client)
+        let profile = claudeProfile(role: .builder, approvalMode: .auto)
+        await launchClaude(runtime, profile: profile)
+
+        let events = await collectClaudeTurn(runtime, profile: profile)
+        let entries = timelineEntries(in: events)
+        let responses = await client.responses
+
+        #expect(!entries.contains(where: { $0.kind == .approval }))
+        #expect(
+            entries.contains(where: {
+                $0.title == "Claude action blocked"
+                    && $0.detail?.isEmpty == false
+            })
+        )
+        #expect(responses.first?["behavior"]?.stringValue == "deny")
+    }
+}
+
+@Test
+func claudeAutoModeBlocksFilesOutsideTheWorkspace() async {
     let client = ApprovalStubClaudeClient(
         toolName: "Edit",
         toolInput: .object([
-            "file_path": .string("/tmp/project/Package.swift")
+            "file_path": .string("/etc/hosts")
         ])
     )
     let runtime = testClaudeRuntime(client: client)
-    let profile = BotProfile(
-        name: "Claude Manager",
-        provider: .claude,
-        role: .manager,
-        instructions: "Coordinate the team.",
-        workingDirectory: FileManager.default.temporaryDirectory.path,
-        approvalMode: .auto
-    )
+    let profile = claudeProfile(role: .builder, approvalMode: .auto)
     await launchClaude(runtime, profile: profile)
 
     let events = await collectClaudeTurn(runtime, profile: profile)
     let entries = timelineEntries(in: events)
     let responses = await client.responses
-    let invocation = try ClaudeInvocation(
-        sessionID: UUID().uuidString,
-        resume: false,
-        profile: profile,
-        prompt: "Coordinate this change."
+
+    #expect(
+        entries.contains(where: {
+            $0.title == "Claude action blocked"
+                && $0.detail?.contains("selected workspace") == true
+        })
     )
+    #expect(responses.first?["behavior"]?.stringValue == "deny")
+}
+
+@Test
+func claudeAutoModeBlocksUnsupportedElevatedTools() async {
+    let client = ApprovalStubClaudeClient(
+        toolName: "mcp__github__delete_repository",
+        toolInput: .object([
+            "repository": .string("suttree/bl00p")
+        ])
+    )
+    let runtime = testClaudeRuntime(client: client)
+    let profile = claudeProfile(role: .publisher, approvalMode: .auto)
+    await launchClaude(runtime, profile: profile)
+
+    let events = await collectClaudeTurn(runtime, profile: profile)
+    let entries = timelineEntries(in: events)
+    let responses = await client.responses
+
+    #expect(
+        entries.contains(where: {
+            $0.title == "Claude action blocked"
+                && $0.detail?.contains("not supported") == true
+        })
+    )
+    #expect(responses.first?["behavior"]?.stringValue == "deny")
+}
+
+@Test
+func claudeReviewersCannotEscalateInAutoMode() async {
+    let client = ApprovalStubClaudeClient(
+        toolName: "Edit",
+        toolInput: .object([
+            "file_path": .string("Package.swift")
+        ])
+    )
+    let runtime = testClaudeRuntime(client: client)
+    let profile = claudeProfile(role: .reviewer, approvalMode: .auto)
+    await launchClaude(runtime, profile: profile)
+
+    let events = await collectClaudeTurn(runtime, profile: profile)
+    let entries = timelineEntries(in: events)
+    let responses = await client.responses
 
     #expect(!entries.contains(where: { $0.kind == .approval }))
     #expect(
         entries.contains(where: {
             $0.title == "Claude action blocked"
-                && $0.detail?.contains("read-only") == true
+                && $0.detail?.contains("Reviewers are read-only") == true
         })
     )
-    #expect(
-        responses.first?["behavior"]?.stringValue == "deny"
+    #expect(responses.first?["behavior"]?.stringValue == "deny")
+}
+
+@Test
+func claudeManagersCannotEscalateInEitherApprovalMode() async throws {
+    for mode in [ApprovalMode.ask, .auto] {
+        let client = ApprovalStubClaudeClient(
+            toolName: "Edit",
+            toolInput: .object([
+                "file_path": .string("Package.swift")
+            ])
+        )
+        let runtime = testClaudeRuntime(client: client)
+        let profile = claudeProfile(role: .manager, approvalMode: mode)
+        await launchClaude(runtime, profile: profile)
+
+        let events = await collectClaudeTurn(runtime, profile: profile)
+        let entries = timelineEntries(in: events)
+        let responses = await client.responses
+        let invocation = try ClaudeInvocation(
+            sessionID: UUID().uuidString,
+            resume: false,
+            profile: profile,
+            prompt: "Coordinate this change."
+        )
+
+        #expect(!entries.contains(where: { $0.kind == .approval }))
+        #expect(
+            entries.contains(where: {
+                $0.title == "Claude action blocked"
+                    && $0.detail?.contains("Managers are read-only") == true
+            })
+        )
+        #expect(responses.first?["behavior"]?.stringValue == "deny")
+        #expect(invocation.arguments.contains("--permission-prompt-tool"))
+        #expect(!invocation.arguments.contains("bypassPermissions"))
+        #expect(!invocation.arguments.contains("Edit"))
+        #expect(!invocation.arguments.contains("Write"))
+    }
+}
+
+@Test
+func claudeDeduplicatesRepeatedControlRequestIDs() async {
+    let client = ApprovalStubClaudeClient(
+        requestIDs: ["permission-1", "permission-1"]
     )
-    #expect(invocation.arguments.contains("--permission-prompt-tool"))
-    #expect(!invocation.arguments.contains("bypassPermissions"))
-    #expect(!invocation.arguments.contains("Edit"))
-    #expect(!invocation.arguments.contains("Write"))
+    let runtime = testClaudeRuntime(client: client)
+    let profile = claudeProfile(role: .builder, approvalMode: .auto)
+    await launchClaude(runtime, profile: profile)
+
+    let events = await collectClaudeTurn(runtime, profile: profile)
+    let entries = timelineEntries(in: events)
+    let responses = await client.responses
+
+    #expect(responses.count == 1)
+    #expect(
+        entries.filter { $0.title == "Auto-approved Claude action" }.count == 1
+    )
+}
+
+@Test
+func claudeFreshSessionRecoveryCanReuseAControlRequestID() async {
+    let staleClient = ApprovalStubClaudeClient(resultMode: .missingSession)
+    let freshClient = ApprovalStubClaudeClient()
+    let runtime = testClaudeRuntime(clients: [staleClient, freshClient])
+    let profile = claudeProfile(role: .builder, approvalMode: .auto)
+    await launchClaude(
+        runtime,
+        profile: profile,
+        resumeThreadID: UUID().uuidString
+    )
+
+    let events = await collectClaudeTurn(runtime, profile: profile)
+    let entries = timelineEntries(in: events)
+    let statuses = agentStatuses(in: events)
+    let staleResponseCount = await staleClient.responses.count
+    let freshResponseCount = await freshClient.responses.count
+
+    #expect(staleResponseCount == 1)
+    #expect(freshResponseCount == 1)
+    #expect(
+        entries.contains(where: { $0.text == "Claude session recovered" })
+    )
+    #expect(statuses.last == .completed)
 }
 
 @Test
@@ -2348,20 +2493,45 @@ func idleDisconnectDoesNotMakeACompletedMessageRetryable() async throws {
 private func testClaudeRuntime(
     client: ApprovalStubClaudeClient
 ) -> ClaudeRuntime {
-    ClaudeRuntime(
+    testClaudeRuntime(clients: [client])
+}
+
+private func testClaudeRuntime(
+    clients: [ApprovalStubClaudeClient]
+) -> ClaudeRuntime {
+    let queue = ClaudeClientQueue(clients)
+    return ClaudeRuntime(
         locator: ClaudeExecutableLocator(
             candidateURLs: [URL(fileURLWithPath: "/usr/bin/true")]
         ),
         authenticationStatus: { _ in .loggedIn },
-        clientFactory: { _ in client }
+        clientFactory: { _ in queue.next() }
+    )
+}
+
+private func claudeProfile(
+    role: AgentRole,
+    approvalMode: ApprovalMode
+) -> BotProfile {
+    BotProfile(
+        name: "Claude \(role.displayName)",
+        provider: .claude,
+        role: role,
+        instructions: "Stay within the assigned role.",
+        workingDirectory: FileManager.default.temporaryDirectory.path,
+        approvalMode: approvalMode
     )
 }
 
 private func launchClaude(
     _ runtime: ClaudeRuntime,
-    profile: BotProfile
+    profile: BotProfile,
+    resumeThreadID: String? = nil
 ) async {
-    let stream = await runtime.start(profile: profile, resumeThreadID: nil)
+    let stream = await runtime.start(
+        profile: profile,
+        resumeThreadID: resumeThreadID
+    )
     for await _ in stream {}
 }
 
@@ -2421,45 +2591,74 @@ private enum ApprovalStubError: LocalizedError {
     }
 }
 
+private enum ApprovalStubResultMode {
+    case success
+    case missingSession
+}
+
+private final class ClaudeClientQueue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var clients: [ApprovalStubClaudeClient]
+
+    init(_ clients: [ApprovalStubClaudeClient]) {
+        self.clients = clients
+    }
+
+    func next() -> any ClaudeClient {
+        lock.withLock {
+            precondition(!clients.isEmpty, "Missing stub Claude client")
+            return clients.removeFirst()
+        }
+    }
+}
+
 private actor ApprovalStubClaudeClient: ClaudeClient {
     nonisolated let messages: AsyncStream<JSONValue>
 
     private let messageContinuation: AsyncStream<JSONValue>.Continuation
     private let toolName: String
     private let toolInput: JSONValue
+    private let requestIDs: [String]
     private let failResponses: Bool
+    private let resultMode: ApprovalStubResultMode
     private(set) var responses: [JSONValue] = []
 
     init(
         toolName: String = "Bash",
         toolInput: JSONValue = .object([
-            "command": .string("git push origin feature/example")
+            "command": .string("rg -n TODO Sources")
         ]),
-        failResponses: Bool = false
+        requestIDs: [String] = ["permission-1"],
+        failResponses: Bool = false,
+        resultMode: ApprovalStubResultMode = .success
     ) {
         let pair = AsyncStream.makeStream(of: JSONValue.self)
         messages = pair.stream
         messageContinuation = pair.continuation
         self.toolName = toolName
         self.toolInput = toolInput
+        self.requestIDs = requestIDs
         self.failResponses = failResponses
+        self.resultMode = resultMode
     }
 
     func connect(arguments: [String], workingDirectory: URL) async throws {}
 
     func send(_ message: JSONValue) throws {
-        messageContinuation.yield(
-            .object([
-                "type": .string("control_request"),
-                "request_id": .string("permission-1"),
-                "request": .object([
-                    "subtype": .string("can_use_tool"),
-                    "tool_name": .string(toolName),
-                    "input": toolInput,
-                    "tool_use_id": .string("toolu_1")
+        for requestID in requestIDs {
+            messageContinuation.yield(
+                .object([
+                    "type": .string("control_request"),
+                    "request_id": .string(requestID),
+                    "request": .object([
+                        "subtype": .string("can_use_tool"),
+                        "tool_name": .string(toolName),
+                        "input": toolInput,
+                        "tool_use_id": .string("toolu_1")
+                    ])
                 ])
-            ])
-        )
+            )
+        }
     }
 
     func finishInput() {
@@ -2471,14 +2670,28 @@ private actor ApprovalStubClaudeClient: ClaudeClient {
             throw ApprovalStubError.responseFailed
         }
         responses.append(result)
-        messageContinuation.yield(
-            .object([
-                "type": .string("result"),
-                "is_error": .bool(false),
-                "result": result["behavior"] ?? .string("completed"),
-                "permission_denials": .array([])
-            ])
-        )
+        switch resultMode {
+        case .success:
+            messageContinuation.yield(
+                .object([
+                    "type": .string("result"),
+                    "is_error": .bool(false),
+                    "result": result["behavior"] ?? .string("completed"),
+                    "permission_denials": .array([])
+                ])
+            )
+        case .missingSession:
+            messageContinuation.yield(
+                .object([
+                    "type": .string("result"),
+                    "is_error": .bool(true),
+                    "errors": .array([
+                        .string("No conversation found with session ID: stale")
+                    ]),
+                    "permission_denials": .array([])
+                ])
+            )
+        }
     }
 
     func respondError(to requestID: String, message: String) throws {
