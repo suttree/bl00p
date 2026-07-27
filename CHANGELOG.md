@@ -26,6 +26,8 @@ All notable changes to bl00p are documented in this file.
 
 ### Changed
 
+- Shorten managed delivery workflows so the Builder's tested revision goes
+  directly to the Documenter / PR Writer after one Reviewer pass.
 - Suppress notification banners and sounds while a bl00p window is active,
   while preserving sidebar and Dock attention state.
 - Increase the typography throughout the Add Bot sheet and its role-prompt editor for readability.
@@ -41,6 +43,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Preserve resumable Documenter sessions across restart, restore revision
+  validation for older saved workflows, and avoid treating generic tool output
+  as test evidence.
 - Show each managed implementation plan only once in its approval card,
   preserving Markdown formatting and preventing later runtime updates from
   replacing the approval state.

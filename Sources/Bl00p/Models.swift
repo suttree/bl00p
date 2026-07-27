@@ -337,6 +337,7 @@ struct GitHandoffPackage: Identifiable, Codable, Hashable, Sendable {
     var taskContext: String
     var testStatus: HandoffTestStatus
     var testSummary: String
+    var testEvidenceAt: Date?
     var workingTreeSummary: String
     var createdAt: Date
 
@@ -352,6 +353,7 @@ struct GitHandoffPackage: Identifiable, Codable, Hashable, Sendable {
         taskContext: String,
         testStatus: HandoffTestStatus,
         testSummary: String,
+        testEvidenceAt: Date? = nil,
         workingTreeSummary: String,
         createdAt: Date = .now
     ) {
@@ -366,6 +368,7 @@ struct GitHandoffPackage: Identifiable, Codable, Hashable, Sendable {
         self.taskContext = taskContext
         self.testStatus = testStatus
         self.testSummary = testSummary
+        self.testEvidenceAt = testEvidenceAt
         self.workingTreeSummary = workingTreeSummary
         self.createdAt = createdAt
     }
@@ -391,6 +394,17 @@ struct GitHandoffPackage: Identifiable, Codable, Hashable, Sendable {
         \(workingTreeSummary)
         """
     }
+
+    var timelineDetail: String {
+        """
+        Branch: \(branch)
+        HEAD: \(headRevision)
+        Tests: \(testStatus.label)
+        \(testSummary)
+        Working tree:
+        \(workingTreeSummary)
+        """
+    }
 }
 
 enum ManagerWorkflowStage: String, Codable, CaseIterable, Sendable {
@@ -409,7 +423,9 @@ enum ManagerWorkflowStage: String, Codable, CaseIterable, Sendable {
         case .building: "Building"
         case .reviewing: "Reviewing"
         case .revising: "Fixing findings"
-        case .verifying: "Re-checking"
+        // Kept as a source-compatible legacy value. Decoding maps persisted
+        // occurrences directly to publishing.
+        case .verifying: "Legacy workflow"
         case .publishing: "Documenting & publishing"
         case .reporting: "Reporting"
         case .completed: "Complete"
@@ -423,10 +439,30 @@ enum ManagerWorkflowStage: String, Codable, CaseIterable, Sendable {
         case .reviewing: 2
         case .revising: 3
         case .verifying: 4
-        case .publishing: 5
-        case .reporting: 6
-        case .completed: 7
+        case .publishing: 4
+        case .reporting: 5
+        case .completed: 6
         }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        if value == Self.verifying.rawValue {
+            self = .publishing
+        } else if let stage = Self(rawValue: value) {
+            self = stage
+        } else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unknown manager workflow stage: \(value)"
+            )
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
@@ -441,6 +477,8 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     var branch: String?
     var pullRequestURL: String?
     var latestHandoff: GitHandoffPackage?
+    var reviewSummary: String?
+    var revisionStartedAt: Date?
     var isPaused: Bool
     var pauseReason: String?
     var startedAt: Date
@@ -457,6 +495,8 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         branch: String? = nil,
         pullRequestURL: String? = nil,
         latestHandoff: GitHandoffPackage? = nil,
+        reviewSummary: String? = nil,
+        revisionStartedAt: Date? = nil,
         isPaused: Bool = false,
         pauseReason: String? = nil,
         startedAt: Date = .now,
@@ -472,6 +512,8 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         self.branch = branch
         self.pullRequestURL = pullRequestURL
         self.latestHandoff = latestHandoff
+        self.reviewSummary = reviewSummary
+        self.revisionStartedAt = revisionStartedAt
         self.isPaused = isPaused
         self.pauseReason = pauseReason
         self.startedAt = startedAt
