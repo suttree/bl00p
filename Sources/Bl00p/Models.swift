@@ -189,6 +189,10 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
     var worktree: GitWorktreeOwnership?
     var managerTeam: ManagerTeamConfiguration?
 
+    var canSelectApprovalMode: Bool {
+        provider != .claude || role != .manager
+    }
+
     init(
         id: UUID = UUID(),
         name: String,

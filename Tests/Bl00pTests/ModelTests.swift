@@ -432,6 +432,34 @@ func codexThreadConfigurationHonorsTheApprovalModeToggle() {
 }
 
 @Test
+func claudeReviewerCanSelectApprovalModeButClaudeManagerCannot() {
+    let reviewer = BotProfile(
+        name: "Reviewer",
+        provider: .claude,
+        role: .reviewer,
+        instructions: "Review."
+    )
+    let manager = BotProfile(
+        name: "Manager",
+        provider: .claude,
+        role: .manager,
+        instructions: "Coordinate."
+    )
+
+    #expect(reviewer.canSelectApprovalMode)
+    #expect(!manager.canSelectApprovalMode)
+    for role in AgentRole.allCases {
+        let codex = BotProfile(
+            name: role.displayName,
+            provider: .codex,
+            role: role,
+            instructions: ""
+        )
+        #expect(codex.canSelectApprovalMode)
+    }
+}
+
+@Test
 func codexManagersHaveANonEscalatableReadOnlyBoundary() {
     let manager = BotProfile(
         name: "Manager",
@@ -1859,14 +1887,14 @@ func claudeAskModeIsCapturedWhenTheSessionStarts() async throws {
 }
 
 @Test
-func claudeAutoModeApprovesWithoutPausingAndAddsAnAuditEntry() async throws {
+func claudeReviewerAutoModeApprovesInspectionWithoutPausingAndAddsAnAuditEntry() async throws {
     let client = ApprovalStubClaudeClient()
     let runtime = testClaudeRuntime(client: client)
     let profile = BotProfile(
-        name: "Claude Builder",
+        name: "Claude Reviewer",
         provider: .claude,
-        role: .builder,
-        instructions: "Implement the change.",
+        role: .reviewer,
+        instructions: "Review the change.",
         workingDirectory: FileManager.default.temporaryDirectory.path,
         approvalMode: .auto
     )
@@ -1999,29 +2027,36 @@ func claudeAutoModeAsksForUnsupportedTools() async {
 }
 
 @Test
-func claudeReviewersCannotEscalateInAutoMode() async {
-    let client = ApprovalStubClaudeClient(
-        toolName: "Edit",
-        toolInput: .object([
-            "file_path": .string("Package.swift")
-        ])
-    )
-    let runtime = testClaudeRuntime(client: client)
-    let profile = claudeProfile(role: .reviewer, approvalMode: .auto)
-    await launchClaude(runtime, profile: profile)
+func claudeReviewerWriteToolsRemainBlockedInEitherApprovalMode() async {
+    for mode in ApprovalMode.allCases {
+        for toolName in ["Edit", "Write", "NotebookEdit"] {
+            let client = ApprovalStubClaudeClient(
+                toolName: toolName,
+                toolInput: .object([
+                    "file_path": .string("Package.swift")
+                ])
+            )
+            let runtime = testClaudeRuntime(client: client)
+            let profile = claudeProfile(
+                role: .reviewer,
+                approvalMode: mode
+            )
+            await launchClaude(runtime, profile: profile)
 
-    let events = await collectClaudeTurn(runtime, profile: profile)
-    let entries = timelineEntries(in: events)
-    let responses = await client.responses
+            let events = await collectClaudeTurn(runtime, profile: profile)
+            let entries = timelineEntries(in: events)
+            let responses = await client.responses
 
-    #expect(!entries.contains(where: { $0.kind == .approval }))
-    #expect(
-        entries.contains(where: {
-            $0.title == "Claude action blocked"
-                && $0.detail?.contains("Reviewers are read-only") == true
-        })
-    )
-    #expect(responses.first?["behavior"]?.stringValue == "deny")
+            #expect(!entries.contains(where: { $0.kind == .approval }))
+            #expect(
+                entries.contains(where: {
+                    $0.title == "Claude action blocked"
+                        && $0.detail?.contains("Reviewers are read-only") == true
+                })
+            )
+            #expect(responses.first?["behavior"]?.stringValue == "deny")
+        }
+    }
 }
 
 @Test
