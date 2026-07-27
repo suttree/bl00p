@@ -204,7 +204,7 @@ struct ProfileInspectorView: View {
                 return "Claude \(profile.role.displayName)s remain read-only and cannot escalate permissions. Approval mode is unavailable for this role."
             }
             return profile.approvalMode == .auto
-                ? "Claude automatically approves supported actions inside this workspace. Destructive, publishing, and unsupported actions remain blocked. Changes take effect the next time this bot connects."
+                ? "Claude automatically approves supported actions inside this workspace. Destructive and publishing actions remain blocked; other unclassified actions require explicit approval. Changes take effect the next time this bot connects."
                 : "Claude asks before actions that need approval through its structured permission protocol. Changes take effect the next time this bot connects."
         }
 

@@ -1180,7 +1180,8 @@ enum ClaudeToolApprovalPolicy {
                 "Claude Managers are read-only and cannot escalate permissions."
             )
         }
-        if role == .reviewer {
+        if role == .reviewer,
+           ["Edit", "Write", "NotebookEdit"].contains(approval.toolName) {
             return .deny(
                 "Claude Reviewers are read-only and cannot escalate permissions."
             )
@@ -1224,9 +1225,7 @@ enum ClaudeToolApprovalPolicy {
             )
 
         default:
-            return .deny(
-                "\(approval.toolName) is not supported by Claude auto-approval. Switch to Ask to review this action explicitly."
-            )
+            return .ask
         }
     }
 
@@ -1236,7 +1235,8 @@ enum ClaudeToolApprovalPolicy {
         roots: [URL]
     ) -> ClaudeToolApprovalDecision {
         let forbiddenSyntax = ["\n", ";", "&&", "||", "|", "`", "$(", ">", "<"]
-        guard !forbiddenSyntax.contains(where: command.contains) else {
+        guard !forbiddenSyntax.contains(where: command.contains),
+              !containsShellVariableSyntax(command) else {
             return .deny(
                 "Compound commands, shell expansion, and redirection require explicit approval."
             )
@@ -1327,7 +1327,7 @@ enum ClaudeToolApprovalPolicy {
             }
 
         case "xcodebuild":
-            supported = arguments.contains("test") || arguments.contains("build")
+            supported = ["test", "build"].contains(arguments.first ?? "")
 
         case "npm":
             supported = arguments.first == "test"
@@ -1367,9 +1367,22 @@ enum ClaudeToolApprovalPolicy {
         let cleaned = argument.trimmingCharacters(
             in: CharacterSet(charactersIn: "\"',")
         )
-        guard !cleaned.isEmpty,
-              !cleaned.hasPrefix("-"),
-              !cleaned.contains("=") else {
+        guard !cleaned.isEmpty else {
+            return nil
+        }
+        if cleaned.hasPrefix("--"),
+           let separator = cleaned.firstIndex(of: "=") {
+            let value = String(cleaned[cleaned.index(after: separator)...])
+            guard !value.isEmpty else { return nil }
+            return shellPath(from: value, relativeTo: workingDirectory)
+        }
+        if cleaned.hasPrefix("-f"), cleaned.count > 2 {
+            return shellPath(
+                from: String(cleaned.dropFirst(2)),
+                relativeTo: workingDirectory
+            )
+        }
+        guard !cleaned.hasPrefix("-"), !cleaned.contains("=") else {
             return nil
         }
         guard !cleaned.hasPrefix("~") else {
@@ -1381,6 +1394,18 @@ enum ClaudeToolApprovalPolicy {
         return canonicalURL(
             URL(fileURLWithPath: cleaned, relativeTo: workingDirectory)
         )
+    }
+
+    private static func containsShellVariableSyntax(_ command: String) -> Bool {
+        let characters = Array(command)
+        for index in characters.indices where characters[index] == "$" {
+            guard index + 1 < characters.count else { continue }
+            let next = characters[index + 1]
+            if next.isLetter || next == "_" || next == "{" {
+                return true
+            }
+        }
+        return false
     }
 
     private static func isInsideAllowedRoots(

@@ -1743,7 +1743,7 @@ func claudeAutoModeBlocksFilesOutsideTheWorkspace() async {
 }
 
 @Test
-func claudeAutoModeBlocksUnsupportedElevatedTools() async {
+func claudeAutoModeAsksForUnsupportedTools() async {
     let client = ApprovalStubClaudeClient(
         toolName: "mcp__github__delete_repository",
         toolInput: .object([
@@ -1754,17 +1754,16 @@ func claudeAutoModeBlocksUnsupportedElevatedTools() async {
     let profile = claudeProfile(role: .publisher, approvalMode: .auto)
     await launchClaude(runtime, profile: profile)
 
-    let events = await collectClaudeTurn(runtime, profile: profile)
+    let events = await collectClaudeTurn(
+        runtime,
+        profile: profile,
+        approveRequests: true
+    )
     let entries = timelineEntries(in: events)
     let responses = await client.responses
 
-    #expect(
-        entries.contains(where: {
-            $0.title == "Claude action blocked"
-                && $0.detail?.contains("not supported") == true
-        })
-    )
-    #expect(responses.first?["behavior"]?.stringValue == "deny")
+    #expect(entries.contains(where: { $0.kind == .approval }))
+    #expect(responses.first?["behavior"]?.stringValue == "allow")
 }
 
 @Test
@@ -1829,6 +1828,147 @@ func claudeManagersCannotEscalateInEitherApprovalMode() async throws {
         #expect(!invocation.arguments.contains("Edit"))
         #expect(!invocation.arguments.contains("Write"))
     }
+}
+
+@Test
+func claudeReviewerCanInspectInAskModeButCannotEdit() throws {
+    let workingDirectory = URL(fileURLWithPath: "/tmp/bl00p-reviewer")
+    let inspection = try #require(
+        ClaudeToolApprovalRequest(request: .object([
+            "subtype": .string("can_use_tool"),
+            "tool_name": .string("Bash"),
+            "input": .object(["command": .string("wc -l")])
+        ]))
+    )
+    let edit = try #require(
+        ClaudeToolApprovalRequest(request: .object([
+            "subtype": .string("can_use_tool"),
+            "tool_name": .string("Edit"),
+            "input": .object(["file_path": .string("README.md")])
+        ]))
+    )
+
+    #expect(
+        ClaudeToolApprovalPolicy.decision(
+            for: inspection,
+            mode: .ask,
+            role: .reviewer,
+            workingDirectory: workingDirectory,
+            stagedAttachmentDirectory: nil
+        ) == .ask
+    )
+    #expect(
+        ClaudeToolApprovalPolicy.decision(
+            for: inspection,
+            mode: .auto,
+            role: .reviewer,
+            workingDirectory: workingDirectory,
+            stagedAttachmentDirectory: nil
+        ) == .allow
+    )
+    if case .deny = ClaudeToolApprovalPolicy.decision(
+        for: edit,
+        mode: .ask,
+        role: .reviewer,
+        workingDirectory: workingDirectory,
+        stagedAttachmentDirectory: nil
+    ) {
+        // Expected: Reviewer write tools remain blocked in both modes.
+    } else {
+        Issue.record("Reviewer edit was not denied")
+    }
+}
+
+@Test
+func claudeAutoApprovalRejectsExpandedOrFlagEmbeddedPaths() throws {
+    let workingDirectory = URL(
+        fileURLWithPath: "/tmp/bl00p-workspace",
+        isDirectory: true
+    )
+    for command in [
+        "cat $HOME/.ssh/id_rsa",
+        "cat ${HOME}/.ssh/id_rsa",
+        "grep --file=/etc/passwd .",
+        "rg -f/etc/passwd ."
+    ] {
+        let request = try #require(
+            ClaudeToolApprovalRequest(request: .object([
+                "subtype": .string("can_use_tool"),
+                "tool_name": .string("Bash"),
+                "input": .object(["command": .string(command)])
+            ]))
+        )
+        if case .deny = ClaudeToolApprovalPolicy.decision(
+            for: request,
+            mode: .auto,
+            role: .builder,
+            workingDirectory: workingDirectory,
+            stagedAttachmentDirectory: nil
+        ) {
+            // Expected: shell expansion and paths embedded in flags are denied.
+        } else {
+            Issue.record("Auto-approval allowed \(command)")
+        }
+    }
+}
+
+@Test
+func claudeAutoApprovalAsksForUnclassifiedActionsAndMatchesXcodebuildSubcommands() throws {
+    let workingDirectory = URL(
+        fileURLWithPath: "/tmp/bl00p-workspace",
+        isDirectory: true
+    )
+    let unknown = try #require(
+        ClaudeToolApprovalRequest(request: .object([
+            "subtype": .string("can_use_tool"),
+            "tool_name": .string("mcp__example__inspect"),
+            "input": .object(["resource": .string("repository")])
+        ]))
+    )
+    let archive = try #require(
+        ClaudeToolApprovalRequest(request: .object([
+            "subtype": .string("can_use_tool"),
+            "tool_name": .string("Bash"),
+            "input": .object(["command": .string("xcodebuild archive")])
+        ]))
+    )
+    let test = try #require(
+        ClaudeToolApprovalRequest(request: .object([
+            "subtype": .string("can_use_tool"),
+            "tool_name": .string("Bash"),
+            "input": .object(["command": .string("xcodebuild test")])
+        ]))
+    )
+
+    #expect(
+        ClaudeToolApprovalPolicy.decision(
+            for: unknown,
+            mode: .auto,
+            role: .publisher,
+            workingDirectory: workingDirectory,
+            stagedAttachmentDirectory: nil
+        ) == .ask
+    )
+    if case .deny = ClaudeToolApprovalPolicy.decision(
+        for: archive,
+        mode: .auto,
+        role: .publisher,
+        workingDirectory: workingDirectory,
+        stagedAttachmentDirectory: nil
+    ) {
+        // Expected: only the first xcodebuild subcommand is classified.
+    } else {
+        Issue.record("xcodebuild archive was auto-approved")
+    }
+    #expect(
+        ClaudeToolApprovalPolicy.decision(
+            for: test,
+            mode: .auto,
+            role: .publisher,
+            workingDirectory: workingDirectory,
+            stagedAttachmentDirectory: nil
+        ) == .allow
+    )
 }
 
 @Test
