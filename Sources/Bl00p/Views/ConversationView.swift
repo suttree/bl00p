@@ -493,7 +493,7 @@ private struct TimelineEntryView: View {
                 }
             }
 
-            if entry.title == "Approve implementation plan" {
+            if entry.contentFormat == .markdown {
                 MarkdownMessageView(source: entry.text)
             } else {
                 Text(entry.text)

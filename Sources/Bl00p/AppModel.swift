@@ -59,7 +59,9 @@ final class AppModel: ObservableObject {
                     var session = restoredSession
                     let endedAtLegacyPermissionBoundary =
                         session.entries.last?.text == "Claude stopped at a permission boundary"
-                    session.entries = session.entries.map(Self.migrateLegacyPermissionEntry)
+                    session.entries = session.entries
+                        .map(Self.migrateLegacyPermissionEntry)
+                        .map(Self.migrateLegacyPlanApprovalEntry)
                     session.entries.removeAll(where: Self.isPrototypeStarterEntry)
                     if session.status == .launching
                         || session.status == .working
@@ -186,6 +188,7 @@ final class AppModel: ObservableObject {
         }
         connectedProfileIDs.remove(profileID)
         inFlightUserEntryIDs.removeValue(forKey: profileID)
+        planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
         runGenerations[profileID] = UUID()
         for index in profiles.indices where profiles[index].id != profileID {
             guard var team = profiles[index].managerTeam else { continue }
@@ -211,6 +214,11 @@ final class AppModel: ObservableObject {
                     workflow.team.reviewerProfileID,
                     workflow.team.publisherProfileID
                   ].contains(profileID) else { continue }
+            if let activeProfileID = expectedProfileID(for: workflow) {
+                planningTurnAssistantEntryIDs.removeValue(
+                    forKey: activeProfileID
+                )
+            }
             workflow.isPaused = true
             workflow.pauseReason = "A bot assigned to this workflow was deleted."
             workflow.updatedAt = .now
@@ -291,6 +299,7 @@ final class AppModel: ObservableObject {
     func stop(_ profileID: UUID) {
         guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
         connectedProfileIDs.remove(profileID)
+        planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
         runGenerations[profileID] = UUID()
         Task {
             await runtime.stop(profile: runtimeProfile(for: profile))
@@ -812,12 +821,19 @@ final class AppModel: ObservableObject {
 
         for managerID in matchingManagerIDs {
             switch status {
-            case .needsApproval, .needsAnswer, .failed:
+            case .needsApproval, .needsAnswer:
+                pauseWorkflow(
+                    managerID,
+                    reason: "\(profileName(profileID)) needs attention: \(status.label)."
+                )
+            case .failed:
+                planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
                 pauseWorkflow(
                     managerID,
                     reason: "\(profileName(profileID)) needs attention: \(status.label)."
                 )
             case .stopped:
+                planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
                 if previousStatus == .working || previousStatus == .launching {
                     pauseWorkflow(
                         managerID,
@@ -1070,7 +1086,8 @@ final class AppModel: ObservableObject {
                 text: implementationPlan,
                 detail: "Approve to hand this plan to the Builder and continue the managed workflow. Decline to pause and send revision feedback.",
                 timestamp: assistantTimestamp,
-                approvalState: .pending
+                approvalState: .pending,
+                contentFormat: .markdown
             ),
             at: entryIndex
         )
@@ -1562,6 +1579,19 @@ final class AppModel: ObservableObject {
         migrated.detail = ClaudePermissionDenials.readableLegacyDetail(entry.detail)
         return migrated
     }
+
+    private static func migrateLegacyPlanApprovalEntry(
+        _ entry: TimelineEntry
+    ) -> TimelineEntry {
+        guard entry.kind == .approval,
+              entry.title == "Approve implementation plan",
+              entry.contentFormat == nil else {
+            return entry
+        }
+        var migrated = entry
+        migrated.contentFormat = .markdown
+        return migrated
+    }
 }
 
 struct AppStateStore: Sendable {
@@ -1584,52 +1614,67 @@ struct AppStateStore: Sendable {
     }
 
     /// A previously-saved state that fails to decode (e.g. after a schema change) is
-    /// moved aside instead of silently discarded, so a decode bug can't cascade into an
-    /// autosave permanently overwriting the user's real profiles and sessions with defaults.
+    /// moved aside instead of silently discarded. The last known-good backup is then
+    /// loaded so a decode or interrupted-write failure cannot reset the app to defaults.
     func load() -> PersistedAppState? {
-        guard let fileURL,
-              let data = try? Data(contentsOf: fileURL) else { return nil }
+        guard let fileURL else { return nil }
+        let backupURL = backupURL(for: fileURL)
 
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            do {
+                return try decodeState(at: fileURL)
+            } catch {
+                logger.error("Failed to decode saved state, quarantining it: \(error)")
+                quarantineUnreadableState(at: fileURL)
+            }
+        }
+
+        guard FileManager.default.fileExists(atPath: backupURL.path) else {
+            return nil
+        }
         do {
-            return try JSONDecoder.iso8601.decode(PersistedAppState.self, from: data)
+            return try decodeState(at: backupURL)
         } catch {
-            logger.error("Failed to decode saved state, quarantining it: \(error)")
-            quarantineUnreadableState(at: fileURL)
+            logger.error("Failed to decode backup state: \(error)")
             return nil
         }
     }
 
-    /// Writes go through a temp file and rotate the previous state into `state.json.bak`,
-    /// so a single bad write (e.g. saving freshly-reset defaults) doesn't destroy the only
-    /// copy of the prior good state on disk.
+    /// The previous primary is copied atomically to `state.json.bak` before an
+    /// atomic primary replacement. If either write fails, the existing primary
+    /// remains available and the active coding session continues.
     func save(_ state: PersistedAppState) {
         guard let fileURL,
               let data = try? JSONEncoder.pretty.encode(state) else { return }
 
         let fileManager = FileManager.default
         let directory = fileURL.deletingLastPathComponent()
-        let tempURL = directory.appendingPathComponent(
-            "\(fileURL.lastPathComponent).tmp-\(UUID().uuidString)"
-        )
-        let backupURL = directory.appendingPathComponent("\(fileURL.lastPathComponent).bak")
+        let backupURL = backupURL(for: fileURL)
 
         do {
             try fileManager.createDirectory(
                 at: directory,
                 withIntermediateDirectories: true
             )
-            try data.write(to: tempURL, options: .atomic)
-
             if fileManager.fileExists(atPath: fileURL.path) {
-                try? fileManager.removeItem(at: backupURL)
-                try fileManager.moveItem(at: fileURL, to: backupURL)
+                let previousData = try Data(contentsOf: fileURL)
+                try previousData.write(to: backupURL, options: .atomic)
             }
-            try fileManager.moveItem(at: tempURL, to: fileURL)
+            try data.write(to: fileURL, options: .atomic)
         } catch {
             // Persistence failure should not interrupt an active coding session.
             logger.error("Failed to save state: \(error)")
-            try? fileManager.removeItem(at: tempURL)
         }
+    }
+
+    private func decodeState(at url: URL) throws -> PersistedAppState {
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder.iso8601.decode(PersistedAppState.self, from: data)
+    }
+
+    private func backupURL(for fileURL: URL) -> URL {
+        fileURL.deletingLastPathComponent()
+            .appendingPathComponent("\(fileURL.lastPathComponent).bak")
     }
 
     private func quarantineUnreadableState(at fileURL: URL) {
@@ -1637,8 +1682,20 @@ struct AppStateStore: Sendable {
             .replacingOccurrences(of: ":", with: "-")
         let quarantineURL = fileURL.deletingLastPathComponent()
             .appendingPathComponent("state.corrupt-\(timestamp).json")
-        try? FileManager.default.removeItem(at: quarantineURL)
-        try? FileManager.default.moveItem(at: fileURL, to: quarantineURL)
+        do {
+            try FileManager.default.removeItemIfPresent(at: quarantineURL)
+            try FileManager.default.moveItem(at: fileURL, to: quarantineURL)
+        } catch {
+            logger.error("Failed to quarantine unreadable state: \(error)")
+        }
+    }
+}
+
+private extension FileManager {
+    func removeItemIfPresent(at url: URL) throws {
+        if fileExists(atPath: url.path) {
+            try removeItem(at: url)
+        }
     }
 }
 
