@@ -770,7 +770,7 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
         branch: "bl00p/managed-feature",
         baseRevision: "abc123"
     )
-    let package = GitHandoffPackage(
+    let initialPackage = GitHandoffPackage(
         sourceProfileID: builderID,
         sourceName: "Builder",
         repositoryPath: ownership.repositoryPath,
@@ -781,6 +781,19 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
         taskContext: "Add optional orchestration",
         testStatus: .passed,
         testSummary: "`swift test` — passed",
+        workingTreeSummary: "Clean"
+    )
+    let revisedPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "789abc",
+        taskContext: "Add optional orchestration",
+        testStatus: .passed,
+        testSummary: "`swift test` — 42 tests passed",
         workingTreeSummary: "Clean"
     )
     let manager = BotProfile(
@@ -837,7 +850,7 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     let model = AppModel(
         runtime: runtime,
         worktrees: StubWorktreeManager(
-            package: package,
+            packages: [initialPackage, revisedPackage],
             preparedOwnership: ownership
         ),
         store: store
@@ -906,7 +919,6 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
                 .builder,
                 .reviewer,
                 .builder,
-                .reviewer,
                 .publisher,
                 .manager
             ]
@@ -914,9 +926,21 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     #expect(calls[1].message.contains("Manager brief:"))
     #expect(calls[2].message.contains("Source branch: \(ownership.branch)"))
     #expect(calls[3].message.contains("Review finding"))
-    #expect(calls[4].message.contains("Re-check the updated"))
-    #expect(calls[5].message.contains("create a draft pull request"))
-    #expect(calls[6].message.contains("https://github.com/suttree/bl00p/pull/99"))
+    #expect(calls[4].message.contains("Initial review findings:"))
+    #expect(calls[4].message.contains("Review finding: add a regression test."))
+    #expect(calls[4].message.contains("Builder revision summary:"))
+    #expect(
+        calls[4].message.contains(
+            "Review finding fixed, committed, and tests passed."
+        )
+    )
+    #expect(calls[4].message.contains("Source branch: \(ownership.branch)"))
+    #expect(calls[4].message.contains("Source HEAD: \(revisedPackage.headRevision)"))
+    #expect(calls[4].message.contains("Test state: Passed"))
+    #expect(calls[4].message.contains(revisedPackage.testSummary))
+    #expect(calls[4].message.contains("create a draft pull request"))
+    #expect(!calls.map(\.message).contains(where: { $0.contains("Re-check") }))
+    #expect(calls[5].message.contains("https://github.com/suttree/bl00p/pull/99"))
     #expect(await runtime.approvalResolutionCount == 0)
     #expect(
         model.profiles.first(where: { $0.id == reviewerID })?
@@ -925,6 +949,320 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     #expect(
         model.profiles.first(where: { $0.id == publisherID })?
             .workingDirectory == ownership.worktreePath
+    )
+    #expect(
+        model.session(for: publisherID).entries.contains(where: {
+            $0.title == "Workflow handoff from Builder"
+                && $0.detail?.contains(revisedPackage.headRevision) == true
+        })
+    )
+}
+
+@MainActor
+@Test
+func invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-invalid-revision-handoff-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/managed-feature",
+        baseRevision: "abc123"
+    )
+    let initialPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "def456",
+        taskContext: "Ship the feature",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        workingTreeSummary: "Clean"
+    )
+    let missingCommitRevision = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: initialPackage.headRevision,
+        taskContext: "Ship the feature",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        workingTreeSummary: "Clean"
+    )
+    let dirtyRevision = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "789abc",
+        taskContext: "Ship the feature",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        workingTreeSummary: " M Sources/Feature.swift"
+    )
+    let failingRevision = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "789abc",
+        taskContext: "Ship the feature",
+        testStatus: .failed,
+        testSummary: "`swift test` — failed",
+        workingTreeSummary: "Clean"
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builderID,
+        reviewerProfileID: reviewerID,
+        publisherProfileID: publisherID
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement.",
+        workingDirectory: ownership.repositoryPath,
+        worktree: ownership
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review."
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Publish."
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        team: team,
+        request: "Ship the feature",
+        stage: .revising,
+        branch: ownership.branch,
+        latestHandoff: initialPackage
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer, publisher],
+            sessions: [
+                managerID: AgentSessionState(),
+                builderID: AgentSessionState(),
+                reviewerID: AgentSessionState(
+                    entries: [
+                        .init(
+                            kind: .assistant,
+                            text: "Review finding: add a regression test."
+                        )
+                    ]
+                ),
+                publisherID: AgentSessionState()
+            ],
+            selectedBotID: builderID,
+            managerWorkflows: [managerID: workflow]
+        )
+    )
+    let runtime = OrchestrationRecordingRuntime()
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            packages: [
+                missingCommitRevision,
+                dirtyRevision,
+                failingRevision
+            ],
+            preparedOwnership: ownership
+        ),
+        store: store
+    )
+
+    model.send("Finish the revision pass", to: builderID)
+    for _ in 0..<100
+        where model.workflow(for: managerID)?.pauseReason
+            != "The Builder revision pass has no new local commit." {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let paused = try #require(model.workflow(for: managerID))
+    #expect(paused.stage == .revising)
+    #expect(paused.isPaused)
+    #expect(
+        paused.pauseReason
+            == "The Builder revision pass has no new local commit."
+    )
+    #expect(paused.latestHandoff?.headRevision == initialPackage.headRevision)
+    #expect(await runtime.calls.map(\.role) == [.builder])
+    #expect(model.session(for: publisherID).entries.isEmpty)
+
+    model.send("Commit the remaining changes", to: builderID)
+    for _ in 0..<100
+        where model.workflow(for: managerID)?.pauseReason
+            != "The Builder handoff still has uncommitted changes." {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let dirty = try #require(model.workflow(for: managerID))
+    #expect(dirty.stage == .revising)
+    #expect(dirty.isPaused)
+    #expect(
+        dirty.pauseReason
+            == "The Builder handoff still has uncommitted changes."
+    )
+    #expect(dirty.latestHandoff?.headRevision == initialPackage.headRevision)
+    #expect(await runtime.calls.map(\.role) == [.builder, .builder])
+    #expect(model.session(for: publisherID).entries.isEmpty)
+
+    model.send("Fix the tests", to: builderID)
+    for _ in 0..<100
+        where model.workflow(for: managerID)?.pauseReason
+            != "The Builder handoff does not report passing tests." {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let failing = try #require(model.workflow(for: managerID))
+    #expect(failing.stage == .revising)
+    #expect(failing.isPaused)
+    #expect(
+        failing.pauseReason
+            == "The Builder handoff does not report passing tests."
+    )
+    #expect(failing.latestHandoff?.headRevision == initialPackage.headRevision)
+    #expect(
+        await runtime.calls.map(\.role)
+            == [.builder, .builder, .builder]
+    )
+    #expect(model.session(for: publisherID).entries.isEmpty)
+}
+
+@MainActor
+@Test
+func persistedLegacyVerifyingWorkflowStillDecodesAndRecovers() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-legacy-verifying-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    var builder = BotProfile.defaults[0]
+    var reviewer = BotProfile.defaults[1]
+    var publisher = BotProfile.defaults[2]
+    builder.id = UUID()
+    reviewer.id = UUID()
+    publisher.id = UUID()
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builder.id,
+        reviewerProfileID: reviewer.id,
+        publisherProfileID: publisher.id
+    )
+    let manager = BotProfile(
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let package = GitHandoffPackage(
+        sourceProfileID: builder.id,
+        sourceName: builder.name,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/legacy-workflow",
+        baseRevision: "abc123",
+        headRevision: "def456",
+        taskContext: "Resume a saved delivery",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        workingTreeSummary: "Clean"
+    )
+    let legacyWorkflow = ManagerWorkflow(
+        managerProfileID: manager.id,
+        team: team,
+        request: "Resume a saved delivery",
+        stage: .verifying,
+        branch: package.branch,
+        latestHandoff: package
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer, publisher],
+            sessions: Dictionary(
+                uniqueKeysWithValues: [manager, builder, reviewer, publisher]
+                    .map { ($0.id, AgentSessionState()) }
+            ),
+            selectedBotID: manager.id,
+            managerWorkflows: [manager.id: legacyWorkflow]
+        )
+    )
+
+    let decoded = try #require(store.load())
+    #expect(decoded.managerWorkflows[manager.id]?.stage == .verifying)
+
+    let runtime = OrchestrationRecordingRuntime()
+    let model = AppModel(runtime: runtime, store: store)
+    let restored = try #require(model.workflow(for: manager.id))
+    #expect(restored.stage == .publishing)
+    #expect(
+        restored.stage.progressIndex
+            == ManagerWorkflowStage.publishing.progressIndex
+    )
+    #expect(restored.isPaused)
+
+    model.send("Resume the saved workflow", to: publisher.id)
+    for _ in 0..<100
+        where model.workflow(for: manager.id)?.stage != .completed {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(model.workflow(for: manager.id)?.stage == .completed)
+    #expect(
+        await runtime.calls.map(\.role)
+            == [.publisher, .manager]
+    )
+    #expect(
+        model.session(for: publisher.id).entries.contains(where: {
+            $0.title == "Recovered workflow handoff from \(builder.name)"
+                && $0.detail?.contains(package.headRevision) == true
+        })
     )
 }
 
@@ -2237,14 +2575,22 @@ private func gitOutput(_ arguments: [String], in directory: URL) throws -> Strin
 }
 
 private actor StubWorktreeManager: GitWorktreeManaging {
-    let package: GitHandoffPackage
+    var packages: [GitHandoffPackage]
     let preparedOwnership: GitWorktreeOwnership?
 
     init(
         package: GitHandoffPackage,
         preparedOwnership: GitWorktreeOwnership? = nil
     ) {
-        self.package = package
+        packages = [package]
+        self.preparedOwnership = preparedOwnership
+    }
+
+    init(
+        packages: [GitHandoffPackage],
+        preparedOwnership: GitWorktreeOwnership? = nil
+    ) {
+        self.packages = packages
         self.preparedOwnership = preparedOwnership
     }
 
@@ -2260,7 +2606,11 @@ private actor StubWorktreeManager: GitWorktreeManaging {
         from profile: BotProfile,
         session: AgentSessionState
     ) async throws -> GitHandoffPackage {
-        package
+        let package = try #require(packages.first)
+        if packages.count > 1 {
+            packages.removeFirst()
+        }
+        return package
     }
 }
 

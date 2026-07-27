@@ -177,9 +177,9 @@ private struct ManagerWorkflowBanner: View {
             workflow.managerProfileID
         case .building, .revising:
             workflow.team.builderProfileID
-        case .reviewing, .verifying:
+        case .reviewing:
             workflow.team.reviewerProfileID
-        case .publishing:
+        case .verifying, .publishing:
             workflow.team.publisherProfileID
         case .completed:
             nil

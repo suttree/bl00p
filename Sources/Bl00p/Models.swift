@@ -405,7 +405,9 @@ enum ManagerWorkflowStage: String, Codable, CaseIterable, Sendable {
         case .building: "Building"
         case .reviewing: "Reviewing"
         case .revising: "Fixing findings"
-        case .verifying: "Re-checking"
+        // Kept for decoding workflows persisted before the second review pass
+        // was removed. New workflows never transition to this stage.
+        case .verifying: "Documenting & publishing"
         case .publishing: "Documenting & publishing"
         case .reporting: "Reporting"
         case .completed: "Complete"
@@ -419,9 +421,9 @@ enum ManagerWorkflowStage: String, Codable, CaseIterable, Sendable {
         case .reviewing: 2
         case .revising: 3
         case .verifying: 4
-        case .publishing: 5
-        case .reporting: 6
-        case .completed: 7
+        case .publishing: 4
+        case .reporting: 5
+        case .completed: 6
         }
     }
 }
