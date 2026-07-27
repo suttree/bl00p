@@ -78,6 +78,13 @@ persisted workflow with this sequence:
    updates documentation, commits, pushes, and opens a draft PR.
 7. The Manager reports the draft PR link and delivery summary.
 
+There is one Reviewer pass per managed delivery. Before the Documenter is
+dispatched, bl00p requires a clean Builder worktree, a new revision commit
+(unless the Reviewer explicitly reports a clean review), and fresh passing
+test evidence from the revision pass. Saved workflows recover these handoff
+requirements across app restarts without discarding an already-running
+Documenter session.
+
 Questions, failures, and approval requests pause the workflow for the user.
 Leaving any team assignment unset keeps that Manager in standalone chat mode.
 

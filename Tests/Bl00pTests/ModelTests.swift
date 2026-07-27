@@ -702,6 +702,29 @@ func handoffEvidenceRecognizesWrapperCommandsAndSuccessTitles() {
     #expect(makeEvidence.status == .passed)
 }
 
+@Test
+func handoffEvidenceIgnoresGenericToolOutputThatMentionsTests() {
+    let evidence = HandoffTestEvidence.latest(
+        in: [
+            .init(
+                kind: .command,
+                title: "Tool finished",
+                text: "Read",
+                detail: "A changelog entry says 61 tests passed."
+            ),
+            .init(
+                kind: .command,
+                title: "Using Grep",
+                text: "Grep",
+                detail: "0 failures"
+            )
+        ]
+    )
+
+    #expect(evidence.status == .notRun)
+    #expect(evidence.recordedAt == nil)
+}
+
 @MainActor
 @Test
 func handoffPackageIsDeliveredWithTheRecipientsNextMessage() async throws {

@@ -350,8 +350,13 @@ struct HandoffTestEvidence: Equatable {
                 "0 failures",
                 "0 failed"
             ].contains(where: detail.contains)
+            let commandLooksLikeShellCommand =
+                command.contains(" ")
+                    || command.contains("/")
+                    || command.contains(".")
+                    || command.contains("-")
             return knownTestCommands.contains(where: command.contains)
-                || outputReportsTests
+                || (outputReportsTests && commandLooksLikeShellCommand)
         }
 
         guard let testEntry else {

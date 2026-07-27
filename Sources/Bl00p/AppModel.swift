@@ -83,6 +83,12 @@ final class AppModel: ObservableObject {
             managerWorkflows = saved.managerWorkflows.mapValues { workflow in
                 guard workflow.stage != .completed else { return workflow }
                 var restored = workflow
+                if restored.stage == .revising,
+                   restored.revisionStartedAt == nil {
+                    // Workflows persisted before the revision gate was added
+                    // need a lower bound for their post-review test evidence.
+                    restored.revisionStartedAt = workflow.updatedAt
+                }
                 restored.isPaused = true
                 restored.pauseReason =
                     workflow.planApprovalEntryID == nil
@@ -95,6 +101,11 @@ final class AppModel: ObservableObject {
                 where workflow.stage == .publishing {
                 guard let publisherID = workflow.team.publisherProfileID,
                       let package = workflow.latestHandoff else { continue }
+                let publisherAlreadyUsesHandoffWorktree = profiles.contains {
+                    $0.id == publisherID
+                        && $0.workingDirectory == package.worktreePath
+                }
+                guard !publisherAlreadyUsesHandoffWorktree else { continue }
                 recoveredPublishingWorkflow = true
                 if let index = profiles.firstIndex(where: {
                     $0.id == publisherID
