@@ -2,7 +2,7 @@
 
 bl00p (“bot loop”) is a control room for running coding agents through an implementation, review, and publishing loop while keeping a human in control.
 
-This fork ([suttree/bl00p](https://github.com/suttree/bl00p) is upstream) targets Linux — built and tested on Kali — using [SwiftOpenUI](https://github.com/codelynx/SwiftOpenUI)'s GTK4 backend in place of AppKit/SwiftUI. The macOS build path is kept working alongside it; `Package.swift` and most `#if os(macOS)` branches in `Sources/Bl00p` select the platform automatically.
+This fork ([suttree/bl00p](https://github.com/suttree/bl00p) is upstream) targets Linux — built and tested on Kali — using the maintained [SwiftOpenUI fork](https://github.com/FesterCluck/SwiftOpenUI)'s GTK4 backend in place of AppKit/SwiftUI. The macOS build path is kept working alongside it; `Package.swift` and most `#if os(macOS)` branches in `Sources/Bl00p` select the platform automatically.
 
 The current prototype includes:
 
