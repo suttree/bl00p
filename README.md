@@ -81,6 +81,12 @@ persisted workflow with this sequence:
 Questions, failures, and approval requests pause the workflow for the user.
 Leaving any team assignment unset keeps that Manager in standalone chat mode.
 
+For an unattended managed workflow, configure its Claude Reviewer with **Auto**
+approval mode. A Reviewer in **Ask** mode pauses when it first requests a shell
+inspection such as `git diff`, so the workflow waits for a user decision. Auto
+mode allows supported read-only repository inspection while preserving the
+Reviewer boundary.
+
 The Manager's implementation plan appears once, inside the approval card. The
 card renders the plan as readable Markdown and provides the Approve and Decline
 actions; the same plan is not repeated as a separate conversation message.
@@ -107,6 +113,12 @@ actions and records each decision in the transcript; destructive and
 publishing commands, outside-workspace paths, and classified Reviewer writes
 remain blocked. Unclassified non-shell tools return to the explicit approval
 flow instead of being run automatically.
+
+Reviewer shell access is intentionally read-only: commands such as
+`swift test`, `npm run lint`, and other classified verification commands are
+denied rather than offered for approval. Reviewers confirm the reported test
+evidence instead. Manager profiles cannot run shell commands in any approval
+mode; they coordinate the assigned team through the managed workflow.
 
 For managed workflows, the plan approval is represented by a dedicated
 approval entry that replaces the Manager's streamed plan entry at the same

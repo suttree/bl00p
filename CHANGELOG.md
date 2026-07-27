@@ -15,7 +15,8 @@ All notable changes to bl00p are documented in this file.
   mode is limited to supported workspace-scoped actions and keeps destructive,
   publishing, and role boundaries enforced. Reviewers can inspect repositories
   without pre-approved shell access; built-in edits and write-capable shell
-  commands remain blocked.
+  commands remain blocked. Configure Claude Reviewers in Auto mode for
+  unattended managed workflows; Ask mode pauses on the first shell inspection.
 - Add model selection when creating or configuring Claude and Codex bots.
 - Add image attachments through drag and drop, with previews in the composer and conversation timeline.
 - Add macOS notifications and a Dock badge when a bot finishes, fails, asks a question, or needs approval.
@@ -56,6 +57,9 @@ All notable changes to bl00p are documented in this file.
 - Stage Claude image attachments in an isolated temporary directory and remove them after each turn.
 - Keep Manager sessions plan-only and read-only, prevent hidden delegation,
   and reserve team dispatch for bl00p's visible managed workflow.
+- Keep Claude Reviewers read-only by denying built-in edits, write-capable shell
+  commands, and test-running commands in every approval mode; Manager profiles
+  cannot run shell commands.
 - Quarantine unreadable saved state instead of letting the next autosave
   overwrite it with defaults, and rotate a `state.json.bak` backup on every
   save so one bad write can't destroy the only copy of prior state.
