@@ -13,7 +13,8 @@ The current prototype includes:
 - Consistent, legible typography across conversations, settings, and bot creation
 - Structured messages, commands, findings, and approval cards
 - Optional Manager bots that coordinate a persistent Builder → Reviewer →
-  Builder fixes → Reviewer re-check → Documenter / PR Writer workflow
+  conditional Builder fixes and Reviewer re-check → Documenter / PR Writer
+  workflow
 - Isolated managed Git worktrees for implementation bots, with handoff packages
   that carry branch, task, working-tree, and test context to the next bot
 - Real Codex sessions powered by `codex app-server`, with workspace-scoped writes and in-app approvals for commands, file changes, extra permissions, and connected-app mutations
@@ -73,13 +74,17 @@ persisted workflow with this sequence:
 2. You approve the implementation plan before it is handed to the team.
 3. The Builder works in an isolated branch and commits a tested change locally.
 4. The Reviewer performs a read-only review.
-5. The Builder addresses the findings and commits the fixes.
-6. The Reviewer verifies the updated implementation.
-7. The Documenter updates documentation, commits, pushes, and opens a draft PR.
-8. The Manager reports the draft PR link and delivery summary.
+5. If the Reviewer requests changes (or its structured result is missing), the
+   Builder addresses the findings and the Reviewer verifies the updated commit.
+   A clean review skips both extra turns.
+6. The Documenter updates documentation, commits, pushes, and opens a draft PR.
+7. bl00p completes the workflow directly from the recorded branch, test
+   evidence, Reviewer result, Documenter summary, and draft PR URL.
 
 Questions, failures, and approval requests pause the workflow for the user.
 Leaving any team assignment unset keeps that Manager in standalone chat mode.
+Clean workflows use four agent turns; workflows with one requested-changes
+round use six.
 
 ## Runtime boundary
 
@@ -89,6 +94,10 @@ Reviewer, and Documenter threads use workspace-scoped execution and route
 elevated and connected-app actions through bl00p's approval cards. Manager
 threads are non-escalatable and read-only so bl00p alone owns delegation to
 the configured team. Threads resume from their saved thread ID when possible.
+Successful executable discovery and Claude authentication checks are cached for
+the lifetime of the app. Performance logs contain stage durations plus
+provider, model, role, and cold/warm identifiers only; prompts, generated
+content, and filesystem paths are never included.
 
 Claude profiles use the installed `claude` executable's `stream-json` mode.
 They inherit Claude's user and project settings, including configured MCP

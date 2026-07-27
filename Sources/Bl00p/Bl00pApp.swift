@@ -3,12 +3,16 @@ import SwiftUI
 
 @main
 struct Bl00pApp: App {
+    @NSApplicationDelegateAdaptor(ApplicationDelegate.self)
+    private var appDelegate
     @StateObject private var model: AppModel
     private let updateController: UpdateController
 
     init() {
-        _model = StateObject(wrappedValue: AppModel())
+        let model = AppModel()
+        _model = StateObject(wrappedValue: model)
         updateController = UpdateController()
+        appDelegate.model = model
     }
 
     var body: some Scene {
@@ -30,6 +34,22 @@ struct Bl00pApp: App {
                 .keyboardShortcut(",", modifiers: [.command, .shift])
             }
         }
+    }
+}
+
+@MainActor
+private final class ApplicationDelegate: NSObject, NSApplicationDelegate {
+    weak var model: AppModel?
+
+    func applicationShouldTerminate(
+        _ sender: NSApplication
+    ) -> NSApplication.TerminateReply {
+        guard let model else { return .terminateNow }
+        Task {
+            await model.flushPersistence()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 }
 

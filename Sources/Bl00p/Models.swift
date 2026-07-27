@@ -407,7 +407,7 @@ enum ManagerWorkflowStage: String, Codable, CaseIterable, Sendable {
         case .revising: "Fixing findings"
         case .verifying: "Re-checking"
         case .publishing: "Documenting & publishing"
-        case .reporting: "Reporting"
+        case .reporting: "Finishing"
         case .completed: "Complete"
         }
     }
@@ -421,8 +421,28 @@ enum ManagerWorkflowStage: String, Codable, CaseIterable, Sendable {
         case .verifying: 4
         case .publishing: 5
         case .reporting: 6
-        case .completed: 7
+        case .completed: 6
         }
+    }
+}
+
+enum ReviewDisposition: String, Sendable {
+    case clean
+    case changesRequested
+
+    static func parse(from response: String) -> ReviewDisposition? {
+        let marker = "BL00P_REVIEW_DISPOSITION:"
+        let matchingLines = response
+            .split(whereSeparator: \.isNewline)
+            .map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .filter { $0.hasPrefix(marker) }
+        guard matchingLines.count == 1 else { return nil }
+        let value = matchingLines[0]
+            .dropFirst(marker.count)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return ReviewDisposition(rawValue: value)
     }
 }
 
@@ -436,6 +456,8 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     var stage: ManagerWorkflowStage
     var branch: String?
     var pullRequestURL: String?
+    var verificationSummary: String?
+    var publisherSummary: String?
     var latestHandoff: GitHandoffPackage?
     var isPaused: Bool
     var pauseReason: String?
@@ -452,6 +474,8 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         stage: ManagerWorkflowStage = .planning,
         branch: String? = nil,
         pullRequestURL: String? = nil,
+        verificationSummary: String? = nil,
+        publisherSummary: String? = nil,
         latestHandoff: GitHandoffPackage? = nil,
         isPaused: Bool = false,
         pauseReason: String? = nil,
@@ -467,6 +491,8 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         self.stage = stage
         self.branch = branch
         self.pullRequestURL = pullRequestURL
+        self.verificationSummary = verificationSummary
+        self.publisherSummary = publisherSummary
         self.latestHandoff = latestHandoff
         self.isPaused = isPaused
         self.pauseReason = pauseReason

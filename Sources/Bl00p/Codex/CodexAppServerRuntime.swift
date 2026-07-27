@@ -67,8 +67,17 @@ actor CodexAppServerRuntime: AgentRuntime {
         var listenerTask: Task<Void, Never>?
     }
 
-    private let locator = CodexExecutableLocator()
+    private let locator: CodexExecutableLocator
+    private let preflight: ProviderPreflightCache
     private var sessions: [UUID: Session] = [:]
+
+    init(
+        locator: CodexExecutableLocator = CodexExecutableLocator(),
+        preflight: ProviderPreflightCache = ProviderPreflightCache()
+    ) {
+        self.locator = locator
+        self.preflight = preflight
+    }
 
     func start(
         profile: BotProfile,
@@ -94,7 +103,10 @@ actor CodexAppServerRuntime: AgentRuntime {
             return pair.stream
         }
 
-        guard let executableURL = locator.locate() else {
+        let locator = locator
+        guard let executableURL = await preflight.executable(
+            using: { locator.locate() }
+        ) else {
             pair.continuation.yield(
                 .entry(
                     .init(

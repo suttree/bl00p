@@ -20,6 +20,9 @@ final class AppModel: ObservableObject {
     private var connectedProfileIDs: Set<UUID> = []
     private var inFlightUserEntryIDs: [UUID: UUID] = [:]
     private var notificationsArePrepared = false
+    private var persistenceRevision: UInt64 = 0
+    private var launchedProfileIDs: Set<UUID> = []
+    private var workflowStageStartedAt: [UUID: ContinuousClock.Instant] = [:]
 
     init(
         runtime: any AgentRuntime = AgentRuntimeRouter(),
@@ -99,6 +102,11 @@ final class AppModel: ObservableObject {
             managerWorkflows = [:]
             selectedBotID = BotProfile.defaults.first?.id
         }
+        let restoredAt = ContinuousClock.now
+        for (managerID, workflow) in managerWorkflows
+            where workflow.stage != .completed {
+            workflowStageStartedAt[managerID] = restoredAt
+        }
     }
 
     var selectedProfile: BotProfile? {
@@ -114,6 +122,14 @@ final class AppModel: ObservableObject {
         }
         notifications?.requestAuthorization()
         syncDockBadge()
+    }
+
+    func flushPersistence() async {
+        persistenceRevision &+= 1
+        await store.flush(
+            persistedState(),
+            revision: persistenceRevision
+        )
     }
 
     func session(for profileID: UUID) -> AgentSessionState {
@@ -272,9 +288,17 @@ final class AppModel: ObservableObject {
             guard let preparedProfile = await prepareRuntimeProfile(profile) else {
                 return
             }
+            let launchStartedAt = ContinuousClock.now
+            let isColdStart = launchedProfileIDs.insert(profileID).inserted
             let stream = await runtime.start(
                 profile: preparedProfile,
                 resumeThreadID: previousThreadID
+            )
+            PerformanceMetrics.record(
+                name: .runtimeLaunch,
+                duration: launchStartedAt.duration(to: .now),
+                profile: preparedProfile,
+                coldStart: isColdStart
             )
             consume(stream, for: profileID, generation: generation)
         }
@@ -337,7 +361,7 @@ final class AppModel: ObservableObject {
                 .init(
                     kind: .system,
                     text: "Managed workflow started",
-                    detail: "Planning → Your approval → Building → Review → Fixes → Re-check → Documentation & draft PR"
+                    detail: "Planning → Your approval → Building → Review → Conditional fixes & re-check → Documentation & draft PR"
                 ),
                 to: profileID
             )
@@ -402,6 +426,7 @@ final class AppModel: ObservableObject {
         }
         sessions[profileID] = updatedSession
         save()
+        let turnStartedAt = ContinuousClock.now
 
         Task { [weak self] in
             guard let self else { return }
@@ -414,9 +439,17 @@ final class AppModel: ObservableObject {
 
             if shouldLaunch {
                 await runtime.stop(profile: runtimeProfile(for: profile))
+                let launchStartedAt = ContinuousClock.now
+                let isColdStart = launchedProfileIDs.insert(profileID).inserted
                 let launchStream = await runtime.start(
                     profile: preparedProfile,
                     resumeThreadID: previousThreadID
+                )
+                PerformanceMetrics.record(
+                    name: .runtimeLaunch,
+                    duration: launchStartedAt.duration(to: .now),
+                    profile: preparedProfile,
+                    coldStart: isColdStart
                 )
                 var reachedReady = false
                 for await event in launchStream {
@@ -458,9 +491,30 @@ final class AppModel: ObservableObject {
                 attachments: attachments,
                 profile: preparedProfile
             )
+            var recordedFirstOutput = false
             for await event in responseStream {
                 guard runGenerations[profileID] == generation else { return }
+                if !recordedFirstOutput {
+                    switch event {
+                    case .entry, .upsertEntry:
+                        recordedFirstOutput = true
+                        PerformanceMetrics.record(
+                            name: .timeToFirstOutput,
+                            duration: turnStartedAt.duration(to: .now),
+                            profile: preparedProfile
+                        )
+                    default:
+                        break
+                    }
+                }
                 apply(event, to: profileID)
+                if case .status(.completed) = event {
+                    PerformanceMetrics.record(
+                        name: .turnCompletion,
+                        duration: turnStartedAt.duration(to: .now),
+                        profile: preparedProfile
+                    )
+                }
             }
         }
     }
@@ -519,7 +573,7 @@ final class AppModel: ObservableObject {
             workflow.pauseReason = nil
             sessions[managerID] = state
             managerWorkflows[managerID] = workflow
-            save()
+            save(immediately: true)
 
             let plan = workflow.implementationPlan
                 ?? latestAssistantText(for: managerID)
@@ -537,7 +591,7 @@ final class AppModel: ObservableObject {
                 "Plan declined. Send feedback to the Manager to request a revised plan."
             sessions[managerID] = state
             managerWorkflows[managerID] = workflow
-            save()
+            save(immediately: true)
         }
     }
 
@@ -563,9 +617,15 @@ final class AppModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
+                let startedAt = ContinuousClock.now
                 let package = try await worktrees.makeHandoff(
                     from: source,
                     session: sourceSession
+                )
+                PerformanceMetrics.record(
+                    name: .handoffPreparation,
+                    duration: startedAt.duration(to: .now),
+                    profile: source
                 )
                 await runtime.stop(profile: runtimeProfile(for: target))
                 connectedProfileIDs.remove(targetProfileID)
@@ -645,11 +705,17 @@ final class AppModel: ObservableObject {
         }
 
         do {
+            let startedAt = ContinuousClock.now
             let ownership = try await worktrees.prepareWorktree(
                 for: profile,
                 startingPoint: handoff?.branch,
                 handoffID: handoff?.id
                     ?? sessions[profile.id]?.worktreeSeedID
+            )
+            PerformanceMetrics.record(
+                name: .worktreePreparation,
+                duration: startedAt.duration(to: .now),
+                profile: profile
             )
             var updated = profile
             updated.workingDirectory = ownership.repositoryPath
@@ -770,7 +836,8 @@ final class AppModel: ObservableObject {
                 ? "Work from the attached context."
                 : request
         )
-        save()
+        workflowStageStartedAt[manager.id] = .now
+        save(immediately: true)
         return true
     }
 
@@ -835,7 +902,7 @@ final class AppModel: ObservableObject {
         workflow.pauseReason = reason
         workflow.updatedAt = .now
         managerWorkflows[managerID] = workflow
-        save()
+        save(immediately: true)
         if shouldAnnounce {
             append(
                 .init(
@@ -855,20 +922,36 @@ final class AppModel: ObservableObject {
         workflow.pauseReason = nil
         workflow.updatedAt = .now
         managerWorkflows[managerID] = workflow
-        save()
+        save(immediately: true)
     }
 
     private func transitionWorkflow(
         _ managerID: UUID,
-        to stage: ManagerWorkflowStage
+        to stage: ManagerWorkflowStage,
+        persist: Bool = true
     ) -> ManagerWorkflow? {
         guard var workflow = managerWorkflows[managerID] else { return nil }
+        let now = ContinuousClock.now
+        if let startedAt = workflowStageStartedAt[managerID] {
+            let profile = expectedProfileID(for: workflow).flatMap { profileID in
+                profiles.first(where: { $0.id == profileID })
+            }
+            PerformanceMetrics.record(
+                name: .workflowStage,
+                duration: startedAt.duration(to: now),
+                profile: profile,
+                stage: workflow.stage
+            )
+        }
         workflow.stage = stage
         workflow.isPaused = false
         workflow.pauseReason = nil
         workflow.updatedAt = .now
         managerWorkflows[managerID] = workflow
-        save()
+        workflowStageStartedAt[managerID] = now
+        if persist {
+            save(immediately: true)
+        }
         return workflow
     }
 
@@ -902,21 +985,19 @@ final class AppModel: ObservableObject {
             }
 
         case .reviewing:
-            guard let next = transitionWorkflow(managerID, to: .revising),
-                  let builderID = next.team.builderProfileID else { return }
-            dispatchWorkflowMessage(
-                from: profileID,
-                to: builderID,
-                title: "Review findings",
-                visibleText: summary,
-                runtimeMessage: """
-                The reviewer completed the first pass.
-
-                \(summary)
-
-                Address every actionable finding in your existing worktree. If the review is clean, verify that explicitly. Run the relevant tests, commit any fixes locally, and finish with a concise summary. Do not push or open a pull request.
-                """
-            )
+            if ReviewDisposition.parse(from: summary) == .clean {
+                beginPublishing(
+                    managerID,
+                    reviewSummary: summary,
+                    reviewerID: profileID
+                )
+            } else {
+                dispatchRevision(
+                    managerID,
+                    reviewSummary: summary,
+                    reviewerID: profileID
+                )
+            }
 
         case .revising:
             guard let next = transitionWorkflow(managerID, to: .verifying),
@@ -933,14 +1014,17 @@ final class AppModel: ObservableObject {
             }
 
         case .verifying:
-            guard let next = transitionWorkflow(managerID, to: .publishing),
-                  let publisherID = next.team.publisherProfileID else { return }
-            Task { [weak self] in
-                await self?.dispatchPublishing(
-                    workflow: next,
+            if ReviewDisposition.parse(from: summary) == .clean {
+                beginPublishing(
+                    managerID,
                     reviewSummary: summary,
-                    reviewerID: profileID,
-                    to: publisherID
+                    reviewerID: profileID
+                )
+            } else {
+                dispatchRevision(
+                    managerID,
+                    reviewSummary: summary,
+                    reviewerID: profileID
                 )
             }
 
@@ -960,54 +1044,126 @@ final class AppModel: ObservableObject {
                 )
                 return
             }
-            guard var next = transitionWorkflow(managerID, to: .reporting) else {
-                return
-            }
-            next.pullRequestURL = draftURL
-            next.updatedAt = .now
-            managerWorkflows[managerID] = next
-            save()
-            dispatchWorkflowMessage(
-                from: profileID,
-                to: managerID,
-                title: "Delivery prepared",
-                visibleText: summary,
-                runtimeMessage: """
-                The documenter and PR writer completed the delivery pass.
-
-                \(summary)
-
-                Notify the user that the workflow is complete. Include the clickable draft pull-request URL, the branch, verification performed, and any remaining caveats. Do not modify the repository.
-                """
+            completeWorkflow(
+                managerID,
+                publisherSummary: summary,
+                draftURL: draftURL
             )
 
         case .reporting:
-            guard var completed = transitionWorkflow(
+            guard let draftURL =
+                pullRequestURL(in: summary) ?? workflow.pullRequestURL else {
+                pauseWorkflow(
+                    managerID,
+                    reason: "The restored workflow is missing its draft PR URL."
+                )
+                return
+            }
+            completeWorkflow(
                 managerID,
-                to: .completed
-            ) else { return }
-            completed.pullRequestURL =
-                pullRequestURL(in: summary) ?? completed.pullRequestURL
-            completed.updatedAt = .now
-            managerWorkflows[managerID] = completed
-            save()
-            append(
-                .init(
-                    kind: .system,
-                    text: "Managed workflow complete",
-                    detail: [
-                        completed.branch.map { "Branch: \($0)" },
-                        completed.pullRequestURL.map { "Draft PR: \($0)" }
-                    ]
-                    .compactMap { $0 }
-                    .joined(separator: "\n")
-                ),
-                to: managerID
+                publisherSummary: workflow.publisherSummary ?? summary,
+                draftURL: draftURL
             )
 
         case .completed:
             break
         }
+    }
+
+    private func dispatchRevision(
+        _ managerID: UUID,
+        reviewSummary: String,
+        reviewerID: UUID
+    ) {
+        guard let next = transitionWorkflow(managerID, to: .revising),
+              let builderID = next.team.builderProfileID else { return }
+        dispatchWorkflowMessage(
+            from: reviewerID,
+            to: builderID,
+            title: "Review findings",
+            visibleText: reviewSummary,
+            runtimeMessage: """
+            The reviewer requested changes, or did not return a valid structured disposition. Treat this conservatively as changes requested.
+
+            \(reviewSummary)
+
+            Address every actionable finding in your existing worktree. If the disposition was missing or malformed, inspect the review carefully and verify the implementation again. Run the relevant tests, commit any fixes locally, and finish with a concise summary. Do not push or open a pull request.
+            """
+        )
+    }
+
+    private func beginPublishing(
+        _ managerID: UUID,
+        reviewSummary: String,
+        reviewerID: UUID
+    ) {
+        guard var next = transitionWorkflow(
+            managerID,
+            to: .publishing,
+            persist: false
+        ),
+              let publisherID = next.team.publisherProfileID else { return }
+        next.verificationSummary = reviewSummary
+        next.updatedAt = .now
+        managerWorkflows[managerID] = next
+        save(immediately: true)
+        Task { [weak self] in
+            await self?.dispatchPublishing(
+                workflow: next,
+                reviewSummary: reviewSummary,
+                reviewerID: reviewerID,
+                to: publisherID
+            )
+        }
+    }
+
+    private func completeWorkflow(
+        _ managerID: UUID,
+        publisherSummary: String,
+        draftURL: String
+    ) {
+        guard var completed = transitionWorkflow(
+            managerID,
+            to: .completed,
+            persist: false
+        ) else { return }
+        completed.pullRequestURL = draftURL
+        completed.publisherSummary = publisherSummary
+        completed.updatedAt = .now
+        managerWorkflows[managerID] = completed
+
+        let testEvidence = completed.latestHandoff.map {
+            "Verification: \($0.testStatus.label) — \($0.testSummary)"
+        }
+        let completionEntry = TimelineEntry(
+            kind: .system,
+            text: "Managed workflow complete",
+            detail: [
+                completed.branch.map { "Branch: \($0)" },
+                testEvidence,
+                completed.verificationSummary.map {
+                    "Reviewer: \($0)"
+                },
+                "Publisher: \(publisherSummary)",
+                "Draft PR: \(draftURL)"
+            ]
+            .compactMap { $0 }
+            .joined(separator: "\n")
+        )
+        var managerSession = sessions[managerID] ?? AgentSessionState()
+        managerSession.entries.append(completionEntry)
+        sessions[managerID] = managerSession
+        save(immediately: true)
+        workflowStageStartedAt[managerID] = nil
+        let elapsedMilliseconds = Int64(
+            Date.now.timeIntervalSince(completed.startedAt) * 1_000
+        )
+        PerformanceMetrics.record(
+            name: .workflowTotal,
+            duration: .milliseconds(max(0, elapsedMilliseconds)),
+            profile: profiles.first(where: { $0.id == managerID }),
+            stage: .completed
+        )
     }
 
     private func requestWorkflowPlanApproval(
@@ -1044,7 +1200,7 @@ final class AppModel: ObservableObject {
 
         sessions[managerID] = state
         managerWorkflows[managerID] = workflow
-        save()
+        save(immediately: true)
 
         if notificationsArePrepared,
            let notice = AgentAttentionNotice.transition(
@@ -1107,9 +1263,16 @@ final class AppModel: ObservableObject {
             return
         }
         do {
+            let startedAt = ContinuousClock.now
             var package = try await worktrees.makeHandoff(
                 from: builder,
                 session: sessions[builderID] ?? AgentSessionState()
+            )
+            PerformanceMetrics.record(
+                name: .handoffPreparation,
+                duration: startedAt.duration(to: .now),
+                profile: builder,
+                stage: workflow.stage
             )
             package.taskContext = workflow.request
             let lacksInitialCommit =
@@ -1264,7 +1427,7 @@ final class AppModel: ObservableObject {
             )
         }
         sessions[profileID] = state
-        save()
+        save(immediately: true)
         return true
     }
 
@@ -1359,10 +1522,20 @@ final class AppModel: ObservableObject {
 
     private static let initialReviewInstruction = """
     You are the Reviewer in a managed bl00p workflow. Review the committed implementation at the attached branch and HEAD. Inspect correctness, regressions, test coverage, security, and unnecessary complexity. Do not edit code. Return a concise list of actionable findings ranked by severity, or state clearly that the review is clean.
+
+    End the final response with exactly one machine-readable line:
+    BL00P_REVIEW_DISPOSITION: clean
+    or:
+    BL00P_REVIEW_DISPOSITION: changesRequested
     """
 
     private static let verificationInstruction = """
     Re-check the updated committed implementation at the attached branch and HEAD. Confirm that every earlier finding is resolved and that the reported tests support the change. Do not edit code. Return any remaining actionable findings, or state clearly that the change is ready for documentation and publishing.
+
+    End the final response with exactly one machine-readable line:
+    BL00P_REVIEW_DISPOSITION: clean
+    or:
+    BL00P_REVIEW_DISPOSITION: changesRequested
     """
 
     private func apply(_ event: AgentEvent, to profileID: UUID) {
@@ -1421,7 +1594,21 @@ final class AppModel: ObservableObject {
         }
 
         sessions[profileID] = state
-        save()
+        let requiresImmediatePersistence: Bool
+        switch event {
+        case .status(let status):
+            requiresImmediatePersistence =
+                status == .needsApproval
+                    || status == .needsAnswer
+                    || status == .completed
+                    || status == .failed
+                    || status == .stopped
+        case .approvalResolved:
+            requiresImmediatePersistence = true
+        case .entry, .upsertEntry, .sessionID:
+            requiresImmediatePersistence = false
+        }
+        save(immediately: requiresImmediatePersistence)
         if notificationsArePrepared,
            let notice,
            let profile = profiles.first(where: { $0.id == profileID }),
@@ -1437,23 +1624,34 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func append(_ entry: TimelineEntry, to profileID: UUID) {
+    private func append(
+        _ entry: TimelineEntry,
+        to profileID: UUID,
+        immediately: Bool = false
+    ) {
         var state = sessions[profileID] ?? AgentSessionState()
         state.entries.append(entry)
         sessions[profileID] = state
-        save()
+        save(immediately: immediately)
     }
 
-    private func save() {
-        store.save(
-            PersistedAppState(
-                profiles: profiles,
-                sessions: sessions,
-                selectedBotID: selectedBotID,
-                managerWorkflows: managerWorkflows
-            )
+    private func save(immediately: Bool = false) {
+        persistenceRevision &+= 1
+        store.enqueue(
+            persistedState(),
+            revision: persistenceRevision,
+            immediately: immediately
         )
         syncDockBadge()
+    }
+
+    private func persistedState() -> PersistedAppState {
+        PersistedAppState(
+            profiles: profiles,
+            sessions: sessions,
+            selectedBotID: selectedBotID,
+            managerWorkflows: managerWorkflows
+        )
     }
 
     private func syncDockBadge() {
@@ -1519,22 +1717,34 @@ final class AppModel: ObservableObject {
     }
 }
 
-struct AppStateStore: Sendable {
+final class AppStateStore: @unchecked Sendable {
     private let fileURL: URL?
+    private let persistence: AppStatePersistenceQueue
 
-    init(fileURL: URL? = nil) {
+    init(
+        fileURL: URL? = nil,
+        writer: (any PersistedStateWriting)? = nil,
+        scheduler: any PersistenceScheduling = ContinuousPersistenceScheduler(),
+        coalescingDelay: Duration = .milliseconds(150)
+    ) {
+        let resolvedURL: URL?
         if let fileURL {
-            self.fileURL = fileURL
-            return
+            resolvedURL = fileURL
+        } else {
+            let base = FileManager.default.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first
+            resolvedURL = base?
+                .appendingPathComponent("bl00p", isDirectory: true)
+                .appendingPathComponent("state.json", isDirectory: false)
         }
-
-        let base = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first
-        self.fileURL = base?
-            .appendingPathComponent("bl00p", isDirectory: true)
-            .appendingPathComponent("state.json", isDirectory: false)
+        self.fileURL = resolvedURL
+        persistence = AppStatePersistenceQueue(
+            writer: writer ?? FilePersistedStateWriter(fileURL: resolvedURL),
+            scheduler: scheduler,
+            coalescingDelay: coalescingDelay
+        )
     }
 
     func load() -> PersistedAppState? {
@@ -1545,7 +1755,7 @@ struct AppStateStore: Sendable {
 
     func save(_ state: PersistedAppState) {
         guard let fileURL,
-              let data = try? JSONEncoder.pretty.encode(state) else { return }
+              let data = try? JSONEncoder.compactState.encode(state) else { return }
 
         do {
             try FileManager.default.createDirectory(
@@ -1557,14 +1767,31 @@ struct AppStateStore: Sendable {
             // Persistence failure should not interrupt an active coding session.
         }
     }
-}
 
-private extension JSONEncoder {
-    static var pretty: JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        return encoder
+    func enqueue(
+        _ state: PersistedAppState,
+        revision: UInt64,
+        immediately: Bool
+    ) {
+        let persistence = persistence
+        Task {
+            if immediately {
+                await persistence.flush(state, revision: revision)
+            } else {
+                await persistence.enqueue(state, revision: revision)
+            }
+        }
+    }
+
+    func flush(
+        _ state: PersistedAppState,
+        revision: UInt64
+    ) async {
+        await persistence.flush(state, revision: revision)
+    }
+
+    func flushPending() async {
+        await persistence.flushPending()
     }
 }
 
