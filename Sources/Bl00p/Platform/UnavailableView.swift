@@ -1,3 +1,5 @@
+import Foundation
+
 #if os(macOS)
 import SwiftUI
 #else

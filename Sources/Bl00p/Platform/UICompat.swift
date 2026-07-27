@@ -27,6 +27,19 @@ extension View {
     /// `Form` has one rendering on the GTK4 backend, so there is no grouped
     /// vs. plain style to switch between.
     func formStyle(_ style: Bl00pFormStyle) -> some View { self }
+
+    /// SwiftUI uses this to extend a view's tap target beyond its rendered
+    /// content. GTK4 widgets already treat their full allocated bounds as
+    /// hit-testable, so bl00p's one call site (widening a disclosure row's
+    /// tap target) needs no equivalent here.
+    func contentShape<S: Shape>(_ shape: S) -> some View { self }
+
+    /// SwiftUI uses this to let taps pass through a purely decorative
+    /// overlay to the view beneath it. Both of bl00p's call sites are small,
+    /// non-interactive decorations (a placeholder-text hint, a drop-target
+    /// border) layered over already-interactive controls, so the absence is
+    /// a minor click-target overlap rather than a blocked interaction.
+    func allowsHitTesting(_ enabled: Bool) -> some View { self }
 }
 
 /// Stand-in for SwiftUI's `FormStyle` — only the one case bl00p passes.

@@ -1,13 +1,13 @@
 {
-  "originHash" : "20ace6c4261b6edb8accecec70a4ce748a7c79d479ccfd0b2958e94473656ae2",
+  "originHash" : "6782257ca1eedb60207e09a1b54f9fd3e1095bbd4811cf3f81a5aeff9c6a3141",
   "pins" : [
     {
-      "identity" : "sparkle",
+      "identity" : "swiftopenui",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/sparkle-project/Sparkle",
+      "location" : "https://github.com/FesterCluck/SwiftOpenUI",
       "state" : {
-        "revision" : "b6496a74a087257ef5e6da1c5b29a447a60f5bd7",
-        "version" : "2.9.4"
+        "branch" : "fix/gtk4-application-flags-linux-import",
+        "revision" : "7c7434c74557af62da05c9a34e947ce717e21bb0"
       }
     }
   ],

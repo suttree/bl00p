@@ -15,7 +15,7 @@ import SwiftOpenUI
 /// the desktop theme therefore requires relaunching bl00p.
 enum Bl00pAppearance {
     /// The appearance bl00p paints with. Immutable after launch on Linux.
-    static let current: ColorScheme = detect()
+    nonisolated(unsafe) static let current: ColorScheme = detect()
 
     private static func detect() -> ColorScheme {
         #if os(macOS)

@@ -10,7 +10,9 @@ import AppKit
 /// the desktop's own chooser. `zenity` (GTK) is tried first to match the GTK4
 /// window, then `kdialog` for Plasma sessions.
 enum DirectoryChooser {
+    #if os(macOS)
     @MainActor
+    #endif
     static func chooseDirectory(
         title: String,
         message: String

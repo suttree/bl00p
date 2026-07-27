@@ -58,7 +58,17 @@ struct SessionCloseAssessment: Equatable, Sendable {
     }
 }
 
+// SwiftOpenUI's `View`/`App` protocols are not @MainActor-isolated the way
+// real SwiftUI's are (its own ObservableObject storage is internally
+// thread-safe via NSLock instead), so requiring every Linux view closure
+// that touches AppModel to also prove @MainActor isolation would mean
+// annotating nearly every view struct in the app. The Linux build (a
+// single-threaded GTK4 event loop) keeps AppModel's synchronization
+// characteristics unisolated instead; macOS keeps the compile-time guarantee
+// it has always had.
+#if os(macOS)
 @MainActor
+#endif
 final class AppModel: ObservableObject {
     @Published var profiles: [BotProfile]
     @Published var sessions: [UUID: AgentSessionState]

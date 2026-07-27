@@ -58,9 +58,16 @@ let package = Package(
         .executable(name: "bl00p", targets: ["Bl00p"])
     ],
     dependencies: [
+        // Points at a fork branch carrying an unmerged fix for a Linux-only
+        // GTK4Backend build failure: G_APPLICATION_DEFAULT_FLAGS /
+        // G_APPLICATION_FLAGS_NONE aren't imported from GApplicationFlags by
+        // Swift's ClangImporter on Linux. See
+        // https://github.com/FesterCluck/SwiftOpenUI/tree/fix/gtk4-application-flags-linux-import
+        // Revert to the upstream URL once codelynx/SwiftOpenUI merges an
+        // equivalent fix.
         .package(
-            url: "https://github.com/codelynx/SwiftOpenUI",
-            branch: "develop"
+            url: "https://github.com/FesterCluck/SwiftOpenUI",
+            branch: "fix/gtk4-application-flags-linux-import"
         )
     ],
     targets: [
@@ -73,12 +80,23 @@ let package = Package(
             path: "Sources/Bl00p",
             // The macOS entry point carries @main, which conflicts with the
             // top-level code in main.swift.
-            exclude: ["Platform/MacEntry.swift"]
+            exclude: ["Platform/MacEntry.swift"],
+            // SwiftOpenUI itself declares swift-tools-version 5.10 (Swift 5
+            // language mode) and its `App`/`View` protocols are not
+            // @MainActor-isolated the way real SwiftUI's are, so a consumer
+            // in Swift 6 strict-concurrency mode would need @MainActor and
+            // isolated-conformance annotations on every view type that
+            // touches the @MainActor AppModel. Matching SwiftOpenUI's own
+            // language mode here avoids that framework-wide gap; the tools
+            // version stays 6.0 package-wide so SwiftOpenUI itself still
+            // resolves correctly.
+            swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
             name: "Bl00pTests",
             dependencies: ["Bl00p"],
-            path: "Tests/Bl00pTests"
+            path: "Tests/Bl00pTests",
+            swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]
 )

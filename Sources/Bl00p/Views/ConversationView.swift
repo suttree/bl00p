@@ -1,3 +1,5 @@
+import Foundation
+
 #if os(macOS)
 import AppKit
 import SwiftUI
@@ -958,14 +960,16 @@ private struct ComposerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if !attachments.isEmpty {
+                #if os(macOS)
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(attachments) { attachment in
-                            attachmentChip(attachment)
-                        }
-                    }
-                    .padding(.vertical, 2)
+                    attachmentChips
                 }
+                #else
+                // SwiftOpenUI's ScrollView has no showsIndicators toggle.
+                ScrollView(.horizontal) {
+                    attachmentChips
+                }
+                #endif
             }
 
             HStack(alignment: .bottom, spacing: 10) {
@@ -1054,6 +1058,15 @@ private struct ComposerView: View {
     private var hasContent: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !attachments.isEmpty
+    }
+
+    private var attachmentChips: some View {
+        HStack(spacing: 8) {
+            ForEach(attachments) { attachment in
+                attachmentChip(attachment)
+            }
+        }
+        .padding(.vertical, 2)
     }
 
     private var limitedDraft: Binding<String> {
@@ -1230,7 +1243,16 @@ enum TimelineTimestampFormatter {
 enum TranscriptMarkdown {
     struct Block: Identifiable {
         enum Content {
+            #if os(macOS)
             case prose(AttributedString)
+            #else
+            // SwiftOpenUI's Text only renders plain String, and this Linux
+            // toolchain's AttributedString does not expose the Markdown
+            // parsing initializer used below — inline formatting (bold,
+            // links) is not rendered, but the raw markdown source (still
+            // human-readable) is preserved verbatim.
+            case prose(String)
+            #endif
             case code(String)
         }
 
@@ -1238,6 +1260,7 @@ enum TranscriptMarkdown {
         let content: Content
     }
 
+    #if os(macOS)
     static func attributed(_ source: String) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace
@@ -1245,6 +1268,9 @@ enum TranscriptMarkdown {
         return (try? AttributedString(markdown: source, options: options))
             ?? AttributedString(source)
     }
+    #else
+    static func attributed(_ source: String) -> String { source }
+    #endif
 
     static func blocks(_ source: String) -> [Block] {
         let normalized = source

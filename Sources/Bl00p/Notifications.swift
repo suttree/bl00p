@@ -16,7 +16,6 @@ enum AppWindowActivity {
     /// whether its window is frontmost. Reporting `false` means attention
     /// notices are always delivered to the desktop: a redundant notification
     /// is a smaller failure than a silently dropped one.
-    @MainActor
     static var isActive: Bool { false }
     #endif
 }
@@ -83,7 +82,9 @@ enum AgentAttentionNotice: Equatable, Sendable {
     #endif
 }
 
+#if os(macOS)
 @MainActor
+#endif
 protocol AgentNotificationDelivering {
     func requestAuthorization()
     func post(_ notice: AgentAttentionNotice, for profile: BotProfile)

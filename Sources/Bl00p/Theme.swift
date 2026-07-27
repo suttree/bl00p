@@ -1,3 +1,5 @@
+import Foundation
+
 #if os(macOS)
 import SwiftUI
 #else
@@ -39,45 +41,45 @@ enum Bl00pTextStyle {
 }
 
 enum Bl00pTheme {
-    static let hotPink = Color(
+    nonisolated(unsafe) static let hotPink = Color(
         red: 1.00,
         green: 105.0 / 255.0,
         blue: 180.0 / 255.0
     )
-    static let accent = hotPink
-    static let userBubble = hotPink
-    static let userBubbleText = Color.white
-    static let accentText = adaptive(
+    nonisolated(unsafe) static let accent = hotPink
+    nonisolated(unsafe) static let userBubble = hotPink
+    nonisolated(unsafe) static let userBubbleText = Color.white
+    nonisolated(unsafe) static let accentText = adaptive(
         light: Color(red: 0.69, green: 0.00, blue: 0.35),
         dark: Color(red: 1.00, green: 0.48, blue: 0.74)
     )
-    static let mint = adaptive(
+    nonisolated(unsafe) static let mint = adaptive(
         light: Color(red: 0.41, green: 1.00, blue: 0.71),
         dark: Color(red: 0.32, green: 0.88, blue: 0.63)
     )
-    static let avatarInk = Color(red: 0.10, green: 0.08, blue: 0.10)
-    static let approvalBackground = adaptive(
+    nonisolated(unsafe) static let avatarInk = Color(red: 0.10, green: 0.08, blue: 0.10)
+    nonisolated(unsafe) static let approvalBackground = adaptive(
         light: Color(red: 1.00, green: 0.94, blue: 0.97),
         dark: Color(red: 0.20, green: 0.11, blue: 0.16)
     )
-    static let sidebarLightTop = Color(red: 0.99, green: 0.98, blue: 0.99)
-    static let sidebarLightBottom = Color(red: 1.00, green: 0.94, blue: 0.97)
-    static let sidebarDarkTop = Color(red: 0.12, green: 0.11, blue: 0.12)
-    static let sidebarDarkBottom = Color(red: 0.18, green: 0.12, blue: 0.16)
+    nonisolated(unsafe) static let sidebarLightTop = Color(red: 0.99, green: 0.98, blue: 0.99)
+    nonisolated(unsafe) static let sidebarLightBottom = Color(red: 1.00, green: 0.94, blue: 0.97)
+    nonisolated(unsafe) static let sidebarDarkTop = Color(red: 0.12, green: 0.11, blue: 0.12)
+    nonisolated(unsafe) static let sidebarDarkBottom = Color(red: 0.18, green: 0.12, blue: 0.16)
 
     /// Stands in for AppKit's `labelColor`, which has no Linux counterpart.
-    static let ink = adaptive(
+    nonisolated(unsafe) static let ink = adaptive(
         light: Color(red: 0.15, green: 0.15, blue: 0.15),
         dark: Color(red: 0.92, green: 0.92, blue: 0.92)
     )
     /// Stands in for AppKit's `secondaryLabelColor`.
-    static let muted = adaptive(
+    nonisolated(unsafe) static let muted = adaptive(
         light: Color(red: 0.45, green: 0.45, blue: 0.47),
         dark: Color(red: 0.63, green: 0.63, blue: 0.65)
     )
     /// Flat replacement for `.quaternary.opacity(0.45)`; SwiftOpenUI's
     /// hierarchical styles do not support opacity adjustment.
-    static let chipBackground = adaptive(
+    nonisolated(unsafe) static let chipBackground = adaptive(
         light: Color(red: 0.92, green: 0.92, blue: 0.94).opacity(0.45),
         dark: Color(red: 0.30, green: 0.30, blue: 0.32).opacity(0.45)
     )
@@ -102,32 +104,32 @@ enum Bl00pTheme {
 }
 
 extension Color {
-    static let bl00pPink = Bl00pTheme.accent
-    static let bl00pPinkText = Bl00pTheme.accentText
-    static let bl00pUserBubble = Bl00pTheme.userBubble
-    static let bl00pUserBubbleText = Bl00pTheme.userBubbleText
-    static let bl00pMint = Bl00pTheme.mint
-    static let bl00pAvatarInk = Bl00pTheme.avatarInk
-    static let bl00pPinkSoft = Bl00pTheme.approvalBackground
-    static let bl00pInk = Bl00pTheme.ink
-    static let bl00pMuted = Bl00pTheme.muted
+    nonisolated(unsafe) static let bl00pPink = Bl00pTheme.accent
+    nonisolated(unsafe) static let bl00pPinkText = Bl00pTheme.accentText
+    nonisolated(unsafe) static let bl00pUserBubble = Bl00pTheme.userBubble
+    nonisolated(unsafe) static let bl00pUserBubbleText = Bl00pTheme.userBubbleText
+    nonisolated(unsafe) static let bl00pMint = Bl00pTheme.mint
+    nonisolated(unsafe) static let bl00pAvatarInk = Bl00pTheme.avatarInk
+    nonisolated(unsafe) static let bl00pPinkSoft = Bl00pTheme.approvalBackground
+    nonisolated(unsafe) static let bl00pInk = Bl00pTheme.ink
+    nonisolated(unsafe) static let bl00pMuted = Bl00pTheme.muted
 
     #if os(macOS)
     /// Preserves the exact AppKit dynamic system colors on macOS.
-    static let bl00pControlBackground = Color(nsColor: .controlBackgroundColor)
-    static let bl00pWindowBackground = Color(nsColor: .windowBackgroundColor)
-    static let bl00pTextBackground = Color(nsColor: .textBackgroundColor)
+    nonisolated(unsafe) static let bl00pControlBackground = Color(nsColor: .controlBackgroundColor)
+    nonisolated(unsafe) static let bl00pWindowBackground = Color(nsColor: .windowBackgroundColor)
+    nonisolated(unsafe) static let bl00pTextBackground = Color(nsColor: .textBackgroundColor)
     #else
     /// GTK4 has no direct equivalent to AppKit's semantic control colors, so
     /// these approximate them from the same light/dark palette bl00p already
     /// paints its own surfaces with.
-    static let bl00pControlBackground = Bl00pAppearance.current == .dark
+    nonisolated(unsafe) static let bl00pControlBackground = Bl00pAppearance.current == .dark
         ? Color(red: 0.16, green: 0.16, blue: 0.17)
         : Color(red: 0.95, green: 0.95, blue: 0.96)
-    static let bl00pWindowBackground = Bl00pAppearance.current == .dark
+    nonisolated(unsafe) static let bl00pWindowBackground = Bl00pAppearance.current == .dark
         ? Color(red: 0.11, green: 0.11, blue: 0.12)
         : Color.white
-    static let bl00pTextBackground = bl00pWindowBackground
+    nonisolated(unsafe) static let bl00pTextBackground = bl00pWindowBackground
     #endif
 }
 

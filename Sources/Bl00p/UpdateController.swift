@@ -6,6 +6,9 @@ import Sparkle
 import SwiftUI
 #else
 import SwiftOpenUI
+// URLSession/URLRequest live in a separate module on Linux; Foundation alone
+// doesn't re-export them the way Darwin's does.
+import FoundationNetworking
 #endif
 
 #if os(macOS)
@@ -58,7 +61,6 @@ struct CheckForUpdatesView: View {
 /// installation and Sparkle's in-app download-and-relaunch flow does not
 /// apply. This controller only answers "is there a newer release?" and hands
 /// the user off to the release page; `apt` performs the actual upgrade.
-@MainActor
 final class UpdateController: ObservableObject {
     /// Kept in step with `debian/changelog` and `Resources/Info.plist`.
     static let currentVersion = "0.1.0"

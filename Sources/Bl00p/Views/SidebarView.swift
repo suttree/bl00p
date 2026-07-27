@@ -1,3 +1,5 @@
+import Foundation
+
 #if os(macOS)
 import AppKit
 import SwiftUI
@@ -10,6 +12,12 @@ struct SidebarView: View {
     let windowColorScheme: ColorScheme
     @State private var renameTargetID: UUID?
     @State private var renameDraft = ""
+    #if !os(macOS)
+    // macOS surfaces this through the app's Command menu (Platform/MacEntry.swift);
+    // SwiftOpenUI's menu-bar Commands support is untested here, so the Linux
+    // build exposes the same check as a sidebar affordance instead.
+    @StateObject private var updateController = UpdateController()
+    #endif
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,6 +33,10 @@ struct SidebarView: View {
             }
             .buttonStyle(.bordered)
             .padding(14)
+
+            #if !os(macOS)
+            updateFooter
+            #endif
         }
         .background(
             LinearGradient(
@@ -40,6 +52,24 @@ struct SidebarView: View {
             rename: { id, name in model.rename(id, to: name) }
         ))
     }
+
+    #if !os(macOS)
+    private var updateFooter: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            CheckForUpdatesView(controller: updateController)
+                .buttonStyle(.plain)
+                .font(.bl00p(.caption1))
+
+            if let statusMessage = updateController.statusMessage {
+                Text(statusMessage)
+                    .font(.bl00p(.caption2))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 12)
+    }
+    #endif
 
     private var brand: some View {
         HStack {

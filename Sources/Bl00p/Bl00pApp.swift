@@ -1,3 +1,5 @@
+import Foundation
+
 #if os(macOS)
 import AppKit
 import SwiftUI
@@ -47,7 +49,7 @@ struct RootView: View {
         // tracked macOS app activation, which the GTK4 backend does not report.
         splitView
             .font(.bl00p(.body))
-            .sheet(isPresented: $model.isAddingBot) {
+            .sheet(isPresented: isAddingBotBinding) {
                 AddBotSheet { profile in
                     model.add(profile)
                 }
@@ -62,6 +64,17 @@ struct RootView: View {
             }
         #endif
     }
+
+    #if !os(macOS)
+    // SwiftOpenUI's `ObservedObject` has no projectedValue, so `$model` does
+    // not exist; this constructs the one binding this view needs manually.
+    private var isAddingBotBinding: Binding<Bool> {
+        Binding(
+            get: { model.isAddingBot },
+            set: { model.isAddingBot = $0 }
+        )
+    }
+    #endif
 
     private var splitView: some View {
         NavigationSplitView {

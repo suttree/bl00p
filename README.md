@@ -39,10 +39,20 @@ sudo apt install swiftlang libgtk-4-dev
 swift run
 ```
 
-Run tests with `swift test`. `codex` and `claude` are located on `PATH` or in
-their usual per-user install directories (`~/.local/bin`, `~/.npm-global/bin`);
-see `Sources/Bl00p/Claude/ClaudeExecutableLocator.swift` and
+`codex` and `claude` are located on `PATH` or in their usual per-user install
+directories (`~/.local/bin`, `~/.npm-global/bin`); see
+`Sources/Bl00p/Claude/ClaudeExecutableLocator.swift` and
 `Sources/Bl00p/Codex/CodexExecutableLocator.swift`.
+
+**Known issue:** `swift test` currently fails to link on Kali
+(`cannot find -l_Testing_Foundation`). Kali's `swiftlang` package (confirmed
+via `dpkg -S`) ships `_Testing_Foundation`'s module interface but not its
+compiled library, and Swift's cross-import mechanism auto-links it whenever a
+file imports both `Testing` and `Foundation` — unavoidable for
+`Tests/Bl00pTests/ModelTests.swift`. This is a toolchain packaging gap, not a
+bl00p issue; `swift build` is unaffected. Work around it locally by disabling
+the cross-import trigger:
+`sudo mv /usr/libexec/swift/lib/swift/linux/Testing.swiftcrossimport/Foundation.swiftoverlay{,.disabled}`.
 
 ### Build an installable `.deb`
 

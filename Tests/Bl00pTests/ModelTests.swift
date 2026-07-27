@@ -370,6 +370,7 @@ func composerUsesAGenerousExplicitCharacterLimit() {
     )
 }
 
+#if os(macOS)
 @Test
 func assistantMarkdownProducesClickableLinksAndPreservesLayout() throws {
     let rendered = TranscriptMarkdown.attributed(
@@ -386,6 +387,17 @@ func assistantMarkdownProducesClickableLinksAndPreservesLayout() throws {
     #expect(String(rendered.characters).contains("\n\n- Branch:"))
     #expect(!String(rendered.characters).contains("https://github.com"))
 }
+#else
+// SwiftOpenUI's Text only renders plain String, and this toolchain's
+// AttributedString does not expose Markdown parsing, so
+// `TranscriptMarkdown.attributed` is a passthrough on Linux (see
+// Views/ConversationView.swift) — there is no link-run behavior to verify.
+@Test
+func assistantMarkdownPassesSourceThroughUnparsed() {
+    let source = "Draft PR created: [suttree/bl00p#1](https://github.com/suttree/bl00p/pull/1)"
+    #expect(TranscriptMarkdown.attributed(source) == source)
+}
+#endif
 
 @Test
 func fencedMarkdownAndShellBlocksPreserveLinesWithoutLanguageLabels() throws {
@@ -8238,7 +8250,9 @@ private actor FailOnceRuntime: AgentRuntime {
     func stop(profile: BotProfile) async {}
 }
 
+#if os(macOS)
 @MainActor
+#endif
 private final class RecordingNotificationDelivery: AgentNotificationDelivering {
     struct PostedNotice {
         let notice: AgentAttentionNotice
