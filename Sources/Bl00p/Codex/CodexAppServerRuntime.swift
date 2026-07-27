@@ -769,6 +769,9 @@ actor CodexAppServerRuntime: AgentRuntime {
             let cwd = item["cwd"]?.stringValue
             let output = item["aggregatedOutput"]?.stringValue
             let status = item["status"]?.stringValue
+            let failed = status?.localizedCaseInsensitiveContains("fail") == true
+                || status?.localizedCaseInsensitiveContains("error") == true
+                || status?.localizedCaseInsensitiveContains("cancel") == true
             let detail = [cwd, completed ? output?.trimmedForTimeline : status]
                 .compactMap { $0 }
                 .filter { !$0.isEmpty }
@@ -776,7 +779,9 @@ actor CodexAppServerRuntime: AgentRuntime {
             entry = .init(
                 id: timelineID,
                 kind: .command,
-                title: completed ? "Command finished" : "Running command",
+                title: completed
+                    ? (failed ? "Command failed" : "Command finished")
+                    : "Running command",
                 text: command,
                 detail: detail.isEmpty ? nil : detail
             )

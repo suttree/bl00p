@@ -1,5 +1,16 @@
 import Foundation
 
+protocol ClaudeClient: Actor {
+    nonisolated var messages: AsyncStream<JSONValue> { get }
+
+    func connect(arguments: [String], workingDirectory: URL) async throws
+    func send(_ message: JSONValue) throws
+    func finishInput()
+    func respond(to requestID: String, result: JSONValue) throws
+    func respondError(to requestID: String, message: String) throws
+    func stop()
+}
+
 enum ClaudeCLIError: LocalizedError {
     case processLaunch(String)
     case processClosed(String)
@@ -20,7 +31,7 @@ enum ClaudeCLIError: LocalizedError {
     }
 }
 
-actor ClaudeCLIClient {
+actor ClaudeCLIClient: ClaudeClient {
     nonisolated let messages: AsyncStream<JSONValue>
 
     private let executableURL: URL

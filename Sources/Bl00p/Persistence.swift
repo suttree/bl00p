@@ -27,10 +27,19 @@ actor FilePersistedStateWriter: PersistedStateWriting {
 
         do {
             let data = try JSONEncoder.compactState.encode(state)
-            try FileManager.default.createDirectory(
-                at: fileURL.deletingLastPathComponent(),
+            let fileManager = FileManager.default
+            let directory = fileURL.deletingLastPathComponent()
+            let backupURL = directory.appendingPathComponent(
+                "\(fileURL.lastPathComponent).bak"
+            )
+            try fileManager.createDirectory(
+                at: directory,
                 withIntermediateDirectories: true
             )
+            if fileManager.fileExists(atPath: fileURL.path) {
+                let previousData = try Data(contentsOf: fileURL)
+                try previousData.write(to: backupURL, options: .atomic)
+            }
             try data.write(to: fileURL, options: .atomic)
             PerformanceMetrics.record(
                 name: .persistence,

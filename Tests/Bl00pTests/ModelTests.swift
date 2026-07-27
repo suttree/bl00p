@@ -432,6 +432,34 @@ func codexThreadConfigurationHonorsTheApprovalModeToggle() {
 }
 
 @Test
+func claudeReviewerCanSelectApprovalModeButClaudeManagerCannot() {
+    let reviewer = BotProfile(
+        name: "Reviewer",
+        provider: .claude,
+        role: .reviewer,
+        instructions: "Review."
+    )
+    let manager = BotProfile(
+        name: "Manager",
+        provider: .claude,
+        role: .manager,
+        instructions: "Coordinate."
+    )
+
+    #expect(reviewer.canSelectApprovalMode)
+    #expect(!manager.canSelectApprovalMode)
+    for role in AgentRole.allCases {
+        let codex = BotProfile(
+            name: role.displayName,
+            provider: .codex,
+            role: role,
+            instructions: ""
+        )
+        #expect(codex.canSelectApprovalMode)
+    }
+}
+
+@Test
 func codexManagersHaveANonEscalatableReadOnlyBoundary() {
     let manager = BotProfile(
         name: "Manager",
@@ -514,6 +542,7 @@ func botProfileDecodesLegacyJSONMissingApprovalMode() throws {
 @Test
 func persistedStateRoundTrips() throws {
     var profile = BotProfile.defaults[0]
+    profile.approvalMode = .auto
     profile.worktree = GitWorktreeOwnership(
         ownerProfileID: profile.id,
         repositoryPath: "/tmp/project",
@@ -562,6 +591,7 @@ func persistedStateRoundTrips() throws {
     let decoded = try JSONDecoder().decode(PersistedAppState.self, from: data)
 
     #expect(decoded.profiles == [profile])
+    #expect(decoded.profiles.first?.approvalMode == .auto)
     #expect(decoded.sessions[profile.id]?.status == .completed)
     #expect(decoded.sessions[profile.id]?.entries.first?.text == "Done")
     #expect(decoded.profiles.first?.worktree?.branch == handoff.branch)
@@ -679,6 +709,61 @@ func worktreeManagerCreatesIsolatedBranchesAndHandoffSnapshots() async throws {
     #expect(secondHead == package.headRevision)
 }
 
+@Test
+func handoffEvidenceRecognizesWrapperCommandsAndSuccessTitles() {
+    let timestamp = Date()
+    let evidence = HandoffTestEvidence.latest(
+        in: [
+            .init(
+                kind: .command,
+                title: "Process exited 0",
+                text: "./ci/verify",
+                detail: "61 tests passed",
+                timestamp: timestamp
+            )
+        ]
+    )
+
+    #expect(evidence.status == .passed)
+    #expect(evidence.summary.contains("./ci/verify"))
+    #expect(evidence.recordedAt == timestamp)
+
+    let makeEvidence = HandoffTestEvidence.latest(
+        in: [
+            .init(
+                kind: .command,
+                title: "Tool finished",
+                text: "make test",
+                detail: "All checks green"
+            )
+        ]
+    )
+    #expect(makeEvidence.status == .passed)
+}
+
+@Test
+func handoffEvidenceIgnoresGenericToolOutputThatMentionsTests() {
+    let evidence = HandoffTestEvidence.latest(
+        in: [
+            .init(
+                kind: .command,
+                title: "Tool finished",
+                text: "Read",
+                detail: "A changelog entry says 61 tests passed."
+            ),
+            .init(
+                kind: .command,
+                title: "Using Grep",
+                text: "Grep",
+                detail: "0 failures"
+            )
+        ]
+    )
+
+    #expect(evidence.status == .notRun)
+    #expect(evidence.recordedAt == nil)
+}
+
 @MainActor
 @Test
 func handoffPackageIsDeliveredWithTheRecipientsNextMessage() async throws {
@@ -779,7 +864,7 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
         branch: "bl00p/managed-feature",
         baseRevision: "abc123"
     )
-    let package = GitHandoffPackage(
+    let initialPackage = GitHandoffPackage(
         sourceProfileID: builderID,
         sourceName: "Builder",
         repositoryPath: ownership.repositoryPath,
@@ -788,8 +873,22 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
         baseRevision: ownership.baseRevision,
         headRevision: "def456",
         taskContext: "Add optional orchestration",
+        testStatus: .notRun,
+        testSummary: "No test command was recorded.",
+        workingTreeSummary: "Clean"
+    )
+    let revisedPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "789abc",
+        taskContext: "Add optional orchestration",
         testStatus: .passed,
-        testSummary: "`swift test` — passed",
+        testSummary: "`swift test` — 42 tests passed",
+        testEvidenceAt: .distantFuture,
         workingTreeSummary: "Clean"
     )
     let manager = BotProfile(
@@ -832,13 +931,21 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     let store = AppStateStore(
         fileURL: directory.appendingPathComponent("state.json")
     )
+    let olderManagerEntry = TimelineEntry(
+        kind: .assistant,
+        text: "Earlier unrelated Manager guidance."
+    )
+    var initialSessions = Dictionary(
+        uniqueKeysWithValues: [manager, builder, reviewer, publisher]
+            .map { ($0.id, AgentSessionState()) }
+    )
+    initialSessions[managerID] = AgentSessionState(
+        entries: [olderManagerEntry]
+    )
     try store.saveFixture(
         PersistedAppState(
             profiles: [manager, builder, reviewer, publisher],
-            sessions: Dictionary(
-                uniqueKeysWithValues: [manager, builder, reviewer, publisher]
-                    .map { ($0.id, AgentSessionState()) }
-            ),
+            sessions: initialSessions,
             selectedBotID: managerID
         )
     )
@@ -846,7 +953,7 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     let model = AppModel(
         runtime: runtime,
         worktrees: StubWorktreeManager(
-            package: package,
+            packages: [initialPackage, revisedPackage],
             preparedOwnership: ownership
         ),
         store: store
@@ -865,6 +972,25 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
             $0.kind == .approval && $0.approvalState == .pending
         })
     )
+    let planText = "Implement the feature with persistence and tests."
+    let managerEntries = model.session(for: managerID).entries
+    let displayedPlanEntries = managerEntries.filter {
+        $0.text == planText
+    }
+    let runtimePlanEntryID = try #require(
+        await runtime.assistantEntryIDs.first
+    )
+    #expect(displayedPlanEntries.count == 1)
+    #expect(displayedPlanEntries.first?.kind == .approval)
+    #expect(displayedPlanEntries.first?.id == approvalEntry.id)
+    #expect(displayedPlanEntries.first?.contentFormat == .markdown)
+    #expect(approvalEntry.id != runtimePlanEntryID)
+    #expect(managerEntries.last?.id == approvalEntry.id)
+    #expect(managerEntries.contains(where: { $0.id == olderManagerEntry.id }))
+    #expect(
+        managerEntries.first(where: { $0.id == olderManagerEntry.id })?.text
+            == olderManagerEntry.text
+    )
     #expect(awaitingApproval.stage == .planning)
     #expect(awaitingApproval.isPaused)
     #expect(
@@ -873,7 +999,7 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     )
     #expect(
         awaitingApproval.implementationPlan
-            == "Implement the feature with persistence and tests."
+            == planText
     )
     let planningCalls = await runtime.calls
     #expect(planningCalls.map(\.role) == [.manager])
@@ -905,6 +1031,11 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     #expect(workflow.stage == .completed)
     #expect(workflow.branch == ownership.branch)
     #expect(
+        workflow.reviewSummary?.contains(
+            "Review finding: add a regression test."
+        ) == true
+    )
+    #expect(
         workflow.pullRequestURL
             == "https://github.com/suttree/bl00p/pull/99"
     )
@@ -920,10 +1051,16 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
             ]
     )
     #expect(calls[1].message.contains("Manager brief:"))
+    #expect(calls[1].message.contains(planText))
     #expect(calls[2].message.contains("Source branch: \(ownership.branch)"))
+    #expect(calls[2].message.contains("Test state: Not run"))
     #expect(calls[3].message.contains("Review finding"))
     #expect(calls[4].message.contains("Re-check the updated"))
     #expect(calls[5].message.contains("create a draft pull request"))
+    #expect(calls[5].message.contains("Source branch: \(ownership.branch)"))
+    #expect(calls[5].message.contains("Source HEAD: \(revisedPackage.headRevision)"))
+    #expect(calls[5].message.contains("Test state: Passed"))
+    #expect(calls[5].message.contains(revisedPackage.testSummary))
     #expect(workflow.verificationSummary?.contains("Review clean") == true)
     #expect(workflow.publisherSummary?.contains("Documentation committed") == true)
     #expect(await runtime.approvalResolutionCount == 0)
@@ -934,6 +1071,694 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     #expect(
         model.profiles.first(where: { $0.id == publisherID })?
             .workingDirectory == ownership.worktreePath
+    )
+    #expect(
+        model.session(for: publisherID).entries.contains(where: {
+            $0.title == "Workflow handoff from Reviewer"
+                && $0.detail?.contains(revisedPackage.headRevision) == true
+        })
+    )
+}
+
+@MainActor
+@Test
+func invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-invalid-revision-handoff-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/managed-feature",
+        baseRevision: "abc123"
+    )
+    let revisionStartedAt = Date()
+    let initialPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "def456",
+        taskContext: "Ship the feature",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        testEvidenceAt: .distantFuture,
+        workingTreeSummary: "Clean"
+    )
+    let missingCommitRevision = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: initialPackage.headRevision,
+        taskContext: "Ship the feature",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        workingTreeSummary: "Clean"
+    )
+    let dirtyRevision = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "789abc",
+        taskContext: "Ship the feature",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        testEvidenceAt: .distantFuture,
+        workingTreeSummary: " M Sources/Feature.swift"
+    )
+    let failingRevision = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "789abc",
+        taskContext: "Ship the feature",
+        testStatus: .failed,
+        testSummary: "`swift test` — failed",
+        testEvidenceAt: .distantFuture,
+        workingTreeSummary: "Clean"
+    )
+    let untestedRevision = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "789abc",
+        taskContext: "Ship the feature",
+        testStatus: .notRun,
+        testSummary: "No test command was recorded.",
+        workingTreeSummary: "Clean"
+    )
+    let staleTestRevision = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "789abc",
+        taskContext: "Ship the feature",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed before review",
+        testEvidenceAt: revisionStartedAt.addingTimeInterval(-1),
+        workingTreeSummary: "Clean"
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builderID,
+        reviewerProfileID: reviewerID,
+        publisherProfileID: publisherID
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement.",
+        workingDirectory: ownership.repositoryPath,
+        worktree: ownership
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review."
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Publish."
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        team: team,
+        request: "Ship the feature",
+        stage: .revising,
+        branch: ownership.branch,
+        latestHandoff: initialPackage,
+        reviewSummary: """
+        Review finding: add a regression test.
+
+        Review status: changes requested
+        """,
+        revisionStartedAt: revisionStartedAt
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer, publisher],
+            sessions: [
+                managerID: AgentSessionState(),
+                builderID: AgentSessionState(),
+                reviewerID: AgentSessionState(
+                    entries: [
+                        .init(
+                            kind: .assistant,
+                            text: "Review finding: add a regression test."
+                        )
+                    ]
+                ),
+                publisherID: AgentSessionState()
+            ],
+            selectedBotID: builderID,
+            managerWorkflows: [managerID: workflow]
+        )
+    )
+    let runtime = OrchestrationRecordingRuntime()
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            packages: [
+                missingCommitRevision,
+                dirtyRevision,
+                failingRevision,
+                untestedRevision,
+                staleTestRevision
+            ],
+            preparedOwnership: ownership
+        ),
+        store: store
+    )
+
+    model.send("Finish the revision pass", to: builderID)
+    for _ in 0..<100
+        where model.workflow(for: managerID)?.pauseReason
+            != "The Builder revision pass has no new local commit." {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let paused = try #require(model.workflow(for: managerID))
+    #expect(paused.stage == .revising)
+    #expect(paused.isPaused)
+    #expect(
+        paused.pauseReason
+            == "The Builder revision pass has no new local commit."
+    )
+    #expect(paused.latestHandoff?.headRevision == initialPackage.headRevision)
+    #expect(await runtime.calls.map(\.role) == [.builder])
+    #expect(model.session(for: publisherID).entries.isEmpty)
+
+    model.send("Commit the remaining changes", to: builderID)
+    for _ in 0..<100
+        where model.workflow(for: managerID)?.pauseReason
+            != "The Builder handoff still has uncommitted changes." {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let dirty = try #require(model.workflow(for: managerID))
+    #expect(dirty.stage == .revising)
+    #expect(dirty.isPaused)
+    #expect(
+        dirty.pauseReason
+            == "The Builder handoff still has uncommitted changes."
+    )
+    #expect(dirty.latestHandoff?.headRevision == initialPackage.headRevision)
+    #expect(await runtime.calls.map(\.role) == [.builder, .builder])
+    #expect(model.session(for: publisherID).entries.isEmpty)
+
+    model.send("Fix the tests", to: builderID)
+    for _ in 0..<100
+        where model.workflow(for: managerID)?.pauseReason
+            != "The Builder handoff does not report passing tests from the revision pass." {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let failing = try #require(model.workflow(for: managerID))
+    #expect(failing.stage == .revising)
+    #expect(failing.isPaused)
+    #expect(
+        failing.pauseReason
+            == "The Builder handoff does not report passing tests from the revision pass."
+    )
+    #expect(failing.latestHandoff?.headRevision == initialPackage.headRevision)
+    #expect(
+        await runtime.calls.map(\.role)
+            == [.builder, .builder, .builder]
+    )
+    #expect(model.session(for: publisherID).entries.isEmpty)
+
+    model.send("Run the tests after review", to: builderID)
+    for _ in 0..<100 where await runtime.calls.count < 4 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let untested = try #require(model.workflow(for: managerID))
+    #expect(untested.stage == .revising)
+    #expect(untested.isPaused)
+    #expect(
+        untested.pauseReason
+            == "The Builder handoff does not report passing tests from the revision pass."
+    )
+    #expect(
+        untested.latestHandoff?.headRevision
+            == initialPackage.headRevision
+    )
+    #expect(
+        await runtime.calls.map(\.role)
+            == [.builder, .builder, .builder, .builder]
+    )
+    #expect(model.session(for: publisherID).entries.isEmpty)
+
+    model.send("Re-run the tests after review", to: builderID)
+    for _ in 0..<100 where await runtime.calls.count < 5 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let stale = try #require(model.workflow(for: managerID))
+    #expect(stale.stage == .revising)
+    #expect(stale.isPaused)
+    #expect(
+        stale.pauseReason
+            == "The Builder handoff does not report passing tests from the revision pass."
+    )
+    #expect(stale.latestHandoff?.headRevision == initialPackage.headRevision)
+    #expect(
+        await runtime.calls.map(\.role)
+            == [.builder, .builder, .builder, .builder, .builder]
+    )
+    #expect(model.session(for: publisherID).entries.isEmpty)
+}
+
+@MainActor
+@Test
+func cleanReviewPublishesWithoutAnEmptyRevisionCommit() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-clean-review-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/clean-review",
+        baseRevision: "abc123"
+    )
+    let initialPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "def456",
+        taskContext: "Ship the clean change",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        workingTreeSummary: "Clean"
+    )
+    let cleanRevisionPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: initialPackage.headRevision,
+        taskContext: "Ship the clean change",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed after review",
+        testEvidenceAt: .distantFuture,
+        workingTreeSummary: "Clean"
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builderID,
+        reviewerProfileID: reviewerID,
+        publisherProfileID: publisherID
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement.",
+        workingDirectory: ownership.repositoryPath,
+        worktree: ownership
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review."
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Publish."
+    )
+    let reviewSummary = """
+    No actionable findings.
+    BL00P_REVIEW_DISPOSITION: clean
+    """
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        team: team,
+        request: "Ship the clean change",
+        stage: .reviewing,
+        branch: ownership.branch,
+        latestHandoff: initialPackage,
+        reviewSummary: reviewSummary
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer, publisher],
+            sessions: Dictionary(
+                uniqueKeysWithValues: [manager, builder, reviewer, publisher]
+                    .map { ($0.id, AgentSessionState()) }
+            ),
+            selectedBotID: builderID,
+            managerWorkflows: [managerID: workflow]
+        )
+    )
+    let runtime = OrchestrationRecordingRuntime(
+        reviewerResponses: [reviewSummary]
+    )
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            package: cleanRevisionPackage,
+            preparedOwnership: ownership
+        ),
+        store: store
+    )
+
+    model.send("Finish the clean review", to: reviewerID)
+    for _ in 0..<100
+        where model.workflow(for: managerID)?.stage != .completed {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let completed = try #require(model.workflow(for: managerID))
+    #expect(completed.stage == .completed)
+    #expect(
+        completed.latestHandoff?.id == initialPackage.id
+    )
+    #expect(
+        completed.latestHandoff?.headRevision
+            == initialPackage.headRevision
+    )
+    #expect(
+        await runtime.calls.map(\.role)
+            == [.reviewer, .publisher]
+    )
+    let publisherCall = try #require(
+        await runtime.calls.first(where: { $0.role == .publisher })
+    )
+    #expect(publisherCall.message.contains("No actionable findings."))
+    #expect(!publisherCall.message.contains(ReviewDisposition.marker))
+    #expect(
+        publisherCall.message.contains(
+            "Source HEAD: \(initialPackage.headRevision)"
+        )
+    )
+}
+
+@MainActor
+@Test
+func missingPublisherPausesBeforeLeavingRevisionStage() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-missing-publisher-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/missing-publisher",
+        baseRevision: "abc123"
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builderID,
+        reviewerProfileID: reviewerID,
+        publisherProfileID: nil
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement.",
+        workingDirectory: ownership.repositoryPath,
+        worktree: ownership
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review."
+    )
+    let revisionPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "def456",
+        taskContext: "Ship the feature",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        testEvidenceAt: .distantFuture,
+        workingTreeSummary: "Clean"
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        team: team,
+        request: "Ship the feature",
+        stage: .revising,
+        reviewSummary: "Review status: changes requested",
+        revisionStartedAt: .now
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer],
+            sessions: [
+                managerID: AgentSessionState(),
+                builderID: AgentSessionState(),
+                reviewerID: AgentSessionState()
+            ],
+            selectedBotID: builderID,
+            managerWorkflows: [managerID: workflow]
+        )
+    )
+    let runtime = OrchestrationRecordingRuntime(
+        reviewerResponses: [
+            """
+            Review clean.
+            BL00P_REVIEW_DISPOSITION: clean
+            """
+        ]
+    )
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            package: revisionPackage,
+            preparedOwnership: ownership
+        ),
+        store: store
+    )
+
+    model.send("Finish the revision", to: builderID)
+    for _ in 0..<100
+        where model.workflow(for: managerID)?.pauseReason
+            != "The assigned Documenter / PR Writer is no longer available." {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let paused = try #require(model.workflow(for: managerID))
+    #expect(paused.stage == .verifying)
+    #expect(paused.isPaused)
+    #expect(
+        paused.pauseReason
+            == "The assigned Documenter / PR Writer is no longer available."
+    )
+    #expect(await runtime.calls.map(\.role) == [.builder, .reviewer])
+}
+
+@MainActor
+@Test
+func persistedLegacyVerifyingWorkflowStillDecodesAndRecovers() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-legacy-verifying-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    var builder = BotProfile.defaults[0]
+    var reviewer = BotProfile.defaults[1]
+    var publisher = BotProfile.defaults[2]
+    builder.id = UUID()
+    reviewer.id = UUID()
+    publisher.id = UUID()
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builder.id,
+        reviewerProfileID: reviewer.id,
+        publisherProfileID: publisher.id
+    )
+    let manager = BotProfile(
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let package = GitHandoffPackage(
+        sourceProfileID: builder.id,
+        sourceName: builder.name,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/legacy-workflow",
+        baseRevision: "abc123",
+        headRevision: "def456",
+        taskContext: "Resume a saved delivery",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        workingTreeSummary: "Clean"
+    )
+    let legacyWorkflow = ManagerWorkflow(
+        managerProfileID: manager.id,
+        team: team,
+        request: "Resume a saved delivery",
+        stage: .verifying,
+        branch: package.branch,
+        latestHandoff: package
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer, publisher],
+            sessions: [
+                manager.id: AgentSessionState(),
+                builder.id: AgentSessionState(),
+                reviewer.id: AgentSessionState(),
+                publisher.id: AgentSessionState(
+                    status: .completed,
+                    entries: [
+                        .init(kind: .assistant, text: "Earlier publishing work")
+                    ],
+                    sessionID: "stale-publisher-thread"
+                )
+            ],
+            selectedBotID: manager.id,
+            managerWorkflows: [manager.id: legacyWorkflow]
+        )
+    )
+
+    let decoded = try #require(store.load())
+    #expect(decoded.managerWorkflows[manager.id]?.stage == .publishing)
+
+    let runtime = OrchestrationRecordingRuntime()
+    _ = AppModel(runtime: runtime, store: store)
+    let model = AppModel(runtime: runtime, store: store)
+    let restored = try #require(model.workflow(for: manager.id))
+    #expect(restored.stage == .publishing)
+    #expect(
+        restored.stage.progressIndex
+            == ManagerWorkflowStage.publishing.progressIndex
+    )
+    #expect(restored.isPaused)
+    #expect(model.session(for: publisher.id).sessionID == nil)
+    #expect(
+        model.profiles.first(where: { $0.id == publisher.id })?
+            .workingDirectory == package.worktreePath
+    )
+    #expect(
+        model.session(for: publisher.id).entries.filter {
+            $0.kind == .handoff
+                && $0.detail == package.timelineDetail
+        }.count == 1
+    )
+
+    model.send("Resume the saved workflow", to: publisher.id)
+    for _ in 0..<100
+        where model.workflow(for: manager.id)?.stage != .completed {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(model.workflow(for: manager.id)?.stage == .completed)
+    #expect(
+        await runtime.calls.map(\.role)
+            == [.publisher]
+    )
+    #expect(
+        model.session(for: publisher.id).entries.contains(where: {
+            $0.title == "Recovered workflow handoff from \(builder.name)"
+                && $0.detail?.contains(package.headRevision) == true
+        })
     )
 }
 
@@ -1177,7 +2002,16 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
         })
     )
     await model.flushPersistence()
-    let restoredModel = AppModel(runtime: runtime, store: store)
+    let initialPlan = "Implement the feature with persistence and tests."
+    #expect(
+        model.session(for: manager.id).entries.filter {
+            $0.text == initialPlan
+        }.map(\.kind) == [.approval]
+    )
+    let restoredModel = AppModel(
+        runtime: runtime,
+        store: AppStateStore(fileURL: store.fileURL)
+    )
     #expect(restoredModel.session(for: manager.id).status == .needsApproval)
     #expect(
         restoredModel.workflow(for: manager.id)?.planApprovalEntryID
@@ -1207,6 +2041,162 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
     #expect(restoredModel.session(for: manager.id).status == .needsAnswer)
     #expect(await runtime.calls.map(\.role) == [.manager])
     #expect(await runtime.approvalResolutionCount == 0)
+    await restoredModel.flushPersistence()
+
+    let resolvedRestoredModel = AppModel(
+        runtime: runtime,
+        store: AppStateStore(fileURL: store.fileURL)
+    )
+    let restoredDeclinedEntry = try #require(
+        resolvedRestoredModel.session(for: manager.id).entries.first(where: {
+            $0.id == approvalEntry.id
+        })
+    )
+    #expect(restoredDeclinedEntry.approvalState == .declined)
+    #expect(
+        resolvedRestoredModel.session(for: manager.id).entries.filter {
+            $0.text == initialPlan
+        }.map(\.kind) == [.approval]
+    )
+
+    resolvedRestoredModel.send(
+        "Revise the plan to include restoration coverage",
+        to: manager.id
+    )
+    for _ in 0..<100
+        where resolvedRestoredModel.session(for: manager.id).status
+            != .needsApproval {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let revisedPlan =
+        "Revised plan: implement the feature with restoration coverage."
+    let revisedApproval = try #require(
+        resolvedRestoredModel.session(for: manager.id).entries.last(where: {
+            $0.kind == .approval && $0.approvalState == .pending
+        })
+    )
+    let revisedEntries = resolvedRestoredModel.session(for: manager.id).entries
+    #expect(revisedApproval.text == revisedPlan)
+    #expect(revisedEntries.filter { $0.text == revisedPlan }.count == 1)
+    #expect(revisedEntries.last?.id == revisedApproval.id)
+    #expect(
+        revisedEntries.filter { $0.kind == .approval }.map(\.approvalState)
+            == [.declined, .pending]
+    )
+    #expect(
+        revisedEntries.contains(where: {
+            $0.kind == .assistant
+                && ($0.text == initialPlan || $0.text == revisedPlan)
+        }) == false
+    )
+    await resolvedRestoredModel.flushPersistence()
+
+    let revisedRestoredModel = AppModel(
+        runtime: runtime,
+        store: AppStateStore(fileURL: store.fileURL)
+    )
+    #expect(revisedRestoredModel.session(for: manager.id).status == .needsApproval)
+    #expect(
+        revisedRestoredModel.workflow(for: manager.id)?.implementationPlan
+            == revisedPlan
+    )
+    #expect(
+        revisedRestoredModel.session(for: manager.id).entries.first(where: {
+            $0.id == revisedApproval.id
+        })?.approvalState == .pending
+    )
+}
+
+@MainActor
+@Test
+func managerPlanningWithoutAPlanPausesWithoutAdoptingOlderMessages() async throws {
+    for olderEntry in [
+        nil,
+        TimelineEntry(
+            kind: .assistant,
+            text: "Unrelated guidance from before the managed workflow."
+        )
+    ] as [TimelineEntry?] {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "bl00p-manager-empty-plan-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        var builder = BotProfile.defaults[0]
+        var reviewer = BotProfile.defaults[1]
+        var publisher = BotProfile.defaults[2]
+        builder.id = UUID()
+        reviewer.id = UUID()
+        publisher.id = UUID()
+        let manager = BotProfile(
+            name: "Manager",
+            provider: .codex,
+            role: .manager,
+            instructions: "Coordinate.",
+            managerTeam: ManagerTeamConfiguration(
+                builderProfileID: builder.id,
+                reviewerProfileID: reviewer.id,
+                publisherProfileID: publisher.id
+            )
+        )
+        var sessions = Dictionary(
+            uniqueKeysWithValues: [manager, builder, reviewer, publisher]
+                .map { ($0.id, AgentSessionState()) }
+        )
+        if let olderEntry {
+            sessions[manager.id] = AgentSessionState(entries: [olderEntry])
+        }
+        let store = AppStateStore(
+            fileURL: directory.appendingPathComponent("state.json")
+        )
+        store.save(
+            PersistedAppState(
+                profiles: [manager, builder, reviewer, publisher],
+                sessions: sessions,
+                selectedBotID: manager.id
+            )
+        )
+        let runtime = OrchestrationRecordingRuntime(
+            managerPlanningResponses: [""]
+        )
+        let model = AppModel(runtime: runtime, store: store)
+
+        model.send("Plan this change", to: manager.id)
+        for _ in 0..<100
+            where model.workflow(for: manager.id)?.isPaused != true {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let workflow = try #require(model.workflow(for: manager.id))
+        let entries = model.session(for: manager.id).entries
+        #expect(workflow.stage == .planning)
+        #expect(workflow.isPaused)
+        #expect(workflow.implementationPlan == nil)
+        #expect(workflow.planApprovalEntryID == nil)
+        #expect(
+            workflow.pauseReason?
+                .contains("without returning an implementation plan") == true
+        )
+        #expect(entries.contains(where: { $0.kind == .approval }) == false)
+        #expect(entries.last?.kind == .system)
+        #expect(entries.last?.text == "Workflow paused")
+        #expect(
+            entries.last?.detail?
+                .contains("without returning an implementation plan") == true
+        )
+        if let olderEntry {
+            let preservedEntry = try #require(
+                entries.first(where: { $0.id == olderEntry.id })
+            )
+            #expect(preservedEntry.kind == .assistant)
+            #expect(preservedEntry.text == olderEntry.text)
+        } else {
+            #expect(entries.contains(where: { $0.kind == .assistant }) == false)
+        }
+    }
 }
 
 @MainActor
@@ -1718,6 +2708,115 @@ func persistenceQueueMaintainsLastWriteWinsWithASlowWriter() async {
     #expect(await writer.writeCount == 2)
 }
 
+@Test
+func appStateStoreRotatesPreviousStateIntoBackupOnSave() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-tests-\(UUID().uuidString)", isDirectory: true)
+    let fileURL = directory.appendingPathComponent("state.json")
+    let backupURL = directory.appendingPathComponent("state.json.bak")
+    let store = AppStateStore(fileURL: fileURL)
+    let first = BotProfile.defaults[0]
+    let second = BotProfile.defaults[1]
+
+    store.save(
+        PersistedAppState(profiles: [first], sessions: [:], selectedBotID: first.id)
+    )
+    store.save(
+        PersistedAppState(profiles: [second], sessions: [:], selectedBotID: second.id)
+    )
+
+    let backupData = try #require(FileManager.default.contents(atPath: backupURL.path))
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let backupState = try decoder.decode(PersistedAppState.self, from: backupData)
+    #expect(backupState.selectedBotID == first.id)
+
+    let current = try #require(store.load())
+    #expect(current.selectedBotID == second.id)
+
+    try? FileManager.default.removeItem(at: directory)
+}
+
+@Test
+func appStateStoreLoadsBackupWhenPrimaryIsUnreadable() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-tests-\(UUID().uuidString)", isDirectory: true)
+    let fileURL = directory.appendingPathComponent("state.json")
+    let store = AppStateStore(fileURL: fileURL)
+    let first = BotProfile.defaults[0]
+    let second = BotProfile.defaults[1]
+
+    store.save(
+        PersistedAppState(profiles: [first], sessions: [:], selectedBotID: first.id)
+    )
+    store.save(
+        PersistedAppState(profiles: [second], sessions: [:], selectedBotID: second.id)
+    )
+    try Data("not valid json".utf8).write(to: fileURL, options: .atomic)
+
+    let recovered = try #require(store.load())
+
+    #expect(recovered.selectedBotID == first.id)
+    #expect(!FileManager.default.fileExists(atPath: fileURL.path))
+    let quarantined = try FileManager.default.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: nil
+    ).filter { $0.lastPathComponent.hasPrefix("state.corrupt-") }
+    #expect(quarantined.count == 1)
+
+    try? FileManager.default.removeItem(at: directory)
+}
+
+@Test
+func appStateStorePreservesPrimaryWhenBackupRotationFails() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-tests-\(UUID().uuidString)", isDirectory: true)
+    let fileURL = directory.appendingPathComponent("state.json")
+    let backupURL = directory.appendingPathComponent("state.json.bak")
+    let store = AppStateStore(fileURL: fileURL)
+    let first = BotProfile.defaults[0]
+    let second = BotProfile.defaults[1]
+
+    store.save(
+        PersistedAppState(profiles: [first], sessions: [:], selectedBotID: first.id)
+    )
+    try FileManager.default.createDirectory(
+        at: backupURL,
+        withIntermediateDirectories: true
+    )
+
+    store.save(
+        PersistedAppState(profiles: [second], sessions: [:], selectedBotID: second.id)
+    )
+
+    let preserved = try #require(store.load())
+    #expect(preserved.selectedBotID == first.id)
+
+    try? FileManager.default.removeItem(at: directory)
+}
+
+@Test
+func appStateStoreQuarantinesUndecodableStateInsteadOfDiscardingIt() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-tests-\(UUID().uuidString)", isDirectory: true)
+    let fileURL = directory.appendingPathComponent("state.json")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try Data("not valid json".utf8).write(to: fileURL)
+    let store = AppStateStore(fileURL: fileURL)
+
+    let loaded = store.load()
+
+    #expect(loaded == nil)
+    #expect(!FileManager.default.fileExists(atPath: fileURL.path))
+    let quarantined = try FileManager.default.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: nil
+    ).filter { $0.lastPathComponent.hasPrefix("state.corrupt-") }
+    #expect(quarantined.count == 1)
+
+    try? FileManager.default.removeItem(at: directory)
+}
+
 @MainActor
 @Test
 func fiveHundredEventStreamIsNotBlockedBySlowPersistence() async throws {
@@ -1861,6 +2960,53 @@ func claudeRuntimeFailureInvalidatesCachedPreflight() async throws {
     #expect(probe.authenticationProbeCount == 2)
 }
 
+@MainActor
+@Test
+func legacyPlanApprovalEntriesGainMarkdownMetadataOnRestore() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-tests-\(UUID().uuidString)", isDirectory: true)
+    let manager = BotProfile(
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate."
+    )
+    let entry = TimelineEntry(
+        kind: .approval,
+        title: "Approve implementation plan",
+        text: "## Plan\n\n- Implement the fix",
+        approvalState: .pending
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: manager.id,
+        team: ManagerTeamConfiguration(),
+        request: "Implement the fix",
+        implementationPlan: entry.text,
+        planApprovalEntryID: entry.id
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager],
+            sessions: [
+                manager.id: AgentSessionState(
+                    status: .needsApproval,
+                    entries: [entry]
+                )
+            ],
+            selectedBotID: manager.id,
+            managerWorkflows: [manager.id: workflow]
+        )
+    )
+
+    let model = AppModel(runtime: DemoAgentRuntime(), store: store)
+
+    #expect(model.session(for: manager.id).entries.first?.contentFormat == .markdown)
+    try? FileManager.default.removeItem(at: directory)
+}
+
 @Test
 func jsonValuePreservesRPCPayloads() throws {
     let source = """
@@ -1982,7 +3128,7 @@ func claudeReviewerInvocationStaysReadOnly() throws {
     #expect(!invocation.arguments.contains("Edit"))
     #expect(!invocation.arguments.contains("Write"))
     #expect(invocation.arguments.contains("Read"))
-    #expect(invocation.arguments.contains("Bash(git diff:*)"))
+    #expect(!invocation.arguments.contains(where: { $0.hasPrefix("Bash(") }))
 }
 
 @Test
@@ -2169,6 +3315,537 @@ func claudeCLIClientCompletesThePermissionRoundTrip() async throws {
 
     #expect(receivedPermission)
     #expect(receivedResult == "allow")
+}
+
+@Test
+func claudeAskModeIsCapturedWhenTheSessionStarts() async throws {
+    let client = ApprovalStubClaudeClient()
+    let runtime = testClaudeRuntime(client: client)
+    var profile = BotProfile(
+        name: "Claude Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement the change.",
+        workingDirectory: FileManager.default.temporaryDirectory.path,
+        approvalMode: .ask
+    )
+    await launchClaude(runtime, profile: profile)
+
+    profile.approvalMode = .auto
+    let events = await collectClaudeTurn(
+        runtime,
+        profile: profile,
+        approveRequests: true
+    )
+    let entries = timelineEntries(in: events)
+    let statuses = agentStatuses(in: events)
+    let responses = await client.responses
+
+    #expect(entries.contains(where: {
+        $0.kind == .approval && $0.approvalState == .pending
+    }))
+    #expect(statuses.contains(.needsApproval))
+    #expect(statuses.last == .completed)
+    #expect(
+        responses.first?["behavior"]?.stringValue == "allow"
+    )
+}
+
+@Test
+func claudeReviewerAutoModeApprovesInspectionWithoutPausingAndAddsAnAuditEntry() async throws {
+    let client = ApprovalStubClaudeClient()
+    let runtime = testClaudeRuntime(client: client)
+    let profile = BotProfile(
+        name: "Claude Reviewer",
+        provider: .claude,
+        role: .reviewer,
+        instructions: "Review the change.",
+        workingDirectory: FileManager.default.temporaryDirectory.path,
+        approvalMode: .auto
+    )
+    await launchClaude(runtime, profile: profile)
+
+    let events = await collectClaudeTurn(runtime, profile: profile)
+    let entries = timelineEntries(in: events)
+    let statuses = agentStatuses(in: events)
+    let responses = await client.responses
+    let auditEntry = entries.first(where: {
+        $0.title == "Auto-approved Claude action"
+    })
+
+    #expect(!entries.contains(where: { $0.kind == .approval }))
+    #expect(!statuses.contains(.needsApproval))
+    #expect(statuses.last == .completed)
+    #expect(auditEntry?.kind == .system)
+    #expect(auditEntry?.text == "rg -n TODO Sources")
+    #expect(
+        responses.first?["behavior"]?.stringValue == "allow"
+    )
+}
+
+@Test
+func claudeAutoResponseFailuresFailTheTurnVisibly() async throws {
+    let client = ApprovalStubClaudeClient(failResponses: true)
+    let runtime = testClaudeRuntime(client: client)
+    let profile = BotProfile(
+        name: "Claude Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement the change.",
+        workingDirectory: FileManager.default.temporaryDirectory.path,
+        approvalMode: .auto
+    )
+    await launchClaude(runtime, profile: profile)
+
+    let events = await collectClaudeTurn(runtime, profile: profile)
+    let entries = timelineEntries(in: events)
+    let statuses = agentStatuses(in: events)
+    let failureEntry = entries.first(where: {
+        $0.title == "Claude permission response failed"
+    })
+
+    #expect(failureEntry?.text == "Could not auto-approve Claude's action")
+    #expect(
+        failureEntry?.detail?.contains("simulated response failure") == true
+    )
+    #expect(statuses.last == .failed)
+}
+
+@Test
+func claudeAutoModeBlocksDestructiveCommands() async {
+    for command in [
+        "git push --force origin feature/example",
+        "rm -rf .build/cache",
+        "python3 -c 'import os; os.remove(\"Package.swift\")'"
+    ] {
+        let client = ApprovalStubClaudeClient(
+            toolInput: .object([
+                "command": .string(command)
+            ])
+        )
+        let runtime = testClaudeRuntime(client: client)
+        let profile = claudeProfile(role: .builder, approvalMode: .auto)
+        await launchClaude(runtime, profile: profile)
+
+        let events = await collectClaudeTurn(runtime, profile: profile)
+        let entries = timelineEntries(in: events)
+        let responses = await client.responses
+
+        #expect(!entries.contains(where: { $0.kind == .approval }))
+        #expect(
+            entries.contains(where: {
+                $0.title == "Claude action blocked"
+                    && $0.detail?.isEmpty == false
+            })
+        )
+        #expect(responses.first?["behavior"]?.stringValue == "deny")
+    }
+}
+
+@Test
+func claudeAutoModeBlocksFilesOutsideTheWorkspace() async {
+    let client = ApprovalStubClaudeClient(
+        toolName: "Edit",
+        toolInput: .object([
+            "file_path": .string("/etc/hosts")
+        ])
+    )
+    let runtime = testClaudeRuntime(client: client)
+    let profile = claudeProfile(role: .builder, approvalMode: .auto)
+    await launchClaude(runtime, profile: profile)
+
+    let events = await collectClaudeTurn(runtime, profile: profile)
+    let entries = timelineEntries(in: events)
+    let responses = await client.responses
+
+    #expect(
+        entries.contains(where: {
+            $0.title == "Claude action blocked"
+                && $0.detail?.contains("selected workspace") == true
+        })
+    )
+    #expect(responses.first?["behavior"]?.stringValue == "deny")
+}
+
+@Test
+func claudeAutoModeAsksForUnsupportedTools() async {
+    let client = ApprovalStubClaudeClient(
+        toolName: "mcp__github__delete_repository",
+        toolInput: .object([
+            "repository": .string("suttree/bl00p")
+        ])
+    )
+    let runtime = testClaudeRuntime(client: client)
+    let profile = claudeProfile(role: .publisher, approvalMode: .auto)
+    await launchClaude(runtime, profile: profile)
+
+    let events = await collectClaudeTurn(
+        runtime,
+        profile: profile,
+        approveRequests: true
+    )
+    let entries = timelineEntries(in: events)
+    let responses = await client.responses
+
+    #expect(entries.contains(where: { $0.kind == .approval }))
+    #expect(responses.first?["behavior"]?.stringValue == "allow")
+}
+
+@Test
+func claudeReviewerWriteToolsRemainBlockedInEitherApprovalMode() async {
+    for mode in ApprovalMode.allCases {
+        for toolName in ["Edit", "Write", "NotebookEdit"] {
+            let client = ApprovalStubClaudeClient(
+                toolName: toolName,
+                toolInput: .object([
+                    "file_path": .string("Package.swift")
+                ])
+            )
+            let runtime = testClaudeRuntime(client: client)
+            let profile = claudeProfile(
+                role: .reviewer,
+                approvalMode: mode
+            )
+            await launchClaude(runtime, profile: profile)
+
+            let events = await collectClaudeTurn(runtime, profile: profile)
+            let entries = timelineEntries(in: events)
+            let responses = await client.responses
+
+            #expect(!entries.contains(where: { $0.kind == .approval }))
+            #expect(
+                entries.contains(where: {
+                    $0.title == "Claude action blocked"
+                        && $0.detail?.contains("file-edit tools") == true
+                })
+            )
+            #expect(responses.first?["behavior"]?.stringValue == "deny")
+        }
+    }
+}
+
+@Test
+func claudeLiveRoleChangeCannotInheritBuilderAutoApproval() async {
+    let client = ApprovalStubClaudeClient(
+        toolName: "Edit",
+        toolInput: .object([
+            "file_path": .string("Package.swift")
+        ])
+    )
+    let runtime = testClaudeRuntime(client: client)
+    var profile = claudeProfile(role: .builder, approvalMode: .auto)
+    await launchClaude(runtime, profile: profile)
+
+    profile.role = .reviewer
+    let events = await collectClaudeTurn(runtime, profile: profile)
+    let entries = timelineEntries(in: events)
+    let responses = await client.responses
+
+    #expect(!entries.contains(where: { $0.kind == .approval }))
+    #expect(
+        entries.contains(where: {
+            $0.title == "Claude action blocked"
+                && $0.detail?.contains("file-edit tools") == true
+        })
+    )
+    #expect(responses.first?["behavior"]?.stringValue == "deny")
+}
+
+@Test
+func claudeManagersCannotEscalateInEitherApprovalMode() async throws {
+    for mode in [ApprovalMode.ask, .auto] {
+        let client = ApprovalStubClaudeClient(
+            toolName: "Edit",
+            toolInput: .object([
+                "file_path": .string("Package.swift")
+            ])
+        )
+        let runtime = testClaudeRuntime(client: client)
+        let profile = claudeProfile(role: .manager, approvalMode: mode)
+        await launchClaude(runtime, profile: profile)
+
+        let events = await collectClaudeTurn(runtime, profile: profile)
+        let entries = timelineEntries(in: events)
+        let responses = await client.responses
+        let invocation = try ClaudeInvocation(
+            sessionID: UUID().uuidString,
+            resume: false,
+            profile: profile,
+            prompt: "Coordinate this change."
+        )
+
+        #expect(!entries.contains(where: { $0.kind == .approval }))
+        #expect(
+            entries.contains(where: {
+                $0.title == "Claude action blocked"
+                    && $0.detail?.contains("Managers are read-only") == true
+            })
+        )
+        #expect(responses.first?["behavior"]?.stringValue == "deny")
+        #expect(invocation.arguments.contains("--permission-prompt-tool"))
+        #expect(!invocation.arguments.contains("bypassPermissions"))
+        #expect(!invocation.arguments.contains("Edit"))
+        #expect(!invocation.arguments.contains("Write"))
+    }
+}
+
+@Test
+func claudeReviewerCanInspectInAskModeButCannotEdit() throws {
+    let workingDirectory = URL(fileURLWithPath: "/tmp/bl00p-reviewer")
+    let inspection = try #require(
+        ClaudeToolApprovalRequest(request: .object([
+            "subtype": .string("can_use_tool"),
+            "tool_name": .string("Bash"),
+            "input": .object(["command": .string("wc -l")])
+        ]))
+    )
+    let edit = try #require(
+        ClaudeToolApprovalRequest(request: .object([
+            "subtype": .string("can_use_tool"),
+            "tool_name": .string("Edit"),
+            "input": .object(["file_path": .string("README.md")])
+        ]))
+    )
+
+    #expect(
+        ClaudeToolApprovalPolicy.decision(
+            for: inspection,
+            mode: .ask,
+            role: .reviewer,
+            workingDirectory: workingDirectory,
+            stagedAttachmentDirectory: nil
+        ) == .ask
+    )
+    #expect(
+        ClaudeToolApprovalPolicy.decision(
+            for: inspection,
+            mode: .auto,
+            role: .reviewer,
+            workingDirectory: workingDirectory,
+            stagedAttachmentDirectory: nil
+        ) == .allow
+    )
+    if case .deny = ClaudeToolApprovalPolicy.decision(
+        for: edit,
+        mode: .ask,
+        role: .reviewer,
+        workingDirectory: workingDirectory,
+        stagedAttachmentDirectory: nil
+    ) {
+        // Expected: Reviewer write tools remain blocked in both modes.
+    } else {
+        Issue.record("Reviewer edit was not denied")
+    }
+}
+
+@Test
+func claudeReviewerBlocksWriteCapableShellCommandsInBothModes() throws {
+    let workingDirectory = URL(fileURLWithPath: "/tmp/bl00p-reviewer")
+    for mode in ApprovalMode.allCases {
+        for command in [
+            "git diff --output=review.txt",
+            "git grep --open-files-in-pager=touch pattern",
+            "cat README.md > review.txt",
+            "unknown-writer README.md",
+            "swift test",
+            "npm run lint"
+        ] {
+            let request = try #require(
+                ClaudeToolApprovalRequest(request: .object([
+                    "subtype": .string("can_use_tool"),
+                    "tool_name": .string("Bash"),
+                    "input": .object(["command": .string(command)])
+                ]))
+            )
+            if case .deny = ClaudeToolApprovalPolicy.decision(
+                for: request,
+                mode: mode,
+                role: .reviewer,
+                workingDirectory: workingDirectory,
+                stagedAttachmentDirectory: nil
+            ) {
+                // Expected: Reviewer shell writes never reach an approval card.
+            } else {
+                Issue.record("\(command) was not denied in \(mode)")
+            }
+        }
+    }
+}
+
+@Test
+func claudeAutoApprovalRejectsExpandedOrFlagEmbeddedPaths() throws {
+    let workingDirectory = URL(
+        fileURLWithPath: "/tmp/bl00p-workspace",
+        isDirectory: true
+    )
+    for command in [
+        "cat $HOME/.ssh/id_rsa",
+        "cat ${HOME}/.ssh/id_rsa",
+        "grep --file=/etc/passwd .",
+        "rg -f/etc/passwd ."
+    ] {
+        let request = try #require(
+            ClaudeToolApprovalRequest(request: .object([
+                "subtype": .string("can_use_tool"),
+                "tool_name": .string("Bash"),
+                "input": .object(["command": .string(command)])
+            ]))
+        )
+        if case .deny = ClaudeToolApprovalPolicy.decision(
+            for: request,
+            mode: .auto,
+            role: .builder,
+            workingDirectory: workingDirectory,
+            stagedAttachmentDirectory: nil
+        ) {
+            // Expected: shell expansion and paths embedded in flags are denied.
+        } else {
+            Issue.record("Auto-approval allowed \(command)")
+        }
+    }
+}
+
+@Test
+func claudeAutoApprovalAsksForUnclassifiedActionsAndMatchesXcodebuildSubcommands() throws {
+    let workingDirectory = URL(
+        fileURLWithPath: "/tmp/bl00p-workspace",
+        isDirectory: true
+    )
+    let unknown = try #require(
+        ClaudeToolApprovalRequest(request: .object([
+            "subtype": .string("can_use_tool"),
+            "tool_name": .string("mcp__example__inspect"),
+            "input": .object([
+                "path": .string("/v1/issues/123"),
+                "resource": .string("repository")
+            ])
+        ]))
+    )
+    let archive = try #require(
+        ClaudeToolApprovalRequest(request: .object([
+            "subtype": .string("can_use_tool"),
+            "tool_name": .string("Bash"),
+            "input": .object(["command": .string("xcodebuild archive")])
+        ]))
+    )
+    let test = try #require(
+        ClaudeToolApprovalRequest(request: .object([
+            "subtype": .string("can_use_tool"),
+            "tool_name": .string("Bash"),
+            "input": .object(["command": .string("xcodebuild test")])
+        ]))
+    )
+
+    #expect(
+        ClaudeToolApprovalPolicy.decision(
+            for: unknown,
+            mode: .auto,
+            role: .publisher,
+            workingDirectory: workingDirectory,
+            stagedAttachmentDirectory: nil
+        ) == .ask
+    )
+    if case .deny = ClaudeToolApprovalPolicy.decision(
+        for: archive,
+        mode: .auto,
+        role: .publisher,
+        workingDirectory: workingDirectory,
+        stagedAttachmentDirectory: nil
+    ) {
+        // Expected: only the first xcodebuild subcommand is classified.
+    } else {
+        Issue.record("xcodebuild archive was auto-approved")
+    }
+    #expect(
+        ClaudeToolApprovalPolicy.decision(
+            for: test,
+            mode: .auto,
+            role: .publisher,
+            workingDirectory: workingDirectory,
+            stagedAttachmentDirectory: nil
+        ) == .allow
+    )
+}
+
+@Test
+func claudePreapprovedCommandsAndRuntimeClassificationStayAligned() throws {
+    let builderTools = ClaudeToolApprovalPolicy.allowedTools(for: .builder)
+    let reviewerTools = ClaudeToolApprovalPolicy.allowedTools(for: .reviewer)
+    #expect(!reviewerTools.contains(where: { $0.hasPrefix("Bash(") }))
+    #expect(builderTools.contains("Bash(env swift --version:*)"))
+    #expect(builderTools.contains("Bash(xcode-select -p:*)"))
+    #expect(builderTools.contains("Bash(pnpm typecheck:*)"))
+    #expect(builderTools.contains("Bash(yarn typecheck:*)"))
+
+    let workingDirectory = URL(fileURLWithPath: "/tmp/bl00p-workspace")
+    for command in [
+        "env swift --version",
+        "xcode-select -p",
+        "pnpm typecheck",
+        "yarn typecheck"
+    ] {
+        let request = try #require(
+            ClaudeToolApprovalRequest(request: .object([
+                "subtype": .string("can_use_tool"),
+                "tool_name": .string("Bash"),
+                "input": .object(["command": .string(command)])
+            ]))
+        )
+        #expect(
+            ClaudeToolApprovalPolicy.decision(
+                for: request,
+                mode: .auto,
+                role: .builder,
+                workingDirectory: workingDirectory,
+                stagedAttachmentDirectory: nil
+            ) == .allow
+        )
+    }
+}
+
+@Test
+func claudeDeduplicatesRepeatedControlRequestIDs() async {
+    let client = ApprovalStubClaudeClient(
+        requestIDs: ["permission-1", "permission-1"]
+    )
+    let runtime = testClaudeRuntime(client: client)
+    let profile = claudeProfile(role: .builder, approvalMode: .auto)
+    await launchClaude(runtime, profile: profile)
+
+    let events = await collectClaudeTurn(runtime, profile: profile)
+    let entries = timelineEntries(in: events)
+    let responses = await client.responses
+
+    #expect(responses.count == 1)
+    #expect(
+        entries.filter { $0.title == "Auto-approved Claude action" }.count == 1
+    )
+}
+
+@Test
+func claudeFreshSessionRecoveryCanReuseAControlRequestID() async {
+    let staleClient = ApprovalStubClaudeClient(resultMode: .missingSession)
+    let freshClient = ApprovalStubClaudeClient()
+    let runtime = testClaudeRuntime(clients: [staleClient, freshClient])
+    let profile = claudeProfile(role: .builder, approvalMode: .auto)
+    await launchClaude(
+        runtime,
+        profile: profile,
+        resumeThreadID: UUID().uuidString
+    )
+
+    let events = await collectClaudeTurn(runtime, profile: profile)
+    let entries = timelineEntries(in: events)
+    let statuses = agentStatuses(in: events)
+    let staleResponseCount = await staleClient.responses.count
+    let freshResponseCount = await freshClient.responses.count
+
+    #expect(staleResponseCount == 1)
+    #expect(freshResponseCount == 1)
+    #expect(
+        entries.contains(where: { $0.text == "Claude session recovered" })
+    )
+    #expect(statuses.last == .completed)
 }
 
 @Test
@@ -2886,6 +4563,128 @@ private final class LockedPreflightProbe: @unchecked Sendable {
     }
 }
 
+private func testClaudeRuntime(
+    client: ApprovalStubClaudeClient
+) -> ClaudeRuntime {
+    testClaudeRuntime(clients: [client])
+}
+
+private func testClaudeRuntime(
+    clients: [ApprovalStubClaudeClient]
+) -> ClaudeRuntime {
+    let queue = ClaudeClientQueue(clients)
+    return ClaudeRuntime(
+        locator: ClaudeExecutableLocator(
+            candidateURLs: [URL(fileURLWithPath: "/usr/bin/true")]
+        ),
+        authenticationStatus: { _ in .loggedIn },
+        clientFactory: { _ in queue.next() }
+    )
+}
+
+private func claudeProfile(
+    role: AgentRole,
+    approvalMode: ApprovalMode
+) -> BotProfile {
+    BotProfile(
+        name: "Claude \(role.displayName)",
+        provider: .claude,
+        role: role,
+        instructions: "Stay within the assigned role.",
+        workingDirectory: FileManager.default.temporaryDirectory.path,
+        approvalMode: approvalMode
+    )
+}
+
+private func launchClaude(
+    _ runtime: ClaudeRuntime,
+    profile: BotProfile,
+    resumeThreadID: String? = nil
+) async {
+    let stream = await runtime.start(
+        profile: profile,
+        resumeThreadID: resumeThreadID
+    )
+    for await _ in stream {}
+}
+
+private func collectClaudeTurn(
+    _ runtime: ClaudeRuntime,
+    profile: BotProfile,
+    approveRequests: Bool = false
+) async -> [AgentEvent] {
+    let stream = await runtime.respond(
+        to: "Publish the branch",
+        attachments: [],
+        profile: profile
+    )
+    var events: [AgentEvent] = []
+
+    for await event in stream {
+        events.append(event)
+        if approveRequests,
+           case .entry(let entry) = event,
+           entry.kind == .approval {
+            let resolution = await runtime.resolveApproval(
+                entryID: entry.id,
+                approved: true,
+                profile: profile
+            )
+            for await resolutionEvent in resolution {
+                events.append(resolutionEvent)
+            }
+        }
+    }
+    return events
+}
+
+private func timelineEntries(in events: [AgentEvent]) -> [TimelineEntry] {
+    events.compactMap { event in
+        switch event {
+        case .entry(let entry), .upsertEntry(let entry):
+            entry
+        default:
+            nil
+        }
+    }
+}
+
+private func agentStatuses(in events: [AgentEvent]) -> [AgentStatus] {
+    events.compactMap { event in
+        guard case .status(let status) = event else { return nil }
+        return status
+    }
+}
+
+private enum ApprovalStubError: LocalizedError {
+    case responseFailed
+
+    var errorDescription: String? {
+        "simulated response failure"
+    }
+}
+
+private enum ApprovalStubResultMode {
+    case success
+    case missingSession
+}
+
+private final class ClaudeClientQueue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var clients: [ApprovalStubClaudeClient]
+
+    init(_ clients: [ApprovalStubClaudeClient]) {
+        self.clients = clients
+    }
+
+    func next() -> any ClaudeClient {
+        lock.withLock {
+            precondition(!clients.isEmpty, "Missing stub Claude client")
+            return clients.removeFirst()
+        }
+    }
+}
+
 private actor FiveHundredEventRuntime: AgentRuntime {
     func start(
         profile: BotProfile,
@@ -2943,6 +4742,97 @@ private extension AppStateStore {
     }
 }
 
+private actor ApprovalStubClaudeClient: ClaudeClient {
+    nonisolated let messages: AsyncStream<JSONValue>
+
+    private let messageContinuation: AsyncStream<JSONValue>.Continuation
+    private let toolName: String
+    private let toolInput: JSONValue
+    private let requestIDs: [String]
+    private let failResponses: Bool
+    private let resultMode: ApprovalStubResultMode
+    private(set) var responses: [JSONValue] = []
+
+    init(
+        toolName: String = "Bash",
+        toolInput: JSONValue = .object([
+            "command": .string("rg -n TODO Sources")
+        ]),
+        requestIDs: [String] = ["permission-1"],
+        failResponses: Bool = false,
+        resultMode: ApprovalStubResultMode = .success
+    ) {
+        let pair = AsyncStream.makeStream(of: JSONValue.self)
+        messages = pair.stream
+        messageContinuation = pair.continuation
+        self.toolName = toolName
+        self.toolInput = toolInput
+        self.requestIDs = requestIDs
+        self.failResponses = failResponses
+        self.resultMode = resultMode
+    }
+
+    func connect(arguments: [String], workingDirectory: URL) async throws {}
+
+    func send(_ message: JSONValue) throws {
+        for requestID in requestIDs {
+            messageContinuation.yield(
+                .object([
+                    "type": .string("control_request"),
+                    "request_id": .string(requestID),
+                    "request": .object([
+                        "subtype": .string("can_use_tool"),
+                        "tool_name": .string(toolName),
+                        "input": toolInput,
+                        "tool_use_id": .string("toolu_1")
+                    ])
+                ])
+            )
+        }
+    }
+
+    func finishInput() {
+        messageContinuation.finish()
+    }
+
+    func respond(to requestID: String, result: JSONValue) throws {
+        guard !failResponses else {
+            throw ApprovalStubError.responseFailed
+        }
+        responses.append(result)
+        switch resultMode {
+        case .success:
+            messageContinuation.yield(
+                .object([
+                    "type": .string("result"),
+                    "is_error": .bool(false),
+                    "result": result["behavior"] ?? .string("completed"),
+                    "permission_denials": .array([])
+                ])
+            )
+        case .missingSession:
+            messageContinuation.yield(
+                .object([
+                    "type": .string("result"),
+                    "is_error": .bool(true),
+                    "errors": .array([
+                        .string("No conversation found with session ID: stale")
+                    ]),
+                    "permission_denials": .array([])
+                ])
+            )
+        }
+    }
+
+    func respondError(to requestID: String, message: String) throws {
+        throw ClaudeCLIError.control(message)
+    }
+
+    func stop() {
+        messageContinuation.finish()
+    }
+}
+
 private func runGit(_ arguments: [String], in directory: URL) throws {
     _ = try gitOutput(arguments, in: directory)
 }
@@ -2976,14 +4866,22 @@ private func gitOutput(_ arguments: [String], in directory: URL) throws -> Strin
 }
 
 private actor StubWorktreeManager: GitWorktreeManaging {
-    let package: GitHandoffPackage
+    var packages: [GitHandoffPackage]
     let preparedOwnership: GitWorktreeOwnership?
 
     init(
         package: GitHandoffPackage,
         preparedOwnership: GitWorktreeOwnership? = nil
     ) {
-        self.package = package
+        packages = [package]
+        self.preparedOwnership = preparedOwnership
+    }
+
+    init(
+        packages: [GitHandoffPackage],
+        preparedOwnership: GitWorktreeOwnership? = nil
+    ) {
+        self.packages = packages
         self.preparedOwnership = preparedOwnership
     }
 
@@ -2999,7 +4897,8 @@ private actor StubWorktreeManager: GitWorktreeManaging {
         from profile: BotProfile,
         session: AgentSessionState
     ) async throws -> GitHandoffPackage {
-        package
+        try #require(!packages.isEmpty)
+        return packages.removeFirst()
     }
 }
 
@@ -3087,6 +4986,13 @@ private func makeManagedWorkflowHarness(
         testSummary: "`swift test` — passed",
         workingTreeSummary: "Clean"
     )
+    var firstRevisionPackage = package
+    firstRevisionPackage.id = UUID()
+    firstRevisionPackage.headRevision = "789abc"
+    firstRevisionPackage.testEvidenceAt = .distantFuture
+    var secondRevisionPackage = firstRevisionPackage
+    secondRevisionPackage.id = UUID()
+    secondRevisionPackage.headRevision = "fedcba"
     let team = ManagerTeamConfiguration(
         builderProfileID: builderID,
         reviewerProfileID: reviewerID,
@@ -3154,7 +5060,11 @@ private func makeManagedWorkflowHarness(
     let model = AppModel(
         runtime: runtime,
         worktrees: StubWorktreeManager(
-            package: package,
+            packages: [
+                package,
+                firstRevisionPackage,
+                secondRevisionPackage
+            ],
             preparedOwnership: ownership
         ),
         store: store
@@ -3203,8 +5113,10 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
 
     private(set) var calls: [Call] = []
     private(set) var approvalResolutionCount = 0
+    private(set) var assistantEntryIDs: [UUID] = []
     private var roleResponseCounts: [AgentRole: Int] = [:]
     private let reviewerResponses: [[String]]
+    private let managerPlanningResponses: [String]
 
     init(
         reviewerResponses: [String] = [
@@ -3216,14 +5128,26 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
             Review clean. Ready to publish.
             BL00P_REVIEW_DISPOSITION: clean
             """
+        ],
+        managerPlanningResponses: [String] = [
+            "Implement the feature with persistence and tests.",
+            "Revised plan: implement the feature with restoration coverage."
         ]
     ) {
         self.reviewerResponses = reviewerResponses
             .map { [$0] }
+        self.managerPlanningResponses = managerPlanningResponses
     }
 
-    init(reviewerResponseBlocks: [[String]]) {
+    init(
+        reviewerResponseBlocks: [[String]],
+        managerPlanningResponses: [String] = [
+            "Implement the feature with persistence and tests.",
+            "Revised plan: implement the feature with restoration coverage."
+        ]
+    ) {
         self.reviewerResponses = reviewerResponseBlocks
+        self.managerPlanningResponses = managerPlanningResponses
     }
 
     func start(
@@ -3254,11 +5178,17 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
         let responses: [String]
         switch profile.role {
         case .manager:
-            responses = [
-                count == 0
-                    ? "Implement the feature with persistence and tests."
-                    : "Complete: [draft PR](https://github.com/suttree/bl00p/pull/99)"
-            ]
+            if message.contains("planning phase") {
+                responses = [
+                    managerPlanningResponses.indices.contains(count)
+                        ? managerPlanningResponses[count]
+                        : managerPlanningResponses.last ?? ""
+                ]
+            } else {
+                responses = [
+                    "Complete: [draft PR](https://github.com/suttree/bl00p/pull/99)"
+                ]
+            }
         case .builder:
             responses = [
                 count == 0
@@ -3275,14 +5205,26 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
             ]
         }
 
+        let assistantEntries = responses
+            .filter { !$0.isEmpty }
+            .map { TimelineEntry(kind: .assistant, text: $0) }
+        assistantEntryIDs.append(contentsOf: assistantEntries.map(\.id))
         return AsyncStream { continuation in
             continuation.yield(.status(.working))
-            for response in responses {
-                continuation.yield(
-                    .entry(.init(kind: .assistant, text: response))
-                )
+            for assistantEntry in assistantEntries {
+                continuation.yield(.entry(assistantEntry))
             }
             continuation.yield(.status(.completed))
+            if profile.role == .reviewer {
+                continuation.yield(
+                    .entry(
+                        .init(
+                            kind: .assistant,
+                            text: "Unrelated reviewer follow-up"
+                        )
+                    )
+                )
+            }
             continuation.finish()
         }
     }

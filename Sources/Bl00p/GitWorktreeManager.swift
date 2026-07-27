@@ -158,6 +158,7 @@ actor GitWorktreeManager: GitWorktreeManaging {
             taskContext: task,
             testStatus: evidence.status,
             testSummary: evidence.summary,
+            testEvidenceAt: evidence.recordedAt,
             workingTreeSummary: status.isEmpty
                 ? "Clean"
                 : status.truncated(to: 1_000)
@@ -305,12 +306,14 @@ actor GitWorktreeManager: GitWorktreeManaging {
 struct HandoffTestEvidence: Equatable {
     let status: HandoffTestStatus
     let summary: String
+    let recordedAt: Date?
 
     static func latest(in entries: [TimelineEntry]) -> HandoffTestEvidence {
         let testEntry = entries.last { entry in
             guard entry.kind == .command else { return false }
             let command = entry.text.lowercased()
-            return [
+            let detail = entry.detail?.lowercased() ?? ""
+            let knownTestCommands = [
                 "swift test",
                 "xcodebuild test",
                 "npm test",
@@ -320,23 +323,71 @@ struct HandoffTestEvidence: Equatable {
                 "pytest",
                 "cargo test",
                 "go test",
-                "bundle exec rspec"
-            ].contains(where: command.contains)
+                "bundle exec rspec",
+                "make test",
+                "make check",
+                "just test",
+                "ctest",
+                "dotnet test",
+                "mvn test",
+                "gradle test",
+                "gradlew test",
+                "mix test",
+                "phpunit",
+                "composer test",
+                "deno test",
+                "bun test",
+                "rake test",
+                "bin/test",
+                "scripts/test",
+                "scripts/check"
+            ]
+            let outputReportsTests = [
+                "test passed",
+                "tests passed",
+                "test suite passed",
+                "test suites passed",
+                "0 failures",
+                "0 failed"
+            ].contains(where: detail.contains)
+            let commandLooksLikeShellCommand =
+                command.contains(" ")
+                    || command.contains("/")
+                    || command.contains(".")
+                    || command.contains("-")
+            return knownTestCommands.contains(where: command.contains)
+                || (outputReportsTests && commandLooksLikeShellCommand)
         }
 
         guard let testEntry else {
             return .init(
                 status: .notRun,
-                summary: "No test command was recorded."
+                summary: "No test command was recorded.",
+                recordedAt: nil
             )
         }
 
         let failed = testEntry.title?
             .localizedCaseInsensitiveContains("failed") == true
-        let completed = testEntry.title?
+            || testEntry.title?
+                .localizedCaseInsensitiveContains("error") == true
+        let explicitlyCompleted = testEntry.title?
             .localizedCaseInsensitiveContains("finished") == true
             || testEntry.title?
                 .localizedCaseInsensitiveContains("completed") == true
+            || testEntry.title?
+                .localizedCaseInsensitiveContains("succeeded") == true
+            || testEntry.title?
+                .localizedCaseInsensitiveContains("success") == true
+            || testEntry.title?
+                .localizedCaseInsensitiveContains("passed") == true
+        let stillRunning = testEntry.title?
+            .localizedCaseInsensitiveContains("running") == true
+            || testEntry.title?
+                .localizedCaseInsensitiveContains("requested") == true
+        let completed =
+            explicitlyCompleted
+                || (testEntry.title != nil && !failed && !stillRunning)
         let status: HandoffTestStatus = failed
             ? .failed
             : (completed ? .passed : .notRun)
@@ -349,7 +400,11 @@ struct HandoffTestEvidence: Equatable {
             .compactMap { $0 }
             .joined(separator: "\n")
 
-        return .init(status: status, summary: summary)
+        return .init(
+            status: status,
+            summary: summary,
+            recordedAt: testEntry.timestamp
+        )
     }
 }
 

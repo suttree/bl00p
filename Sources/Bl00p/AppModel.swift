@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SwiftUI
+import os
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -19,6 +20,7 @@ final class AppModel: ObservableObject {
     private var runGenerations: [UUID: UUID] = [:]
     private var connectedProfileIDs: Set<UUID> = []
     private var inFlightUserEntryIDs: [UUID: UUID] = [:]
+    private var planningTurnAssistantEntryIDs: [UUID: Set<UUID>] = [:]
     private var notificationsArePrepared = false
     private var persistenceRevision: UInt64 = 0
     private var launchedProfileIDs: Set<UUID> = []
@@ -61,7 +63,9 @@ final class AppModel: ObservableObject {
                     var session = restoredSession
                     let endedAtLegacyPermissionBoundary =
                         session.entries.last?.text == "Claude stopped at a permission boundary"
-                    session.entries = session.entries.map(Self.migrateLegacyPermissionEntry)
+                    session.entries = session.entries
+                        .map(Self.migrateLegacyPermissionEntry)
+                        .map(Self.migrateLegacyPlanApprovalEntry)
                     session.entries.removeAll(where: Self.isPrototypeStarterEntry)
                     if session.status == .launching
                         || session.status == .working
@@ -87,6 +91,12 @@ final class AppModel: ObservableObject {
             managerWorkflows = saved.managerWorkflows.mapValues { workflow in
                 guard workflow.stage != .completed else { return workflow }
                 var restored = workflow
+                if restored.stage == .revising,
+                   restored.revisionStartedAt == nil {
+                    // Workflows persisted before the revision gate was added
+                    // need a lower bound for their post-review test evidence.
+                    restored.revisionStartedAt = workflow.updatedAt
+                }
                 restored.isPaused = true
                 restored.pauseReason =
                     workflow.planApprovalEntryID == nil
@@ -94,7 +104,56 @@ final class AppModel: ObservableObject {
                         : "Waiting for your approval of the implementation plan."
                 return restored
             }
+            var recoveredPublishingWorkflow = false
+            for workflow in managerWorkflows.values
+                where workflow.stage == .publishing {
+                guard let publisherID = workflow.team.publisherProfileID,
+                      let package = workflow.latestHandoff else { continue }
+                let publisherAlreadyUsesHandoffWorktree = profiles.contains {
+                    $0.id == publisherID
+                        && $0.workingDirectory == package.worktreePath
+                }
+                guard !publisherAlreadyUsesHandoffWorktree else { continue }
+                recoveredPublishingWorkflow = true
+                if let index = profiles.firstIndex(where: {
+                    $0.id == publisherID
+                }) {
+                    profiles[index].workingDirectory = package.worktreePath
+                    profiles[index].worktree = nil
+                }
+                var publisherSession =
+                    sessions[publisherID] ?? AgentSessionState()
+                publisherSession.status = .stopped
+                publisherSession.sessionID = nil
+                publisherSession.codexTurnModeVersion = nil
+                publisherSession.pendingHandoff = package
+                publisherSession.worktreeSeedID = nil
+                if !publisherSession.entries.contains(where: {
+                    $0.kind == .handoff
+                        && $0.detail == package.timelineDetail
+                }) {
+                    publisherSession.entries.append(
+                        .init(
+                            kind: .handoff,
+                            title: "Recovered workflow handoff from \(package.sourceName)",
+                            text: package.taskContext,
+                            detail: package.timelineDetail
+                        )
+                    )
+                }
+                sessions[publisherID] = publisherSession
+            }
             selectedBotID = saved.selectedBotID ?? saved.profiles.first?.id
+            if recoveredPublishingWorkflow {
+                store.save(
+                    PersistedAppState(
+                        profiles: profiles,
+                        sessions: sessions,
+                        selectedBotID: selectedBotID,
+                        managerWorkflows: managerWorkflows
+                    )
+                )
+            }
         } else {
             profiles = BotProfile.defaults
             sessions = Dictionary(
@@ -222,6 +281,7 @@ final class AppModel: ObservableObject {
         connectedProfileIDs.remove(profileID)
         launchedProfileIDs.remove(profileID)
         inFlightUserEntryIDs.removeValue(forKey: profileID)
+        planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
         runGenerations[profileID] = UUID()
         for index in profiles.indices where profiles[index].id != profileID {
             guard var team = profiles[index].managerTeam else { continue }
@@ -247,6 +307,11 @@ final class AppModel: ObservableObject {
                     workflow.team.reviewerProfileID,
                     workflow.team.publisherProfileID
                   ].contains(profileID) else { continue }
+            if let activeProfileID = expectedProfileID(for: workflow) {
+                planningTurnAssistantEntryIDs.removeValue(
+                    forKey: activeProfileID
+                )
+            }
             workflow.isPaused = true
             workflow.pauseReason = "A bot assigned to this workflow was deleted."
             workflow.updatedAt = .now
@@ -337,6 +402,7 @@ final class AppModel: ObservableObject {
         guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
         connectedProfileIDs.remove(profileID)
         launchedProfileIDs.remove(profileID)
+        planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
         runGenerations[profileID] = UUID()
         Task {
             await runtime.stop(profile: runtimeProfile(for: profile))
@@ -513,6 +579,10 @@ final class AppModel: ObservableObject {
                 ),
                 handoff: pendingHandoff
             )
+            if managerWorkflows[profileID]?.stage == .planning,
+               managerWorkflows[profileID]?.planApprovalEntryID == nil {
+                planningTurnAssistantEntryIDs[profileID] = []
+            }
             let responseStream = await runtime.respond(
                 to: runtimeMessage,
                 attachments: attachments,
@@ -682,7 +752,7 @@ final class AppModel: ObservableObject {
                         kind: .handoff,
                         title: "Handoff from \(source.name)",
                         text: package.taskContext,
-                        detail: handoffDetail(package)
+                        detail: package.timelineDetail
                     )
                 )
                 sessions[targetProfileID] = targetSession
@@ -814,17 +884,6 @@ final class AppModel: ObservableObject {
         """
     }
 
-    private func handoffDetail(_ package: GitHandoffPackage) -> String {
-        """
-        Branch: \(package.branch)
-        HEAD: \(package.headRevision)
-        Tests: \(package.testStatus.label)
-        \(package.testSummary)
-        Working tree:
-        \(package.workingTreeSummary)
-        """
-    }
-
     private func validatedTeam(
         for manager: BotProfile
     ) -> ManagerTeamConfiguration? {
@@ -879,7 +938,9 @@ final class AppModel: ObservableObject {
             workflow.managerProfileID
         case .building, .revising:
             workflow.team.builderProfileID
-        case .reviewing, .verifying:
+        case .reviewing:
+            workflow.team.reviewerProfileID
+        case .verifying:
             workflow.team.reviewerProfileID
         case .publishing:
             workflow.team.publisherProfileID
@@ -903,12 +964,19 @@ final class AppModel: ObservableObject {
 
         for managerID in matchingManagerIDs {
             switch status {
-            case .needsApproval, .needsAnswer, .failed:
+            case .needsApproval, .needsAnswer:
+                pauseWorkflow(
+                    managerID,
+                    reason: "\(profileName(profileID)) needs attention: \(status.label)."
+                )
+            case .failed:
+                planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
                 pauseWorkflow(
                     managerID,
                     reason: "\(profileName(profileID)) needs attention: \(status.label)."
                 )
             case .stopped:
+                planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
                 if previousStatus == .working || previousStatus == .launching {
                     pauseWorkflow(
                         managerID,
@@ -995,27 +1063,56 @@ final class AppModel: ObservableObject {
             workflow.stage == .reviewing || workflow.stage == .verifying
                 ? latestReviewOutput(for: profileID)
                 : nil
-        let summary = reviewOutput?.summary
-            ?? latestAssistantText(for: profileID)
 
-        switch workflow.stage {
-        case .planning:
+        if workflow.stage == .planning {
+            let capturedEntryIDs =
+                planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
+                ?? []
+            guard let planEntry = sessions[profileID]?.entries.last(where: {
+                capturedEntryIDs.contains($0.id)
+                    && $0.kind == .assistant
+                    && !$0.text.isEmpty
+            }) else {
+                pauseWorkflow(
+                    managerID,
+                    reason: "\(profileName(profileID)) finished the planning turn without returning an implementation plan. Send feedback to try again."
+                )
+                return
+            }
             requestWorkflowPlanApproval(
                 managerID,
-                implementationPlan: summary
+                implementationPlan: planEntry.text,
+                replacingAssistantEntryID: planEntry.id
             )
+            return
+        }
 
+        let summary = reviewOutput?.summary
+            ?? latestAssistantText(for: profileID)
+        switch workflow.stage {
+        case .planning:
+            break
         case .building:
-            guard let next = transitionWorkflow(managerID, to: .reviewing),
-                  let reviewerID = next.team.reviewerProfileID else { return }
+            guard let reviewerID = workflow.team.reviewerProfileID,
+                  profiles.contains(where: {
+                      $0.id == reviewerID && $0.role == .reviewer
+                  }) else {
+                pauseWorkflow(
+                    managerID,
+                    reason: "The assigned Reviewer is no longer available."
+                )
+                return
+            }
+            guard let next = transitionWorkflow(
+                managerID,
+                to: .reviewing
+            ) else { return }
             Task { [weak self] in
                 await self?.dispatchBuilderHandoff(
                     workflow: next,
                     builderID: profileID,
                     to: reviewerID,
-                    instruction: Self.initialReviewInstruction,
-                    resetRecipient: true,
-                    fallbackStage: .building
+                    instruction: Self.initialReviewInstruction
                 )
             }
 
@@ -1043,8 +1140,8 @@ final class AppModel: ObservableObject {
                     builderID: profileID,
                     to: reviewerID,
                     instruction: Self.verificationInstruction,
-                    resetRecipient: false,
-                    fallbackStage: .revising
+                    pass: .revision,
+                    resetRecipient: false
                 )
             }
 
@@ -1140,6 +1237,8 @@ final class AppModel: ObservableObject {
             return
         }
         workflow.revisionRounds = revisionRounds + 1
+        workflow.reviewSummary = reviewSummary
+        workflow.revisionStartedAt = .now
         workflow.updatedAt = .now
         managerWorkflows[managerID] = workflow
         guard transitionWorkflow(managerID, to: .revising) != nil else {
@@ -1247,10 +1346,15 @@ final class AppModel: ObservableObject {
 
     private func requestWorkflowPlanApproval(
         _ managerID: UUID,
-        implementationPlan: String
+        implementationPlan: String,
+        replacingAssistantEntryID assistantEntryID: UUID
     ) {
         guard var workflow = managerWorkflows[managerID],
-              workflow.stage == .planning else {
+              workflow.stage == .planning,
+              var state = sessions[managerID],
+              let entryIndex = state.entries.firstIndex(where: {
+                  $0.id == assistantEntryID && $0.kind == .assistant
+              }) else {
             return
         }
 
@@ -1262,19 +1366,23 @@ final class AppModel: ObservableObject {
             "Waiting for your approval of the implementation plan."
         workflow.updatedAt = .now
 
-        var state = sessions[managerID] ?? AgentSessionState()
         let previousStatus = state.status
         state.status = .needsApproval
         state.hasUnreadCompletion = false
-        state.entries.append(
+        let assistantTimestamp = state.entries[entryIndex].timestamp
+        state.entries.remove(at: entryIndex)
+        state.entries.insert(
             .init(
                 id: approvalID,
                 kind: .approval,
                 title: "Approve implementation plan",
                 text: implementationPlan,
                 detail: "Approve to hand this plan to the Builder and continue the managed workflow. Decline to pause and send revision feedback.",
-                approvalState: .pending
-            )
+                timestamp: assistantTimestamp,
+                approvalState: .pending,
+                contentFormat: .markdown
+            ),
+            at: entryIndex
         )
 
         sessions[managerID] = state
@@ -1331,15 +1439,58 @@ final class AppModel: ObservableObject {
         builderID: UUID,
         to reviewerID: UUID,
         instruction: String,
-        resetRecipient: Bool,
-        fallbackStage: ManagerWorkflowStage
+        pass: BuilderHandoffPass = .initial,
+        resetRecipient: Bool = true
     ) async {
+        guard let package = await prepareBuilderHandoff(
+            workflow: workflow,
+            builderID: builderID,
+            pass: pass
+        ) else { return }
+
+        if resetRecipient {
+            guard await resetWorkflowRecipient(
+                reviewerID,
+                handoff: package
+            ) else {
+                pauseWorkflow(
+                    workflow.managerProfileID,
+                    reason: "The assigned Reviewer is no longer available."
+                )
+                return
+            }
+        } else {
+            var reviewerSession =
+                sessions[reviewerID] ?? AgentSessionState()
+            reviewerSession.pendingHandoff = package
+            reviewerSession.entries.append(
+                .init(
+                    kind: .handoff,
+                    title: "Updated implementation",
+                    text: package.taskContext,
+                    detail: package.timelineDetail
+                )
+            )
+            sessions[reviewerID] = reviewerSession
+            save(immediately: true)
+        }
+        performSend(
+            instruction,
+            to: reviewerID
+        )
+    }
+
+    private func prepareBuilderHandoff(
+        workflow: ManagerWorkflow,
+        builderID: UUID,
+        pass: BuilderHandoffPass
+    ) async -> GitHandoffPackage? {
         guard let builder = profiles.first(where: { $0.id == builderID }) else {
             pauseWorkflow(
                 workflow.managerProfileID,
                 reason: "The assigned Builder is no longer available."
             )
-            return
+            return nil
         }
         do {
             let startedAt = ContinuousClock.now
@@ -1354,67 +1505,66 @@ final class AppModel: ObservableObject {
                 stage: workflow.stage
             )
             package.taskContext = workflow.request
-            let lacksInitialCommit =
-                workflow.latestHandoff == nil
-                    && package.headRevision == package.baseRevision
+            let previousRevision =
+                workflow.latestHandoff?.headRevision ?? package.baseRevision
+            let lacksRequiredCommit =
+                package.headRevision == previousRevision
             let hasUncommittedChanges =
                 package.workingTreeSummary != "Clean"
-            let hasFailedTests = package.testStatus == .failed
-            guard !lacksInitialCommit,
+            let hasInvalidTests: Bool
+            switch pass {
+            case .initial:
+                hasInvalidTests = package.testStatus == .failed
+            case .revision:
+                guard let testEvidenceAt = package.testEvidenceAt,
+                      let revisionStartedAt = workflow.revisionStartedAt else {
+                    hasInvalidTests = true
+                    break
+                }
+                hasInvalidTests =
+                    package.testStatus != .passed
+                        || testEvidenceAt < revisionStartedAt
+            }
+            guard !lacksRequiredCommit,
                   !hasUncommittedChanges,
-                  !hasFailedTests else {
+                  !hasInvalidTests else {
                 _ = transitionWorkflow(
                     workflow.managerProfileID,
-                    to: fallbackStage
+                    to: pass.fallbackStage
                 )
                 let reason: String
-                if lacksInitialCommit {
-                    reason = "The Builder handoff has no local commit."
+                if lacksRequiredCommit {
+                    reason =
+                        pass == .initial
+                            ? "The Builder handoff has no local commit."
+                            : "The Builder revision pass has no new local commit."
                 } else if hasUncommittedChanges {
                     reason = "The Builder handoff still has uncommitted changes."
-                } else {
+                } else if pass == .initial {
                     reason = "The Builder reported failing tests."
+                } else {
+                    reason =
+                        "The Builder handoff does not report passing tests from the revision pass."
                 }
                 pauseWorkflow(workflow.managerProfileID, reason: reason)
                 append(
                     .init(
                         kind: .question,
                         title: "Builder handoff is not ready",
-                        text: "\(reason) Ask this bot to finish the work, verify it, and create a local commit."
+                        text: "\(reason) Ask this bot to finish the work, run the required tests, and commit any changes."
                     ),
                     to: builderID
                 )
-                return
+                return nil
             }
             record(package, for: workflow.managerProfileID)
-            if resetRecipient {
-                guard await resetWorkflowRecipient(
-                    reviewerID,
-                    handoff: package
-                ) else {
-                    pauseWorkflow(
-                        workflow.managerProfileID,
-                        reason: "The assigned Reviewer is no longer available."
-                    )
-                    return
-                }
-            } else {
-                attach(
-                    package,
-                    from: builderID,
-                    to: reviewerID,
-                    title: "Updated implementation"
-                )
-            }
-            performSend(
-                instruction,
-                to: reviewerID
-            )
+            return package
         } catch {
             pauseWorkflow(
                 workflow.managerProfileID,
                 reason: "Could not prepare the Builder handoff: \(error.localizedDescription)"
             )
+            return nil
         }
     }
 
@@ -1502,33 +1652,13 @@ final class AppModel: ObservableObject {
                     kind: .handoff,
                     title: "Workflow handoff from \(sourceName)",
                     text: handoff.taskContext,
-                    detail: handoffDetail(handoff)
+                    detail: handoff.timelineDetail
                 )
             )
         }
         sessions[profileID] = state
         save(immediately: true)
         return true
-    }
-
-    private func attach(
-        _ package: GitHandoffPackage,
-        from sourceProfileID: UUID,
-        to targetProfileID: UUID,
-        title: String
-    ) {
-        var state = sessions[targetProfileID] ?? AgentSessionState()
-        state.pendingHandoff = package
-        state.entries.append(
-            .init(
-                kind: .handoff,
-                title: title,
-                text: "From \(profileName(sourceProfileID))",
-                detail: handoffDetail(package)
-            )
-        )
-        sessions[targetProfileID] = state
-        save()
     }
 
     private func record(
@@ -1586,10 +1716,14 @@ final class AppModel: ObservableObject {
         )
     }
 
+    private func latestAssistantEntry(for profileID: UUID) -> TimelineEntry? {
+        sessions[profileID]?.entries.last(where: {
+            $0.kind == .assistant && !$0.text.isEmpty
+        })
+    }
+
     private func latestAssistantText(for profileID: UUID) -> String {
-        sessions[profileID]?.entries
-            .last(where: { $0.kind == .assistant && !$0.text.isEmpty })?
-            .text
+        latestAssistantEntry(for: profileID)?.text
             ?? "No assistant summary was captured."
     }
 
@@ -1644,6 +1778,18 @@ final class AppModel: ObservableObject {
     BL00P_REVIEW_DISPOSITION: changesRequested
     """
 
+    private enum BuilderHandoffPass {
+        case initial
+        case revision
+
+        var fallbackStage: ManagerWorkflowStage {
+            switch self {
+            case .initial: .building
+            case .revision: .revising
+            }
+        }
+    }
+
     private func apply(_ event: AgentEvent, to profileID: UUID) {
         var state = sessions[profileID] ?? AgentSessionState()
         var notice: AgentAttentionNotice?
@@ -1682,11 +1828,19 @@ final class AppModel: ObservableObject {
             }
         case .entry(let entry):
             state.entries.append(entry)
+            if entry.kind == .assistant,
+               planningTurnAssistantEntryIDs[profileID] != nil {
+                planningTurnAssistantEntryIDs[profileID]?.insert(entry.id)
+            }
         case .upsertEntry(let entry):
             if let index = state.entries.firstIndex(where: { $0.id == entry.id }) {
                 state.entries[index] = entry
             } else {
                 state.entries.append(entry)
+            }
+            if entry.kind == .assistant,
+               planningTurnAssistantEntryIDs[profileID] != nil {
+                planningTurnAssistantEntryIDs[profileID]?.insert(entry.id)
             }
         case .approvalResolved(let entryID, let approvalState):
             if let index = state.entries.firstIndex(where: { $0.id == entryID }) {
@@ -1827,11 +1981,25 @@ final class AppModel: ObservableObject {
         migrated.detail = ClaudePermissionDenials.readableLegacyDetail(entry.detail)
         return migrated
     }
+
+    private static func migrateLegacyPlanApprovalEntry(
+        _ entry: TimelineEntry
+    ) -> TimelineEntry {
+        guard entry.kind == .approval,
+              entry.title == "Approve implementation plan",
+              entry.contentFormat == nil else {
+            return entry
+        }
+        var migrated = entry
+        migrated.contentFormat = .markdown
+        return migrated
+    }
 }
 
 final class AppStateStore: Sendable {
     let fileURL: URL?
     private let persistence: AppStatePersistenceQueue
+    private let logger = Logger(subsystem: "dev.bl00p.app", category: "persistence")
 
     init(
         fileURL: URL? = nil,
@@ -1859,10 +2027,31 @@ final class AppStateStore: Sendable {
         )
     }
 
+    /// A previously-saved state that fails to decode (e.g. after a schema change) is
+    /// moved aside instead of silently discarded. The last known-good backup is then
+    /// loaded so a decode or interrupted-write failure cannot reset the app to defaults.
     func load() -> PersistedAppState? {
-        guard let fileURL,
-              let data = try? Data(contentsOf: fileURL) else { return nil }
-        return try? JSONDecoder.iso8601.decode(PersistedAppState.self, from: data)
+        guard let fileURL else { return nil }
+        let backupURL = backupURL(for: fileURL)
+
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            do {
+                return try decodeState(at: fileURL)
+            } catch {
+                logger.error("Failed to decode saved state, quarantining it: \(error)")
+                quarantineUnreadableState(at: fileURL)
+            }
+        }
+
+        guard FileManager.default.fileExists(atPath: backupURL.path) else {
+            return nil
+        }
+        do {
+            return try decodeState(at: backupURL)
+        } catch {
+            logger.error("Failed to decode backup state: \(error)")
+            return nil
+        }
     }
 
     func enqueue(
@@ -1880,6 +2069,31 @@ final class AppStateStore: Sendable {
         }
     }
 
+    /// Writes immediately for migrations, fixtures, and other synchronous
+    /// boundaries while retaining the backup behavior used by queued writes.
+    func save(_ state: PersistedAppState) {
+        guard let fileURL,
+              let data = try? JSONEncoder.compactState.encode(state) else {
+            return
+        }
+        let fileManager = FileManager.default
+        let directory = fileURL.deletingLastPathComponent()
+        let backupURL = backupURL(for: fileURL)
+        do {
+            try fileManager.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            if fileManager.fileExists(atPath: fileURL.path) {
+                let previousData = try Data(contentsOf: fileURL)
+                try previousData.write(to: backupURL, options: .atomic)
+            }
+            try data.write(to: fileURL, options: .atomic)
+        } catch {
+            logger.error("Failed to save state: \(error)")
+        }
+    }
+
     func flush(
         _ state: PersistedAppState,
         revision: UInt64
@@ -1887,6 +2101,36 @@ final class AppStateStore: Sendable {
         await persistence.flush(state, revision: revision)
     }
 
+    private func decodeState(at url: URL) throws -> PersistedAppState {
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder.iso8601.decode(PersistedAppState.self, from: data)
+    }
+
+    private func backupURL(for fileURL: URL) -> URL {
+        fileURL.deletingLastPathComponent()
+            .appendingPathComponent("\(fileURL.lastPathComponent).bak")
+    }
+
+    private func quarantineUnreadableState(at fileURL: URL) {
+        let timestamp = ISO8601DateFormatter().string(from: .now)
+            .replacingOccurrences(of: ":", with: "-")
+        let quarantineURL = fileURL.deletingLastPathComponent()
+            .appendingPathComponent("state.corrupt-\(timestamp).json")
+        do {
+            try FileManager.default.removeItemIfPresent(at: quarantineURL)
+            try FileManager.default.moveItem(at: fileURL, to: quarantineURL)
+        } catch {
+            logger.error("Failed to quarantine unreadable state: \(error)")
+        }
+    }
+}
+
+private extension FileManager {
+    func removeItemIfPresent(at url: URL) throws {
+        if fileExists(atPath: url.path) {
+            try removeItem(at: url)
+        }
+    }
 }
 
 private extension JSONDecoder {
