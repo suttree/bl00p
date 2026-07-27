@@ -84,8 +84,10 @@ persisted workflow with this sequence:
 Questions, failures, and approval requests pause the workflow for the user.
 Leaving any team assignment unset keeps that Manager in standalone chat mode.
 Clean workflows use four agent turns; workflows with one requested-changes
-round use six. If findings remain after two revision rounds, bl00p pauses the
-loop for user direction instead of continuing indefinitely.
+round use six, and workflows with two rounds use eight. If findings remain
+after two revision rounds, bl00p pauses the loop for user direction instead of
+continuing indefinitely. Reviewer protocol markers are kept out of the
+user-visible findings and completion summary.
 
 ## Runtime boundary
 
@@ -95,10 +97,14 @@ Reviewer, and Documenter threads use workspace-scoped execution and route
 elevated and connected-app actions through bl00p's approval cards. Manager
 threads are non-escalatable and read-only so bl00p alone owns delegation to
 the configured team. Threads resume from their saved thread ID when possible.
-Successful executable discovery and Claude authentication checks are cached for
-the lifetime of the app. Performance logs contain stage durations plus
-provider, model, role, and cold/warm identifiers only; prompts, generated
-content, and filesystem paths are never included.
+Successful executable discovery and Claude authentication checks are cached
+until a launch, turn, or transport failure invalidates them, so moved provider
+executables and expired authentication can be detected again without
+restarting bl00p. State writes are coalesced off the main actor, use
+last-write-wins revisioning, and are flushed when the app quits (with a short
+timeout so a slow write cannot block termination). Performance logs contain
+stage durations plus provider, model, role, and cold/warm identifiers only;
+prompts, generated content, and filesystem paths are never included.
 
 Claude profiles use the installed `claude` executable's `stream-json` mode.
 They inherit Claude's user and project settings, including configured MCP

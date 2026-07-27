@@ -21,6 +21,11 @@ All notable changes to bl00p are documented in this file.
 
 ### Changed
 
+- Speed up managed workflows by skipping unnecessary fix/re-check turns after
+  a clean review, composing the completion entry locally, and moving state
+  encoding and writes onto a coalescing persistence queue.
+- Add workflow-stage, runtime-launch, turn, handoff, and persistence timing
+  metrics without recording prompts, generated content, or filesystem paths.
 - Suppress notification banners and sounds while a bl00p window is active,
   while preserving sidebar and Dock attention state.
 - Increase the typography throughout the Add Bot sheet and its role-prompt editor for readability.
@@ -36,6 +41,17 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Bound managed review revisions to two rounds, then pause with the remaining
+  findings for user direction instead of looping indefinitely.
+- Preserve multi-entry reviewer findings while parsing the structured review
+  disposition, and remove the internal disposition marker from user-visible
+  handoffs and completion summaries.
+- Invalidate cached Claude authentication and provider executable discovery
+  after runtime failures; reset cold-start tracking when a runtime stops.
+- Restore managed workflow stage timing from persisted timestamps, complete
+  legacy reporting workflows that already have a draft PR URL, validate the
+  publisher before entering the publishing stage, and allow quit to continue
+  after a three-second persistence-flush deadline.
 - Keep the selected provider when adding a bot, including after switching between Claude and Codex.
 - Focus the message composer when the app opens or the user switches bots.
 - Keep loading saved profiles and sessions when a bot profile gains new fields, instead of silently discarding all persisted state on decode failure.
@@ -52,6 +68,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Tests
 
+- Cover bounded review revisions, multi-block review output, protocol-marker
+  stripping, restored workflows, cache invalidation, cold-start tracking, and
+  coalesced persistence without timing-based assertions.
 - Cover active-window notification suppression independently from Dock badge
   updates.
 - Expand coverage for notifications, Dock badges, model and prompt isolation, image attachments, session recovery, state migration, composer sizing, automatic reconnects, and long-lived runtime streams.
