@@ -88,6 +88,11 @@ Saved workflows recover these handoff requirements across app restarts without
 discarding an already-running Documenter session.
 
 Questions, failures, and approval requests pause the workflow for the user.
+The Manager's implementation plan approval is persisted with the workflow, so a
+relaunch can restore a missing or interrupted approval card without dispatching
+the Builder twice. Unrelated runtime permission approvals remain runtime
+approvals, and declining the plan leaves the workflow paused for revision
+feedback.
 Leaving any team assignment unset keeps that Manager in standalone chat mode.
 Clean workflows use four agent turns; workflows with one requested-changes
 round use six, and workflows with two rounds use eight. If findings remain
@@ -104,6 +109,9 @@ Reviewer boundary.
 The Manager's implementation plan appears once, inside the approval card. The
 card renders the plan as readable Markdown and provides the Approve and Decline
 actions; the same plan is not repeated as a separate conversation message.
+
+The persistence rules and restore invariants are documented in
+[docs/MANAGED_WORKFLOWS.md](docs/MANAGED_WORKFLOWS.md).
 
 ## Runtime boundary
 

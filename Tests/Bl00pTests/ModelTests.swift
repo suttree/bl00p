@@ -2201,6 +2201,508 @@ func managerPlanningWithoutAPlanPausesWithoutAdoptingOlderMessages() async throw
 
 @MainActor
 @Test
+func relaunchRecoversACompletedManagerPlanAndDispatchesBuilderOnce() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-manager-plan-recovery-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let fixture = managedWorkflowFixture()
+    let plan = "Implement idempotent plan approval recovery with tests."
+    let workflow = ManagerWorkflow(
+        managerProfileID: fixture.manager.id,
+        team: fixture.team,
+        request: "Recover missing approval cards"
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: fixture.profiles,
+            sessions: [
+                fixture.manager.id: AgentSessionState(
+                    status: .completed,
+                    entries: [.init(kind: .assistant, text: plan)]
+                ),
+                fixture.builder.id: AgentSessionState(),
+                fixture.reviewer.id: AgentSessionState(),
+                fixture.publisher.id: AgentSessionState()
+            ],
+            selectedBotID: fixture.manager.id,
+            managerWorkflows: [fixture.manager.id: workflow]
+        )
+    )
+
+    let runtime = RecoveredApprovalRuntime()
+    let firstRelaunch = AppModel(runtime: runtime, store: store)
+    let firstApproval = try #require(
+        firstRelaunch.session(for: fixture.manager.id).entries.first(where: {
+            $0.kind == .approval && $0.approvalState == .pending
+        })
+    )
+    #expect(firstApproval.text == plan)
+    #expect(
+        firstRelaunch.workflow(for: fixture.manager.id)?
+            .planApprovalEntryID == firstApproval.id
+    )
+    #expect(
+        firstRelaunch.session(for: fixture.manager.id).status
+            == .needsApproval
+    )
+
+    let secondRelaunch = AppModel(runtime: runtime, store: store)
+    let pendingApprovals = secondRelaunch
+        .session(for: fixture.manager.id)
+        .entries
+        .filter {
+            $0.kind == .approval && $0.approvalState == .pending
+        }
+    #expect(pendingApprovals.map(\.id) == [firstApproval.id])
+    #expect(
+        secondRelaunch.workflow(for: fixture.manager.id)?
+            .planApprovalEntryID == firstApproval.id
+    )
+
+    secondRelaunch.resolveApproval(
+        firstApproval.id,
+        approved: true,
+        for: fixture.manager.id
+    )
+    secondRelaunch.resolveApproval(
+        firstApproval.id,
+        approved: true,
+        for: fixture.manager.id
+    )
+    for _ in 0..<100 where await runtime.builderDispatchCount == 0 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(await runtime.builderDispatchCount == 1)
+}
+
+@MainActor
+@Test
+func relaunchDoesNotTurnARuntimeApprovalIntoAPlanApproval() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-manager-runtime-approval-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let fixture = managedWorkflowFixture()
+    let runtimeApprovalID = UUID()
+    let declinedPlan = "Previously declined implementation plan."
+    let workflow = ManagerWorkflow(
+        managerProfileID: fixture.manager.id,
+        team: fixture.team,
+        request: "Plan a repository change",
+        implementationPlan: declinedPlan
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: fixture.profiles,
+            sessions: [
+                fixture.manager.id: AgentSessionState(
+                    status: .needsApproval,
+                    entries: [
+                        .init(
+                            kind: .assistant,
+                            text: "I need to inspect one more file."
+                        ),
+                        .init(
+                            kind: .approval,
+                            title: "Approve implementation plan",
+                            text: declinedPlan,
+                            approvalState: .declined
+                        ),
+                        .init(
+                            id: runtimeApprovalID,
+                            kind: .approval,
+                            title: "Run repository inspection",
+                            text: "git show HEAD:Package.swift",
+                            approvalState: .pending
+                        )
+                    ],
+                    sessionID: "legacy-manager-thread",
+                    codexTurnModeVersion: CodexThreadConfiguration.turnModeVersion
+                )
+            ],
+            selectedBotID: fixture.manager.id,
+            managerWorkflows: [fixture.manager.id: workflow]
+        )
+    )
+
+    let model = AppModel(
+        runtime: RecoveredApprovalRuntime(),
+        store: store
+    )
+    let restoredSession = model.session(for: fixture.manager.id)
+
+    #expect(restoredSession.status == .stopped)
+    #expect(
+        restoredSession.entries.contains(where: {
+            $0.id == runtimeApprovalID && $0.approvalState == .pending
+        })
+    )
+    #expect(
+        !restoredSession.entries.contains(where: {
+            $0.title == "Approve implementation plan"
+                && $0.approvalState == .pending
+        })
+    )
+    #expect(
+        model.workflow(for: fixture.manager.id)?
+            .planApprovalEntryID == nil
+    )
+    #expect(
+        model.workflow(for: fixture.manager.id)?
+            .implementationPlan == declinedPlan
+    )
+}
+
+@MainActor
+@Test
+func relaunchAdoptsAPlanApprovalCardWhoseWorkflowIDWasNotSaved() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-manager-plan-id-recovery-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let fixture = managedWorkflowFixture()
+    let plan = "Adopt the already-persisted approval card."
+    let approvalID = UUID()
+    let duplicateID = UUID()
+    let workflow = ManagerWorkflow(
+        managerProfileID: fixture.manager.id,
+        team: fixture.team,
+        request: "Recover the workflow approval ID",
+        implementationPlan: plan
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: fixture.profiles,
+            sessions: [
+                fixture.manager.id: AgentSessionState(
+                    status: .needsApproval,
+                    entries: [
+                        .init(
+                            id: approvalID,
+                            kind: .approval,
+                            title: "Approve implementation plan",
+                            text: plan,
+                            approvalState: .pending
+                        ),
+                        .init(
+                            kind: .system,
+                            text: "Workflow paused after approval card"
+                        ),
+                        .init(
+                            id: duplicateID,
+                            kind: .approval,
+                            title: "Approve implementation plan",
+                            text: "Stale plan",
+                            approvalState: .pending
+                        )
+                    ]
+                )
+            ],
+            selectedBotID: fixture.manager.id,
+            managerWorkflows: [fixture.manager.id: workflow]
+        )
+    )
+
+    let model = AppModel(runtime: RecoveredApprovalRuntime(), store: store)
+    let pendingApprovals = model
+        .session(for: fixture.manager.id)
+        .entries
+        .filter {
+            $0.kind == .approval && $0.approvalState == .pending
+        }
+
+    #expect(pendingApprovals.map(\.id) == [approvalID])
+    #expect(
+        model.workflow(for: fixture.manager.id)?.planApprovalEntryID
+            == approvalID
+    )
+    let restoredEntries = model.session(for: fixture.manager.id).entries
+    let approvalIndex = try #require(
+        restoredEntries.firstIndex(where: { $0.id == approvalID })
+    )
+    let pausedEntryIndex = try #require(
+        restoredEntries.firstIndex(where: {
+            $0.text == "Workflow paused after approval card"
+        })
+    )
+    #expect(approvalIndex < pausedEntryIndex)
+
+    let missingEntryID = UUID()
+    let missingEntryStore = AppStateStore(
+        fileURL: directory.appendingPathComponent("missing-entry-state.json")
+    )
+    missingEntryStore.save(
+        PersistedAppState(
+            profiles: fixture.profiles,
+            sessions: [
+                fixture.manager.id: AgentSessionState(
+                    status: .completed,
+                    entries: [.init(kind: .assistant, text: plan)]
+                )
+            ],
+            selectedBotID: fixture.manager.id,
+            managerWorkflows: [
+                fixture.manager.id: ManagerWorkflow(
+                    managerProfileID: fixture.manager.id,
+                    team: fixture.team,
+                    request: "Recover the missing approval entry",
+                    implementationPlan: plan,
+                    planApprovalEntryID: missingEntryID
+                )
+            ]
+        )
+    )
+
+    let missingEntryModel = AppModel(
+        runtime: RecoveredApprovalRuntime(),
+        store: missingEntryStore
+    )
+    let recoveredEntry = missingEntryModel
+        .session(for: fixture.manager.id)
+        .entries
+        .first(where: { $0.id == missingEntryID })
+    #expect(recoveredEntry?.approvalState == .pending)
+    #expect(
+        missingEntryModel.workflow(for: fixture.manager.id)?
+            .planApprovalEntryID == missingEntryID
+    )
+}
+
+@MainActor
+@Test
+func relaunchDoesNotRestoreIncompleteOrResolvedManagerPlans() {
+    let fixture = managedWorkflowFixture()
+    let plan = "This plan must not be restored."
+    let declinedID = UUID()
+    let failedID = UUID()
+    let interruptedID = UUID()
+    let partialID = UUID()
+    let cases: [(String, UUID, AgentSessionState)] = [
+        (
+            "declined",
+            declinedID,
+            AgentSessionState(
+                status: .needsAnswer,
+                entries: [
+                    .init(
+                        id: declinedID,
+                        kind: .approval,
+                        title: "Approve implementation plan",
+                        text: plan,
+                        approvalState: .declined
+                    )
+                ]
+            )
+        ),
+        (
+            "failed",
+            failedID,
+            AgentSessionState(
+                status: .failed,
+                entries: [
+                    .init(kind: .assistant, text: plan),
+                    .init(
+                        id: failedID,
+                        kind: .approval,
+                        title: "Approve implementation plan",
+                        text: plan,
+                        approvalState: .pending
+                    )
+                ]
+            )
+        ),
+        (
+            "interrupted",
+            interruptedID,
+            AgentSessionState(
+                status: .working,
+                entries: [
+                    .init(kind: .assistant, text: plan),
+                    .init(
+                        id: interruptedID,
+                        kind: .approval,
+                        title: "Approve implementation plan",
+                        text: plan,
+                        approvalState: .pending
+                    )
+                ]
+            )
+        ),
+        (
+            "partial",
+            partialID,
+            AgentSessionState(
+                status: .completed,
+                entries: [
+                    .init(kind: .assistant, text: "   "),
+                    .init(
+                        id: partialID,
+                        kind: .approval,
+                        title: "Approve implementation plan",
+                        text: "   ",
+                        approvalState: .pending
+                    )
+                ]
+            )
+        )
+    ]
+
+    for (name, approvalID, managerSession) in cases {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "bl00p-manager-plan-\(name)-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let workflow = ManagerWorkflow(
+            managerProfileID: fixture.manager.id,
+            team: fixture.team,
+            request: "Do not recover \(name)",
+            implementationPlan: name == "partial" ? nil : plan,
+            planApprovalEntryID: approvalID
+        )
+        let store = AppStateStore(
+            fileURL: directory.appendingPathComponent("state.json")
+        )
+        store.save(
+            PersistedAppState(
+                profiles: fixture.profiles,
+                sessions: [fixture.manager.id: managerSession],
+                selectedBotID: fixture.manager.id,
+                managerWorkflows: [fixture.manager.id: workflow]
+            )
+        )
+
+        let model = AppModel(
+            runtime: RecoveredApprovalRuntime(),
+            store: store
+        )
+        let pendingApprovals = model
+            .session(for: fixture.manager.id)
+            .entries
+            .filter {
+                $0.kind == .approval && $0.approvalState == .pending
+            }
+        #expect(pendingApprovals.isEmpty, "Unexpected recovery for \(name)")
+        #expect(
+            model.workflow(for: fixture.manager.id)?
+                .planApprovalEntryID == nil,
+            "Unexpected workflow approval ID for \(name)"
+        )
+    }
+}
+
+@MainActor
+@Test
+func relaunchRecoversARevisedPlanWithoutResurrectingTheDeclinedPlan() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-manager-revised-plan-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let fixture = managedWorkflowFixture()
+    let declinedPlan = "Change every workflow at once."
+    let revisedPlan = "Change only plan approval restoration and its tests."
+    let declinedID = UUID()
+    let workflow = ManagerWorkflow(
+        managerProfileID: fixture.manager.id,
+        team: fixture.team,
+        request: "Fix plan approval restoration",
+        implementationPlan: declinedPlan,
+        isPaused: true,
+        pauseReason: "Plan declined."
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: fixture.profiles,
+            sessions: [
+                fixture.manager.id: AgentSessionState(
+                    status: .completed,
+                    entries: [
+                        .init(kind: .assistant, text: declinedPlan),
+                        .init(
+                            id: declinedID,
+                            kind: .approval,
+                            title: "Approve implementation plan",
+                            text: declinedPlan,
+                            approvalState: .declined
+                        ),
+                        .init(
+                            kind: .user,
+                            text: "Keep the revision narrowly scoped."
+                        ),
+                        .init(kind: .assistant, text: revisedPlan)
+                    ]
+                )
+            ],
+            selectedBotID: fixture.manager.id,
+            managerWorkflows: [fixture.manager.id: workflow]
+        )
+    )
+
+    let firstRelaunch = AppModel(
+        runtime: RecoveredApprovalRuntime(),
+        store: store
+    )
+    let secondRelaunch = AppModel(
+        runtime: RecoveredApprovalRuntime(),
+        store: store
+    )
+    let approvalEntries = secondRelaunch
+        .session(for: fixture.manager.id)
+        .entries
+        .filter { $0.kind == .approval }
+
+    #expect(approvalEntries.count == 2)
+    #expect(
+        approvalEntries.contains(where: {
+            $0.id == declinedID
+                && $0.text == declinedPlan
+                && $0.approvalState == .declined
+        })
+    )
+    #expect(
+        approvalEntries.filter {
+            $0.text == revisedPlan && $0.approvalState == .pending
+        }.count == 1
+    )
+    #expect(
+        firstRelaunch.workflow(for: fixture.manager.id)?
+            .implementationPlan == revisedPlan
+    )
+    #expect(
+        secondRelaunch.workflow(for: fixture.manager.id)?
+            .implementationPlan == revisedPlan
+    )
+}
+
+@MainActor
+@Test
 func managerWithoutATeamRemainsAStandaloneBot() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(
@@ -4112,6 +4614,46 @@ func legacyPermissionBoundaryIsRestoredAsReadableAttention() throws {
 
 @MainActor
 @Test
+func interruptedLegacyPermissionBoundaryRestoresAsStopped() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-interrupted-permission-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let profile = BotProfile.defaults[0]
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [profile],
+            sessions: [
+                profile.id: AgentSessionState(
+                    status: .working,
+                    entries: [
+                        .init(
+                            kind: .system,
+                            text: "Claude stopped at a permission boundary"
+                        )
+                    ],
+                    sessionID: "interrupted-permission-session"
+                )
+            ],
+            selectedBotID: profile.id
+        )
+    )
+
+    let model = AppModel(runtime: DemoAgentRuntime(), store: store)
+    let restored = model.session(for: profile.id)
+
+    #expect(restored.status == .stopped)
+    #expect(restored.entries.last?.title == "Some actions were blocked")
+}
+
+@MainActor
+@Test
 func legacyDefaultNamesMigrateButCustomNamesRemain() throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("bl00p-names-\(UUID().uuidString)", isDirectory: true)
@@ -4928,6 +5470,98 @@ private actor HandoffRecordingRuntime: AgentRuntime {
         respondedDirectories.append(profile.workingDirectory)
         return AsyncStream { continuation in
             continuation.yield(.status(.completed))
+            continuation.finish()
+        }
+    }
+
+    func resolveApproval(
+        entryID: UUID,
+        approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func stop(profile: BotProfile) async {}
+}
+
+private func managedWorkflowFixture() -> (
+    manager: BotProfile,
+    builder: BotProfile,
+    reviewer: BotProfile,
+    publisher: BotProfile,
+    team: ManagerTeamConfiguration,
+    profiles: [BotProfile]
+) {
+    let builder = BotProfile(
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement."
+    )
+    let reviewer = BotProfile(
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review."
+    )
+    let publisher = BotProfile(
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Document."
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builder.id,
+        reviewerProfileID: reviewer.id,
+        publisherProfileID: publisher.id
+    )
+    let manager = BotProfile(
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    return (
+        manager,
+        builder,
+        reviewer,
+        publisher,
+        team,
+        [manager, builder, reviewer, publisher]
+    )
+}
+
+private actor RecoveredApprovalRuntime: AgentRuntime {
+    private(set) var builderDispatchCount = 0
+
+    func start(
+        profile: BotProfile,
+        resumeThreadID: String?
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(
+                .sessionID(
+                    resumeThreadID
+                        ?? "recovered-\(profile.id.uuidString)"
+                )
+            )
+            continuation.yield(.status(.needsAnswer))
+            continuation.finish()
+        }
+    }
+
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        if profile.role == .builder {
+            builderDispatchCount += 1
+        }
+        return AsyncStream { continuation in
+            continuation.yield(.status(.working))
             continuation.finish()
         }
     }
