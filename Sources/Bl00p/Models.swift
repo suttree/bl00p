@@ -547,6 +547,7 @@ struct QuestionAnswer: Codable, Hashable, Sendable {
 
 enum QuestionResolutionState: String, Codable, Sendable {
     case pending
+    case submitting
     case answered
     case cancelled
 }
@@ -671,6 +672,7 @@ struct AgentSessionState: Codable, Sendable {
     var hasPendingQuestion: Bool {
         entries.contains {
             $0.question?.resolutionState == .pending
+                || $0.question?.resolutionState == .submitting
         }
     }
 }

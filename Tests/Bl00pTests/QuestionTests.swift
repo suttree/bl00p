@@ -10,6 +10,7 @@ func claudeAskUserQuestionPreservesDescriptionsAndBuildsExactResponse() throws {
           "subtype": "can_use_tool",
           "tool_name": "AskUserQuestion",
           "input": {
+            "context": "keep me",
             "questions": [
               {
                 "question": "How should I format the output?",
@@ -52,12 +53,12 @@ func claudeAskUserQuestionPreservesDescriptionsAndBuildsExactResponse() throws {
             "behavior": .string("allow"),
             "updatedInput": .object([
                 "questions": request["input"]!["questions"]!,
+                "context": .string("keep me"),
                 "answers": .object([
                     "How should I format the output?": .string("Summary"),
-                    "Which sections should I include?": .array([
-                        .string("Introduction"),
-                        .string("Conclusion")
-                    ])
+                    "Which sections should I include?": .string(
+                        "Introduction, Conclusion"
+                    )
                 ])
             ])
         ])
@@ -96,9 +97,133 @@ func claudeQuestionSupportsOtherTextWithoutRawProviderDataInTimeline() throws {
     #expect(entry.detail == nil)
     #expect(entry.text == "Which environment?")
     #expect(
+        parsed.declinedResult == .object([
+            "behavior": .string("deny"),
+            "message": .string(
+                "The user declined to answer this question in bl00p."
+            )
+        ])
+    )
+    #expect(
         parsed.result(answers: [question.id: answer])?["updatedInput"]?["answers"]?[
             "Which environment?"
         ] == .string("A temporary preview environment")
+    )
+}
+
+@Test
+func claudeQuestionCompletesAControlProtocolRoundTrip() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-claude-question-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    try FileManager.default.createDirectory(
+        at: directory,
+        withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let executable = directory.appendingPathComponent("fake-claude")
+    try """
+    #!/usr/bin/env python3
+    import json
+    import sys
+
+    questions = [{
+        "question": "Which checks should run?",
+        "header": "Checks",
+        "options": [
+            {"label": "Unit", "description": "Fast tests"},
+            {"label": "Integration", "description": "Process tests"}
+        ],
+        "multiSelect": True
+    }]
+
+    for line in sys.stdin:
+        message = json.loads(line)
+        if message.get("type") == "control_request":
+            request = message.get("request", {})
+            if request.get("subtype") == "initialize":
+                print(json.dumps({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": message["request_id"],
+                        "response": {"commands": []}
+                    }
+                }), flush=True)
+        elif message.get("type") == "user":
+            print(json.dumps({
+                "type": "control_request",
+                "request_id": "question-1",
+                "request": {
+                    "subtype": "can_use_tool",
+                    "tool_name": "AskUserQuestion",
+                    "input": {
+                        "questions": questions,
+                        "metadata": {"source": "fixture"}
+                    }
+                }
+            }), flush=True)
+        elif message.get("type") == "control_response":
+            print(json.dumps({
+                "type": "result",
+                "is_error": False,
+                "result": json.dumps(message["response"]["response"])
+            }), flush=True)
+            break
+    """.write(to: executable, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: executable.path
+    )
+
+    let client = ClaudeCLIClient(executableURL: executable)
+    try await client.connect(arguments: [], workingDirectory: directory)
+    try await client.send(
+        .object([
+            "type": .string("user"),
+            "message": .object([
+                "role": .string("user"),
+                "content": .string("Run checks")
+            ])
+        ])
+    )
+
+    var roundTripResult: JSONValue?
+    for await message in client.messages {
+        if message["type"]?.stringValue == "control_request",
+           let request = ClaudeQuestionRequest(request: message["request"]!) {
+            let result = try #require(
+                request.result(
+                    answers: [
+                        "question-0": QuestionAnswer(
+                            selectedOptionIDs: ["option-0", "option-1"]
+                        )
+                    ]
+                )
+            )
+            try await client.respond(to: "question-1", result: result)
+        } else if message["type"]?.stringValue == "result",
+                  let encoded = message["result"]?.stringValue {
+            roundTripResult = try JSONDecoder().decode(
+                JSONValue.self,
+                from: Data(encoded.utf8)
+            )
+            break
+        }
+    }
+    await client.stop()
+
+    #expect(
+        roundTripResult?["updatedInput"]?["answers"]?[
+            "Which checks should run?"
+        ] == .string("Unit, Integration")
+    )
+    #expect(
+        roundTripResult?["updatedInput"]?["metadata"]?["source"]
+            == .string("fixture")
     )
 }
 
@@ -157,7 +282,7 @@ func codexRequestUserInputBuildsAnswersByProviderQuestionID() throws {
 }
 
 @Test
-func malformedAndDuplicateProviderQuestionsAreRejected() throws {
+func malformedQuestionsAreRejectedWhileValidBatchMembersSurvive() throws {
     let malformedClaude = try decodeJSON(
         """
         {
@@ -179,7 +304,7 @@ func malformedAndDuplicateProviderQuestionsAreRejected() throws {
     )
 
     #expect(ClaudeQuestionRequest(request: malformedClaude) == nil)
-    #expect(CodexQuestionRequest(params: duplicateCodex) == nil)
+    #expect(CodexQuestionRequest(params: duplicateCodex)?.questions.count == 1)
 }
 
 @Test
@@ -220,6 +345,14 @@ func concurrentQuestionRequestsQueueWithoutOverwritingAndCancelCleanly() {
     let activeCancellation = queue.cancel(requestID: "request-1")
     #expect(activeCancellation?.wasActive == true)
     #expect(queue.first?.request == "third")
+    _ = queue.enqueue(
+        requestID: "request-4",
+        request: "fourth",
+        questions: [question]
+    )
+    let drained = queue.drain()
+    #expect(drained.map(\.requestID) == ["request-3", "request-4"])
+    #expect(queue.isEmpty)
 }
 
 @Test
@@ -253,6 +386,12 @@ func questionBatchAdvancesInOrderAndRetainsAnswersUntilSubmission() throws {
         ) == .readyToSubmit
     )
     #expect(pending.answers.count == 2)
+    #expect(
+        pending.record(
+            entryID: pending.entryID,
+            answer: QuestionAnswer(selectedOptionIDs: ["one"])
+        ) == nil
+    )
 }
 
 @Test
@@ -343,11 +482,18 @@ func appModelUsesDedicatedQuestionResponseAndGatesComposerMessages() async throw
             $0.question?.resolutionState == .pending
         })
     )
+    let answer = QuestionAnswer(selectedOptionIDs: ["one"])
     model.resolveQuestion(
         entry.id,
-        answer: QuestionAnswer(selectedOptionIDs: ["one"]),
+        answer: answer,
         for: profile.id
     )
+    #expect(
+        model.session(for: profile.id).entries.first(where: {
+            $0.id == entry.id
+        })?.question?.resolutionState == .submitting
+    )
+    model.resolveQuestion(entry.id, answer: answer, for: profile.id)
     try await eventually { () -> Bool in
         let resolved = model.session(for: profile.id).entries.first(where: {
             $0.id == entry.id
@@ -405,6 +551,77 @@ func questionTransportFailureLeavesThePendingCardAnswerable() async throws {
 
 @Test
 @MainActor
+func decliningAQuestionCancelsTheCardAndResumesTheTurn() async throws {
+    let runtime = QuestionRecordingRuntime()
+    let profile = BotProfile(
+        name: "Question bot",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "",
+        workingDirectory: "/tmp"
+    )
+    let store = try temporaryStore(
+        state: PersistedAppState(
+            profiles: [profile],
+            sessions: [profile.id: AgentSessionState()],
+            selectedBotID: profile.id
+        )
+    )
+    let model = AppModel(runtime: runtime, store: store)
+
+    model.launch(profile.id)
+    try await eventually {
+        model.session(for: profile.id).hasPendingQuestion
+    }
+    let entry = try #require(
+        model.session(for: profile.id).entries.first(where: {
+            $0.question?.resolutionState == .pending
+        })
+    )
+    model.resolveQuestion(entry.id, answer: nil, for: profile.id)
+
+    try await eventually {
+        model.session(for: profile.id).entries.first(where: {
+            $0.id == entry.id
+        })?.question?.resolutionState == .cancelled
+    }
+    #expect(await runtime.questionResponseCount == 1)
+    #expect(!model.session(for: profile.id).hasPendingQuestion)
+    #expect(model.session(for: profile.id).status == .working)
+}
+
+@Test
+func runtimeRouterForwardsQuestionAnswersToTheActiveProvider() async {
+    let claude = RouterRecordingRuntime()
+    let codex = RouterRecordingRuntime()
+    let router = AgentRuntimeRouter(claude: claude, codex: codex)
+    let profile = BotProfile(
+        name: "Codex",
+        provider: .codex,
+        role: .reviewer,
+        instructions: ""
+    )
+    let answer = QuestionAnswer(selectedOptionIDs: ["one"])
+
+    let startStream = await router.start(
+        profile: profile,
+        resumeThreadID: nil
+    )
+    for await _ in startStream {}
+    let responseStream = await router.resolveQuestion(
+        entryID: UUID(),
+        answer: answer,
+        profile: profile
+    )
+    for await _ in responseStream {}
+
+    #expect(await codex.questionResponseCount == 1)
+    #expect(await codex.lastQuestionAnswer == answer)
+    #expect(await claude.questionResponseCount == 0)
+}
+
+@Test
+@MainActor
 func pendingQuestionsAreCancelledWhenRestoredAfterRestart() throws {
     let profile = BotProfile(
         name: "Question bot",
@@ -412,7 +629,8 @@ func pendingQuestionsAreCancelledWhenRestoredAfterRestart() throws {
         role: .builder,
         instructions: ""
     )
-    let question = testQuestion(allowsMultiple: false)
+    var question = testQuestion(allowsMultiple: false)
+    question.resolutionState = .submitting
     let store = try temporaryStore(
         state: PersistedAppState(
             profiles: [profile],
@@ -537,12 +755,15 @@ private actor QuestionRecordingRuntime: AgentRuntime {
 
     func resolveQuestion(
         entryID: UUID,
-        answer: QuestionAnswer,
+        answer: QuestionAnswer?,
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent> {
         questionResponseCount += 1
         return AsyncStream { continuation in
             if failQuestionResponse {
+                continuation.yield(
+                    .questionResolved(entryID, nil, .pending)
+                )
                 continuation.yield(
                     .entry(
                         .init(
@@ -554,12 +775,56 @@ private actor QuestionRecordingRuntime: AgentRuntime {
                 continuation.yield(.status(.needsAnswer))
             } else {
                 continuation.yield(
-                    .questionResolved(entryID, answer, .answered)
+                    .questionResolved(
+                        entryID,
+                        answer,
+                        answer == nil ? .cancelled : .answered
+                    )
                 )
                 continuation.yield(.status(.working))
             }
             continuation.finish()
         }
+    }
+
+    func stop(profile: BotProfile) async {}
+}
+
+private actor RouterRecordingRuntime: AgentRuntime {
+    private(set) var questionResponseCount = 0
+    private(set) var lastQuestionAnswer: QuestionAnswer?
+
+    func start(
+        profile: BotProfile,
+        resumeThreadID: String?
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func resolveApproval(
+        entryID: UUID,
+        approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func resolveQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer?,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        questionResponseCount += 1
+        lastQuestionAnswer = answer
+        return AsyncStream { $0.finish() }
     }
 
     func stop(profile: BotProfile) async {}

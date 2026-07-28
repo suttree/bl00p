@@ -2302,6 +2302,14 @@ private actor HandoffRecordingRuntime: AgentRuntime {
         AsyncStream { $0.finish() }
     }
 
+    func resolveQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer?,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
     func stop(profile: BotProfile) async {}
 }
 
@@ -2377,6 +2385,14 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
         return AsyncStream { $0.finish() }
     }
 
+    func resolveQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer?,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
     func stop(profile: BotProfile) async {}
 }
 
@@ -2417,6 +2433,14 @@ private actor ImmediateRecordingRuntime: AgentRuntime {
     func resolveApproval(
         entryID: UUID,
         approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func resolveQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer?,
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent> {
         AsyncStream { $0.finish() }
@@ -2471,6 +2495,14 @@ private actor FailOnceRuntime: AgentRuntime {
     func resolveApproval(
         entryID: UUID,
         approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func resolveQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer?,
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent> {
         AsyncStream { $0.finish() }
@@ -2535,6 +2567,14 @@ private actor LongLivedStartupRuntime: AgentRuntime {
     func resolveApproval(
         entryID: UUID,
         approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func resolveQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer?,
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent> {
         AsyncStream { $0.finish() }

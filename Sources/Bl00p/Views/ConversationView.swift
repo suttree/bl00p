@@ -284,7 +284,7 @@ private struct TranscriptView: View {
     let canRetryFailedMessage: Bool
     let retry: (UUID) -> Void
     let resolveApproval: (UUID, Bool) -> Void
-    let resolveQuestion: (UUID, QuestionAnswer) -> Void
+    let resolveQuestion: (UUID, QuestionAnswer?) -> Void
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -336,7 +336,7 @@ private struct TimelineEntryView: View {
     let canRetryFailedMessage: Bool
     let retry: (UUID) -> Void
     let resolveApproval: (UUID, Bool) -> Void
-    let resolveQuestion: (UUID, QuestionAnswer) -> Void
+    let resolveQuestion: (UUID, QuestionAnswer?) -> Void
 
     var body: some View {
         switch entry.kind {
@@ -545,8 +545,9 @@ private struct TimelineEntryView: View {
 private struct InteractiveQuestionCard: View {
     let entryID: UUID
     let question: InteractiveQuestion
-    let resolve: (UUID, QuestionAnswer) -> Void
+    let resolve: (UUID, QuestionAnswer?) -> Void
     @State private var draft = QuestionResponseDraft()
+    @State private var isSubmitting = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
@@ -556,7 +557,7 @@ private struct InteractiveQuestionCard: View {
                     .foregroundStyle(Color.bl00pPinkText)
                 Spacer()
                 if question.resolutionState != .pending {
-                    Text(question.resolutionState == .answered ? "Answered" : "Cancelled")
+                    Text(resolutionLabel)
                         .font(.bl00p(.caption1, weight: .semibold))
                         .foregroundStyle(.secondary)
                 }
@@ -581,12 +582,27 @@ private struct InteractiveQuestionCard: View {
                         .textFieldStyle(.roundedBorder)
                 }
 
-                Button("Continue") {
-                    resolve(entryID, draft.answer(for: question))
+                HStack {
+                    Button("Decline") {
+                        isSubmitting = true
+                        resolve(entryID, nil)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isSubmitting)
+
+                    Button("Continue") {
+                        isSubmitting = true
+                        resolve(entryID, draft.answer(for: question))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .foregroundStyle(Color.bl00pAvatarInk)
+                    .disabled(
+                        isSubmitting || !draft.canContinue(for: question)
+                    )
                 }
-                .buttonStyle(.borderedProminent)
-                .foregroundStyle(Color.bl00pAvatarInk)
-                .disabled(!draft.canContinue(for: question))
+            } else if question.resolutionState == .submitting {
+                ProgressView("Sending response…")
+                    .controlSize(.small)
             } else if let answer = question.answer {
                 Text(answer.displayValues(for: question).joined(separator: ", "))
                     .font(.bl00p(.callout))
@@ -599,6 +615,20 @@ private struct InteractiveQuestionCard: View {
         .overlay {
             RoundedRectangle(cornerRadius: 14)
                 .stroke(Color.bl00pPink.opacity(0.40), lineWidth: 1)
+        }
+        .onChange(of: question.resolutionState) { _, state in
+            if state == .pending {
+                isSubmitting = false
+            }
+        }
+    }
+
+    private var resolutionLabel: String {
+        switch question.resolutionState {
+        case .pending: ""
+        case .submitting: "Sending…"
+        case .answered: "Answered"
+        case .cancelled: "Declined"
         }
     }
 

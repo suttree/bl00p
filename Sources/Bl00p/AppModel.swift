@@ -60,7 +60,8 @@ final class AppModel: ObservableObject {
                     session.entries = session.entries.map(Self.migrateLegacyPermissionEntry)
                     session.entries.removeAll(where: Self.isPrototypeStarterEntry)
                     for index in session.entries.indices
-                    where session.entries[index].question?.resolutionState == .pending {
+                    where session.entries[index].question?.resolutionState == .pending
+                        || session.entries[index].question?.resolutionState == .submitting {
                         session.entries[index].question?.resolutionState = .cancelled
                     }
                     if session.status == .launching
@@ -294,6 +295,14 @@ final class AppModel: ObservableObject {
         guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
         connectedProfileIDs.remove(profileID)
         runGenerations[profileID] = UUID()
+        if var state = sessions[profileID] {
+            for index in state.entries.indices
+            where state.entries[index].question?.resolutionState == .pending
+                || state.entries[index].question?.resolutionState == .submitting {
+                state.entries[index].question?.resolutionState = .cancelled
+            }
+            sessions[profileID] = state
+        }
         Task {
             await runtime.stop(profile: runtimeProfile(for: profile))
         }
@@ -498,18 +507,23 @@ final class AppModel: ObservableObject {
 
     func resolveQuestion(
         _ entryID: UUID,
-        answer: QuestionAnswer,
+        answer: QuestionAnswer?,
         for profileID: UUID
     ) {
         guard let profile = profiles.first(where: { $0.id == profileID }),
-              let entry = sessions[profileID]?.entries.first(where: {
+              var state = sessions[profileID],
+              let entryIndex = state.entries.firstIndex(where: {
                   $0.id == entryID
               }),
-              let question = entry.question,
+              let question = state.entries[entryIndex].question,
               question.resolutionState == .pending,
-              answer.isValid(for: question) else {
+              answer?.isValid(for: question) != false else {
             return
         }
+
+        state.entries[entryIndex].question?.resolutionState = .submitting
+        sessions[profileID] = state
+        save()
 
         let generation = runGenerations[profileID] ?? UUID()
         runGenerations[profileID] = generation

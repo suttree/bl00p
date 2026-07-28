@@ -12,6 +12,7 @@ struct QueuedQuestionRequest<RequestID: Equatable & Sendable, Request: Sendable>
     var answers: [String: QuestionAnswer] = [:]
     var currentIndex = 0
     var entryID = UUID()
+    var isResponding = false
 
     var currentQuestion: InteractiveQuestion {
         questions[currentIndex]
@@ -22,16 +23,28 @@ struct QueuedQuestionRequest<RequestID: Equatable & Sendable, Request: Sendable>
         answer: QuestionAnswer
     ) -> QuestionAnswerProgress? {
         guard self.entryID == entryID,
+              !isResponding,
               answer.isValid(for: currentQuestion) else {
             return nil
         }
         answers[currentQuestion.id] = answer
         guard currentIndex + 1 < questions.count else {
+            isResponding = true
             return .readyToSubmit
         }
         currentIndex += 1
         self.entryID = UUID()
         return .next
+    }
+
+    mutating func beginDecline(entryID: UUID) -> Bool {
+        guard self.entryID == entryID, !isResponding else { return false }
+        isResponding = true
+        return true
+    }
+
+    mutating func resetResponse() {
+        isResponding = false
     }
 }
 
@@ -51,7 +64,8 @@ struct QuestionRequestQueue<RequestID: Equatable & Sendable, Request: Sendable>:
     mutating func enqueue(
         requestID: RequestID,
         request: Request,
-        questions: [InteractiveQuestion]
+        questions: [InteractiveQuestion],
+        entryID: UUID = UUID()
     ) -> QueuedQuestionRequest<RequestID, Request>? {
         guard !questions.isEmpty,
               !requests.contains(where: { $0.requestID == requestID }) else {
@@ -60,7 +74,8 @@ struct QuestionRequestQueue<RequestID: Equatable & Sendable, Request: Sendable>:
         let queued = QueuedQuestionRequest(
             requestID: requestID,
             request: request,
-            questions: questions
+            questions: questions,
+            entryID: entryID
         )
         requests.append(queued)
         return queued
@@ -92,32 +107,38 @@ struct QuestionRequestQueue<RequestID: Equatable & Sendable, Request: Sendable>:
         return (requests.remove(at: index), index == 0)
     }
 
-    mutating func removeAll() {
-        requests.removeAll()
+    mutating func drain() -> [QueuedQuestionRequest<RequestID, Request>] {
+        defer { requests.removeAll() }
+        return requests
     }
 }
 
 struct ClaudeQuestionRequest: Sendable {
     let questions: [InteractiveQuestion]
-    let originalQuestions: JSONValue
+    let originalInput: JSONValue
 
     init?(request: JSONValue) {
         guard request["subtype"]?.stringValue == "can_use_tool",
               request["tool_name"]?.stringValue == "AskUserQuestion",
-              let values = request["input"]?["questions"]?.arrayValue,
+              let input = request["input"] else {
+            return nil
+        }
+        self.init(input: input)
+    }
+
+    init?(input: JSONValue) {
+        guard input.objectValue != nil,
+              let values = input["questions"]?.arrayValue,
               !values.isEmpty else {
             return nil
         }
-
         var parsed: [InteractiveQuestion] = []
         var prompts: Set<String> = []
         for (questionIndex, value) in values.enumerated() {
             guard let prompt = value["question"]?.stringValue,
                   !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  prompts.insert(prompt).inserted,
-                  let optionValues = value["options"]?.arrayValue else {
-                return nil
-            }
+                  prompts.insert(prompt).inserted else { continue }
+            let optionValues = value["options"]?.arrayValue ?? []
             let options: [QuestionOption] = optionValues.enumerated().compactMap { optionIndex, option in
                 guard let label = option["label"]?.stringValue,
                       !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -129,7 +150,6 @@ struct ClaudeQuestionRequest: Sendable {
                     description: option["description"]?.stringValue
                 )
             }
-            guard options.count == optionValues.count else { return nil }
             parsed.append(
                 InteractiveQuestion(
                     id: "question-\(questionIndex)",
@@ -141,8 +161,9 @@ struct ClaudeQuestionRequest: Sendable {
             )
         }
 
+        guard !parsed.isEmpty else { return nil }
         questions = parsed
-        originalQuestions = .array(values)
+        originalInput = input
     }
 
     func result(answers: [String: QuestionAnswer]) -> JSONValue? {
@@ -153,16 +174,20 @@ struct ClaudeQuestionRequest: Sendable {
                 return nil
             }
             let values = answer.displayValues(for: question)
-            mapped[question.text] = question.allowsMultiple
-                ? .array(values.map(JSONValue.string))
-                : .string(values[0])
+            mapped[question.text] = .string(values.joined(separator: ", "))
         }
+        guard var updatedInput = originalInput.objectValue else { return nil }
+        updatedInput["answers"] = .object(mapped)
         return .object([
             "behavior": .string("allow"),
-            "updatedInput": .object([
-                "questions": originalQuestions,
-                "answers": .object(mapped)
-            ])
+            "updatedInput": .object(updatedInput)
+        ])
+    }
+
+    var declinedResult: JSONValue {
+        .object([
+            "behavior": .string("deny"),
+            "message": .string("The user declined to answer this question in bl00p.")
         ])
     }
 }
@@ -184,7 +209,7 @@ struct CodexQuestionRequest: Sendable {
                   ids.insert(id).inserted,
                   let prompt = value["question"]?.stringValue,
                   !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                return nil
+                continue
             }
             let optionValues = value["options"]?.arrayValue ?? []
             let options: [QuestionOption] = optionValues.enumerated().compactMap { index, option in
@@ -198,7 +223,6 @@ struct CodexQuestionRequest: Sendable {
                     description: option["description"]?.stringValue
                 )
             }
-            guard options.count == optionValues.count else { return nil }
             parsed.append(
                 InteractiveQuestion(
                     id: id,
@@ -209,6 +233,7 @@ struct CodexQuestionRequest: Sendable {
                 )
             )
         }
+        guard !parsed.isEmpty else { return nil }
         questions = parsed
     }
 
