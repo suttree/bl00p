@@ -13,7 +13,8 @@ The current prototype includes:
 - Consistent, legible typography across conversations, settings, and bot creation
 - Structured messages, commands, findings, and approval cards
 - Optional Manager bots that coordinate a persistent Builder → Reviewer →
-  Builder fixes → Reviewer re-check → Documenter / PR Writer workflow
+  conditional Builder fixes and Reviewer re-check → Documenter / PR Writer
+  workflow
 - Isolated managed Git worktrees for implementation bots, with structured
   handoff packages that carry branch, task, working-tree, and test context to
   the next bot
@@ -70,25 +71,48 @@ a bot with the **Manager** role, then assign one existing Builder, Reviewer, and
 Documenter / PR Writer in its settings. The Manager's next request starts a
 persisted workflow with this sequence:
 
-1. The Manager prepares an implementation plan from your request.
-2. You approve the exact implementation plan before it is handed to the team.
-3. The Builder receives both the original request and the approved plan in a
-   visible implementation brief and runtime handoff, then works in an isolated
-   branch and commits a tested change locally.
+1. The Manager prepares the implementation brief.
+2. You approve the implementation plan before it is handed to the team.
+3. The Builder works in an isolated branch and commits a tested change locally.
 4. The Reviewer performs a read-only review.
-5. The Builder addresses the findings and commits the fixes.
-6. The Reviewer verifies the updated implementation.
-7. The Documenter updates documentation, commits, pushes, and opens a draft PR.
-8. The Manager reports the draft PR link and delivery summary.
+5. If the Reviewer requests changes (or its structured result is missing), the
+   Builder addresses the findings and the Reviewer verifies the updated commit.
+   A clean review skips both extra turns.
+6. The Documenter updates documentation, commits, pushes, and opens a draft PR.
+7. bl00p completes the workflow directly from the recorded branch, test
+   evidence, Reviewer result, Documenter summary, and draft PR URL.
+
+Before each Reviewer pass, bl00p requires a clean Builder worktree, the
+appropriate committed revision, and passing test evidence. Revision passes
+must include fresh passing test evidence recorded after the review began.
+Saved workflows recover these handoff requirements across app restarts without
+discarding an already-running Documenter session.
 
 Questions, failures, and approval requests pause the workflow for the user.
+The Manager's implementation plan approval is persisted with the workflow, so a
+relaunch can restore a missing or interrupted approval card without dispatching
+the Builder twice. Unrelated runtime permission approvals remain runtime
+approvals, and declining the plan leaves the workflow paused for revision
+feedback.
 Leaving any team assignment unset keeps that Manager in standalone chat mode.
+Clean workflows use four agent turns; workflows with one requested-changes
+round use six, and workflows with two rounds use eight. If findings remain
+after two revision rounds, bl00p pauses the loop for user direction instead of
+continuing indefinitely. Reviewer protocol markers are kept out of the
+user-visible findings and completion summary.
 
-The Manager→Builder handoff is deliberately plan-bound: bl00p records the
-approved plan entry and checks it against the persisted workflow before
-dispatching the Builder. If the plan is missing or inconsistent, the workflow
-pauses for correction instead of sending the original request as a substitute
-for the approved implementation details.
+For an unattended managed workflow, configure its Claude Reviewer with **Auto**
+approval mode. A Reviewer in **Ask** mode pauses when it first requests a shell
+inspection such as `git diff`, so the workflow waits for a user decision. Auto
+mode allows supported read-only repository inspection while preserving the
+Reviewer boundary.
+
+The Manager's implementation plan appears once, inside the approval card. The
+card renders the plan as readable Markdown and provides the Approve and Decline
+actions; the same plan is not repeated as a separate conversation message.
+
+The persistence rules and restore invariants are documented in
+[docs/MANAGED_WORKFLOWS.md](docs/MANAGED_WORKFLOWS.md).
 
 ## Runtime boundary
 
@@ -98,14 +122,41 @@ Reviewer, and Documenter threads use workspace-scoped execution and route
 elevated and connected-app actions through bl00p's approval cards. Manager
 threads are non-escalatable and read-only so bl00p alone owns delegation to
 the configured team. Threads resume from their saved thread ID when possible.
+Successful executable discovery and Claude authentication checks are cached
+until a launch, turn, or transport failure invalidates them, so moved provider
+executables and expired authentication can be detected again without
+restarting bl00p. State writes are coalesced off the main actor, use
+last-write-wins revisioning, and are flushed when the app quits (with a short
+timeout so a slow write cannot block termination). Performance logs contain
+stage durations plus provider, model, role, and cold/warm identifiers only;
+prompts, generated content, and filesystem paths are never included.
 
 Claude profiles use the installed `claude` executable's `stream-json` mode.
 They inherit Claude's user and project settings, including configured MCP
 servers. The current allowlist supports repository inspection, file edits for
 Builder and Documenter roles, common test commands, and read-only Linear tools.
-Manager and Reviewer roles cannot edit files. Actions outside that allowlist
-pause in the conversation, where the user can approve or decline the exact
-tool call before Claude continues.
+Manager actions are always blocked. Reviewers can inspect the repository, but
+do not receive pre-approved shell access; built-in file-edit tools and
+write-capable shell commands are blocked by the runtime policy. For other
+actions, Ask pauses in the conversation so the user can approve or decline the
+exact tool call. Auto immediately allows only supported, workspace-scoped
+actions and records each decision in the transcript; destructive and
+publishing commands, outside-workspace paths, and classified Reviewer writes
+remain blocked. Unclassified non-shell tools return to the explicit approval
+flow instead of being run automatically.
+
+Reviewer shell access is intentionally read-only: commands such as
+`swift test`, `npm run lint`, and other classified verification commands are
+denied rather than offered for approval. Reviewers confirm the reported test
+evidence instead. Manager profiles cannot run shell commands in any approval
+mode; they coordinate the assigned team through the managed workflow.
+
+For managed workflows, the plan approval is represented by a dedicated
+approval entry that replaces the Manager's streamed plan entry at the same
+timeline position. The replacement receives its own identifier so subsequent
+runtime updates cannot overwrite the approval card. Planning output is scoped
+to the current Manager turn, which prevents an older assistant message from
+being mistaken for a new implementation plan.
 
 ## Roadmap
 

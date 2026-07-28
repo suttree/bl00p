@@ -128,56 +128,6 @@ struct ClaudeInvocation: Sendable {
     }
 
     private var allowedTools: [String] {
-        var tools = [
-            "Read",
-            "Glob",
-            "Grep",
-            "ToolSearch",
-            "WebFetch",
-            "WebSearch",
-            "mcp__linear__get_issue",
-            "mcp__linear__list_issues",
-            "mcp__linear__search_issues",
-            "mcp__linear__get_issue_comments",
-            "mcp__linear__list_comments",
-            "mcp__linear__get_project",
-            "mcp__linear__list_projects",
-            "mcp__linear__get_team",
-            "mcp__linear__list_teams",
-            "Bash(git status:*)",
-            "Bash(git diff:*)",
-            "Bash(git log:*)",
-            "Bash(git show:*)",
-            "Bash(git branch:*)",
-            "Bash(git rev-parse:*)",
-            "Bash(git merge-base:*)",
-            "Bash(git ls-files:*)",
-            "Bash(git grep:*)",
-            "Bash(swift --version:*)",
-            "Bash(swift test:*)",
-            "Bash(swift build:*)",
-            "Bash(env swift --version:*)",
-            "Bash(xcrun --find swift:*)",
-            "Bash(xcrun swift test:*)",
-            "Bash(xcrun swift build:*)",
-            "Bash(xcode-select -p:*)",
-            "Bash(xcodebuild test:*)",
-            "Bash(xcodebuild build:*)",
-            "Bash(npm test:*)",
-            "Bash(npm run test:*)",
-            "Bash(npm run lint:*)",
-            "Bash(npm run typecheck:*)",
-            "Bash(pnpm test:*)",
-            "Bash(pnpm lint:*)",
-            "Bash(yarn test:*)",
-            "Bash(cargo test:*)",
-            "Bash(go test:*)",
-            "Bash(pytest:*)"
-        ]
-
-        if profile.role == .builder || profile.role == .publisher {
-            tools.append(contentsOf: ["Edit", "Write", "NotebookEdit"])
-        }
-        return tools
+        ClaudeToolApprovalPolicy.allowedTools(for: profile.role)
     }
 }
