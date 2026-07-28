@@ -14,7 +14,7 @@ struct SidebarView: View {
                 ForEach(model.profiles) { profile in
                     BotRow(
                         profile: profile,
-                        session: model.session(for: profile.id),
+                        sessions: model.sessions(for: profile.id),
                         windowColorScheme: windowColorScheme
                     )
                     .tag(Optional(profile.id))
@@ -92,6 +92,17 @@ struct SidebarView: View {
         } message: {
             Text("Choose the name shown in the sidebar and conversation.")
         }
+        .alert(
+            "Could not delete bot",
+            isPresented: Binding(
+                get: { model.profileDeletionError != nil },
+                set: { if !$0 { model.profileDeletionError = nil } }
+            )
+        ) {
+            Button("OK") {}
+        } message: {
+            Text(model.profileDeletionError ?? "")
+        }
     }
 
     private var brand: some View {
@@ -110,11 +121,13 @@ struct SidebarView: View {
 
 private struct BotRow: View {
     let profile: BotProfile
-    let session: AgentSessionState
+    let sessions: [AgentSessionState]
     let windowColorScheme: ColorScheme
 
     private var showsAttention: Bool {
-        session.status.needsAttention || session.hasUnreadCompletion
+        sessions.contains {
+            $0.status.needsAttention || $0.hasUnreadCompletion
+        }
     }
 
     var body: some View {
@@ -158,7 +171,9 @@ private struct BotRow: View {
 
             Spacer(minLength: 2)
 
-            if session.status == .working || session.status == .launching {
+            if sessions.contains(where: {
+                $0.status == .working || $0.status == .launching
+            }) {
                 ProgressView()
                     .controlSize(.small)
             }

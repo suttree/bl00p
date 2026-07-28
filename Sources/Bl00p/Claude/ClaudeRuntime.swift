@@ -692,6 +692,15 @@ actor ClaudeRuntime: AgentRuntime {
             resolvedActionKeys: session.successfulToolActionKeys
                 .union(session.approvedToolActionKeys)
         )
+        let reviewResponses =
+            Array(session.assistantTexts)
+                + (result.map { [$0] } ?? [])
+        let permissionDenialsRequiringAttention =
+            ClaudeTurnOutcome.permissionDenialsRequiringAttention(
+                permissionDenials,
+                role: session.pendingTurn?.profile.role,
+                responses: reviewResponses
+            )
 
         if failed,
            session.shouldResume,
@@ -753,7 +762,7 @@ actor ClaudeRuntime: AgentRuntime {
             yield(.entry(.init(kind: .assistant, text: result)), profileID: profileID)
         }
 
-        if !permissionDenials.isEmpty {
+        if !permissionDenialsRequiringAttention.isEmpty {
             yield(
                 .entry(
                     .init(
@@ -761,7 +770,9 @@ actor ClaudeRuntime: AgentRuntime {
                         title: "Some actions were blocked",
                         text: "Claude could not run one or more required actions. Retry and approve the bl00p prompt, or adjust the applicable Claude deny rule before continuing.",
                         detail: ClaudePermissionDenials
-                            .readableDetail(for: permissionDenials)
+                            .readableDetail(
+                                for: permissionDenialsRequiringAttention
+                            )
                     )
                 ),
                 profileID: profileID
@@ -781,7 +792,8 @@ actor ClaudeRuntime: AgentRuntime {
             .status(
                 ClaudeTurnOutcome.status(
                     failed: failed,
-                    permissionDenials: permissionDenials
+                    permissionDenials:
+                        permissionDenialsRequiringAttention
                 )
             )
         )
@@ -1005,6 +1017,20 @@ enum ClaudeResumeRecovery {
 }
 
 enum ClaudeTurnOutcome {
+    static func permissionDenialsRequiringAttention(
+        _ permissionDenials: [JSONValue],
+        role: AgentRole?,
+        responses: [String]
+    ) -> [JSONValue] {
+        guard role == .reviewer,
+              responses.contains(where: {
+                  ReviewDisposition.parse(from: $0) != nil
+              }) else {
+            return permissionDenials
+        }
+        return []
+    }
+
     static func status(
         failed: Bool,
         permissionDenials: [JSONValue]

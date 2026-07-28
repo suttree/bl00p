@@ -11,12 +11,55 @@ protocol GitWorktreeManaging: Sendable {
         from profile: BotProfile,
         session: AgentSessionState
     ) async throws -> GitHandoffPackage
+
+    func prepareWorktree(
+        for profile: BotProfile,
+        sessionID: UUID,
+        startingPoint: String?,
+        handoffID: UUID?
+    ) async throws -> GitWorktreeOwnership
+
+    func worktreeIsDirty(_ ownership: GitWorktreeOwnership) async throws -> Bool
+    func removeWorktree(
+        _ ownership: GitWorktreeOwnership,
+        force: Bool
+    ) async throws
+}
+
+extension GitWorktreeManaging {
+    func prepareWorktree(
+        for profile: BotProfile,
+        sessionID: UUID,
+        startingPoint: String?,
+        handoffID: UUID?
+    ) async throws -> GitWorktreeOwnership {
+        var ownership = try await prepareWorktree(
+            for: profile,
+            startingPoint: startingPoint,
+            handoffID: handoffID
+        )
+        ownership.ownerSessionID = sessionID
+        return ownership
+    }
+
+    func worktreeIsDirty(_ ownership: GitWorktreeOwnership) async throws -> Bool {
+        false
+    }
+
+    func removeWorktree(
+        _ ownership: GitWorktreeOwnership,
+        force: Bool
+    ) async throws {
+        // Test and preview managers without worktree cleanup have no filesystem
+        // resource to remove.
+    }
 }
 
 enum GitWorktreeError: LocalizedError {
     case noRepository
     case invalidRepository(String)
     case conflictingWorktree(String)
+    case unsafeCleanupTarget(String)
     case commandFailed(String)
 
     var errorDescription: String? {
@@ -27,6 +70,8 @@ enum GitWorktreeError: LocalizedError {
             "\(path) is not inside a Git repository."
         case .conflictingWorktree(let path):
             "The managed worktree at \(path) belongs to a different branch."
+        case .unsafeCleanupTarget(let path):
+            "Refusing to remove an unregistered or unsafe worktree path: \(path)"
         case .commandFailed(let detail):
             detail
         }
@@ -36,8 +81,39 @@ enum GitWorktreeError: LocalizedError {
 actor GitWorktreeManager: GitWorktreeManaging {
     func prepareWorktree(
         for profile: BotProfile,
+        sessionID: UUID,
         startingPoint: String? = nil,
         handoffID: UUID? = nil
+    ) async throws -> GitWorktreeOwnership {
+        try prepareWorktree(
+            for: profile,
+            sessionID: sessionID,
+            startingPoint: startingPoint,
+            handoffID: handoffID,
+            legacyOwnership: profile.worktree
+        )
+    }
+
+    func prepareWorktree(
+        for profile: BotProfile,
+        startingPoint: String? = nil,
+        handoffID: UUID? = nil
+    ) async throws -> GitWorktreeOwnership {
+        try prepareWorktree(
+            for: profile,
+            sessionID: profile.id,
+            startingPoint: startingPoint,
+            handoffID: handoffID,
+            legacyOwnership: profile.worktree
+        )
+    }
+
+    private func prepareWorktree(
+        for profile: BotProfile,
+        sessionID: UUID,
+        startingPoint: String?,
+        handoffID: UUID?,
+        legacyOwnership: GitWorktreeOwnership?
     ) throws -> GitWorktreeOwnership {
         guard !profile.workingDirectory.isEmpty else {
             throw GitWorktreeError.noRepository
@@ -48,15 +124,19 @@ actor GitWorktreeManager: GitWorktreeManaging {
             .resolvingSymlinksInPath()
         let repository = try primaryRepositoryRoot(from: selectedDirectory)
 
-        if let ownership = profile.worktree,
+        if let ownership = legacyOwnership,
            ownership.ownerProfileID == profile.id,
+           ownership.ownerSessionID == sessionID
+                || (ownership.ownerSessionID == nil && sessionID == profile.id),
            canonicalPath(ownership.repositoryPath) == repository.path,
            isReusable(ownership) {
-            return ownership
+            var migrated = ownership
+            migrated.ownerSessionID = sessionID
+            return migrated
         }
 
-        let profileMark = String(
-            profile.id.uuidString
+        let sessionMark = String(
+            sessionID.uuidString
                 .lowercased()
                 .replacingOccurrences(of: "-", with: "")
                 .prefix(8)
@@ -70,12 +150,12 @@ actor GitWorktreeManager: GitWorktreeManaging {
             )
         } ?? ""
         let name = branchSlug(profile.name)
-        let branch = "bl00p/\(name)-\(profileMark)\(handoffMark)"
+        let branch = "bl00p/\(name)-\(sessionMark)\(handoffMark)"
         let worktreeRoot = repository
             .deletingLastPathComponent()
             .appendingPathComponent(".bl00p-worktrees", isDirectory: true)
         let worktree = worktreeRoot.appendingPathComponent(
-            "\(repository.lastPathComponent)-\(profileMark)\(handoffMark)",
+            "\(repository.lastPathComponent)-\(sessionMark)\(handoffMark)",
             isDirectory: true
         )
         let worktreePath = canonicalPath(worktree.path)
@@ -112,11 +192,57 @@ actor GitWorktreeManager: GitWorktreeManaging {
 
         return GitWorktreeOwnership(
             ownerProfileID: profile.id,
+            ownerSessionID: sessionID,
             repositoryPath: repository.path,
             worktreePath: worktreePath,
             branch: branch,
             baseRevision: baseRevision
         )
+    }
+
+    func worktreeIsDirty(_ ownership: GitWorktreeOwnership) async throws -> Bool {
+        _ = try validateCleanupTarget(ownership)
+        let result = try git(
+            ["status", "--porcelain"],
+            in: URL(fileURLWithPath: ownership.worktreePath)
+        )
+        return !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func removeWorktree(
+        _ ownership: GitWorktreeOwnership,
+        force: Bool
+    ) async throws {
+        let repository = try validateCleanupTarget(ownership)
+        var arguments = ["worktree", "remove"]
+        if force {
+            arguments.append("--force")
+        }
+        arguments.append(ownership.worktreePath)
+        _ = try git(arguments, in: repository)
+    }
+
+    private func validateCleanupTarget(
+        _ ownership: GitWorktreeOwnership
+    ) throws -> URL {
+        let repository = URL(fileURLWithPath: ownership.repositoryPath)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        let path = canonicalPath(ownership.worktreePath)
+        let expectedRoot = canonicalPath(
+            repository.deletingLastPathComponent()
+                .appendingPathComponent(".bl00p-worktrees", isDirectory: true)
+                .path
+        )
+        guard path.hasPrefix(expectedRoot + "/"),
+              path != repository.path else {
+            throw GitWorktreeError.unsafeCleanupTarget(path)
+        }
+        let registered = try registeredWorktrees(in: repository)
+        guard registered[path] == ownership.branch else {
+            throw GitWorktreeError.unsafeCleanupTarget(path)
+        }
+        return repository
     }
 
     func makeHandoff(

@@ -82,6 +82,7 @@ private struct RootView: View {
                     ProfileInspectorView(
                         profile: model.binding(for: selectedID),
                         profiles: model.profiles,
+                        currentWorktree: model.session(for: selectedID).worktree,
                         chooseDirectory: { model.chooseWorkingDirectory(for: selectedID) }
                     )
                     .frame(width: 330)

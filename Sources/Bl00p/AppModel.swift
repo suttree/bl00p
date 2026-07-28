@@ -41,14 +41,30 @@ private struct BuilderImplementationHandoff: Sendable {
     }
 }
 
+struct SessionCloseAssessment: Equatable, Sendable {
+    var isActive: Bool
+    var hasDirtyWorktree: Bool
+    var participatesInWorkflow: Bool
+    var leavesWorktreeOnDisk: Bool = false
+    var worktreeWarning: String? = nil
+
+    var requiresDestructiveConfirmation: Bool {
+        isActive || hasDirtyWorktree || participatesInWorkflow
+            || leavesWorktreeOnDisk
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var profiles: [BotProfile]
     @Published var sessions: [UUID: AgentSessionState]
+    @Published var sessionOrder: [UUID: [UUID]]
+    @Published var selectedSessionIDs: [UUID: UUID]
     @Published var managerWorkflows: [UUID: ManagerWorkflow]
     @Published var selectedBotID: UUID?
     @Published var isInspectorVisible = false
     @Published var isAddingBot = false
+    @Published var profileDeletionError: String?
 
     private let runtime: any AgentRuntime
     private let worktrees: any GitWorktreeManaging
@@ -59,6 +75,7 @@ final class AppModel: ObservableObject {
     private var connectedProfileIDs: Set<UUID> = []
     private var inFlightUserEntryIDs: [UUID: UUID] = [:]
     private var planningTurnAssistantEntryIDs: [UUID: Set<UUID>] = [:]
+    private var draftSaveTasks: [UUID: Task<Void, Never>] = [:]
     private var notificationsArePrepared = false
     private var persistenceRevision: UInt64 = 0
     private var launchedProfileIDs: Set<UUID> = []
@@ -111,32 +128,104 @@ final class AppModel: ObservableObject {
                         : nil
                 }
             )
-            sessions = Dictionary(
-                uniqueKeysWithValues: saved.sessions.map { profileID, restoredSession in
+            var restoredSessions = Dictionary(
+                uniqueKeysWithValues: saved.sessions.map { sessionKey, restoredSession in
                     var session = restoredSession
+                    let ownerID = session.ownerProfileID ?? sessionKey
+                    session.id = sessionKey
+                    session.ownerProfileID = ownerID
+                    if session.title == "New chat",
+                       let firstMessage = session.entries.first(where: { $0.kind == .user })?.text {
+                        session.title = Self.sessionTitle(from: firstMessage)
+                    }
+                    if session.worktree == nil,
+                       let profile = restoredProfiles.first(where: { $0.id == ownerID }),
+                       let legacyWorktree = profile.worktree {
+                        var migratedWorktree = legacyWorktree
+                        migratedWorktree.ownerSessionID = sessionKey
+                        session.worktree = migratedWorktree
+                    }
+                    let endedAtLegacyPermissionBoundary =
+                        session.entries.last?.text == "Claude stopped at a permission boundary"
                     session.entries = session.entries
                         .map(Self.migrateLegacyPermissionEntry)
                         .map(Self.migrateLegacyPlanApprovalEntry)
                     session.entries.removeAll(where: Self.isPrototypeStarterEntry)
-                    if legacyPermissionBoundaryProfileIDs.contains(profileID)
-                        && session.status == .completed {
+                    if endedAtLegacyPermissionBoundary && session.status == .completed {
                         session.status = .needsAnswer
                     }
-                    if codexProfileIDs.contains(profileID),
+                    if codexProfileIDs.contains(ownerID),
                        session.codexTurnModeVersion != CodexThreadConfiguration.turnModeVersion {
                         session.sessionID = nil
                         let canRecoverPlanApproval =
-                            recoverablePlanningManagerIDs.contains(profileID)
+                            recoverablePlanningManagerIDs.contains(sessionKey)
                         if !canRecoverPlanApproval {
                             session.status = .stopped
                         }
                     }
-                    return (profileID, session)
+                    return (sessionKey, session)
                 }
             )
-            managerWorkflows = saved.managerWorkflows
+            var restoredOrder = saved.sessionOrder
+            var restoredSelections = saved.selectedSessionIDs
+            for profile in restoredProfiles {
+                var owned: [UUID] = restoredSessions.values
+                    .filter { $0.ownerProfileID == profile.id }
+                    .map { $0.id }
+                if owned.isEmpty {
+                    restoredSessions[profile.id] = AgentSessionState(
+                        id: profile.id,
+                        ownerProfileID: profile.id
+                    )
+                    owned = [profile.id]
+                }
+                let ordered = (restoredOrder[profile.id] ?? [])
+                    .filter { owned.contains($0) }
+                let missing = owned.filter { !ordered.contains($0) }
+                let fallbackID = restoredSessions[profile.id] != nil
+                    ? profile.id
+                    : owned.first
+                restoredOrder[profile.id] = ordered + missing
+                if restoredOrder[profile.id]?.isEmpty != false, let fallbackID {
+                    restoredOrder[profile.id] = [fallbackID]
+                }
+                if let selected = restoredSelections[profile.id],
+                   restoredOrder[profile.id]?.contains(selected) == true {
+                    continue
+                }
+                restoredSelections[profile.id] = fallbackID
+            }
+            sessions = restoredSessions
+            sessionOrder = restoredOrder
+            selectedSessionIDs = restoredSelections
+            managerWorkflows = Dictionary(
+                uniqueKeysWithValues: saved.managerWorkflows.map {
+                    managerID, workflow in
+                    var restored = workflow
+                    if restored.participantSessionIDs.isEmpty {
+                        restored.participantSessionIDs[.manager] = managerID
+                        if let profileID =
+                            restored.team.builderProfileID {
+                            restored.participantSessionIDs[.builder] =
+                                restoredSelections[profileID] ?? profileID
+                        }
+                        if let profileID =
+                            restored.team.reviewerProfileID {
+                            restored.participantSessionIDs[.reviewer] =
+                                restoredSelections[profileID] ?? profileID
+                        }
+                        if let profileID =
+                            restored.team.publisherProfileID {
+                            restored.participantSessionIDs[.publisher] =
+                                restoredSelections[profileID] ?? profileID
+                        }
+                    }
+                    return (managerID, restored)
+                }
+            )
             selectedBotID = saved.selectedBotID ?? saved.profiles.first?.id
-            let recoveredPlanApproval = reconcileRestoredWorkflowPlanApprovals()
+            let recoveredPlanApproval =
+                reconcileRestoredWorkflowPlanApprovals()
             let pendingPlanApprovalManagerIDs = Set(
                 managerWorkflows.compactMap { managerID, workflow in
                     workflow.stage == .planning
@@ -150,7 +239,8 @@ final class AppModel: ObservableObject {
                 }
             )
             sessions = Dictionary(
-                uniqueKeysWithValues: sessions.map { profileID, restoredSession in
+                uniqueKeysWithValues: sessions.map {
+                    sessionID, restoredSession in
                     var session = restoredSession
                     if session.status == .launching
                         || session.status == .working
@@ -159,18 +249,18 @@ final class AppModel: ObservableObject {
                         let preservesLegacyAttention =
                             session.status == .needsAnswer
                             && legacyPermissionBoundaryProfileIDs.contains(
-                                profileID
+                                sessionID
                             )
                         session.status =
                             preservesLegacyAttention
                                 || (session.status == .needsApproval
                                     && pendingPlanApprovalManagerIDs.contains(
-                                        profileID
+                                        sessionID
                                     ))
                                 ? session.status
                                 : .stopped
                     }
-                    return (profileID, session)
+                    return (sessionID, session)
                 }
             )
             managerWorkflows = managerWorkflows.mapValues { workflow in
@@ -242,7 +332,15 @@ final class AppModel: ObservableObject {
         } else {
             profiles = BotProfile.defaults
             sessions = Dictionary(
-                uniqueKeysWithValues: BotProfile.defaults.map { ($0.id, AgentSessionState()) }
+                uniqueKeysWithValues: BotProfile.defaults.map {
+                    ($0.id, AgentSessionState(id: $0.id, ownerProfileID: $0.id))
+                }
+            )
+            sessionOrder = Dictionary(
+                uniqueKeysWithValues: BotProfile.defaults.map { ($0.id, [$0.id]) }
+            )
+            selectedSessionIDs = Dictionary(
+                uniqueKeysWithValues: BotProfile.defaults.map { ($0.id, $0.id) }
             )
             managerWorkflows = [:]
             selectedBotID = BotProfile.defaults.first?.id
@@ -298,11 +396,194 @@ final class AppModel: ObservableObject {
     }
 
     func session(for profileID: UUID) -> AgentSessionState {
-        sessions[profileID] ?? AgentSessionState()
+        guard let sessionID = selectedSessionID(for: profileID) else {
+            return AgentSessionState(ownerProfileID: profileID)
+        }
+        return sessions[sessionID] ?? AgentSessionState(
+            id: sessionID,
+            ownerProfileID: profileID
+        )
+    }
+
+    func sessions(for profileID: UUID) -> [AgentSessionState] {
+        (sessionOrder[profileID] ?? []).compactMap { sessions[$0] }
+    }
+
+    func selectedSessionID(for profileID: UUID) -> UUID? {
+        if let selected = selectedSessionIDs[profileID],
+           sessions[selected]?.ownerProfileID == profileID {
+            return selected
+        }
+        return sessionOrder[profileID]?.first
+    }
+
+    func selectSession(_ sessionID: UUID, for profileID: UUID) {
+        guard sessions[sessionID]?.ownerProfileID == profileID else { return }
+        selectedSessionIDs[profileID] = sessionID
+        markSessionViewed(sessionID)
+        save()
+    }
+
+    @discardableResult
+    func newChat(for profileID: UUID) -> UUID {
+        let id = UUID()
+        sessions[id] = AgentSessionState(id: id, ownerProfileID: profileID)
+        sessionOrder[profileID, default: []].append(id)
+        selectedSessionIDs[profileID] = id
+        save()
+        if let profile = profiles.first(where: { $0.id == profileID }),
+           profile.role == .builder,
+           !profile.workingDirectory.isEmpty {
+            Task { [weak self] in
+                _ = await self?.prepareRuntimeProfile(
+                    profile,
+                    sessionID: id
+                )
+            }
+        }
+        return id
+    }
+
+    func updateDraft(_ draft: String, for sessionID: UUID) {
+        guard var session = sessions[sessionID] else { return }
+        session.draft = draft
+        session.updatedAt = .now
+        sessions[sessionID] = session
+        draftSaveTasks[sessionID]?.cancel()
+        draftSaveTasks[sessionID] = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled, let self else { return }
+            draftSaveTasks[sessionID] = nil
+            save(immediately: true)
+        }
+    }
+
+    func persistDraft(for sessionID: UUID) {
+        draftSaveTasks[sessionID]?.cancel()
+        draftSaveTasks[sessionID] = nil
+        save(immediately: true)
+    }
+
+    func closeAssessment(for sessionID: UUID) async -> SessionCloseAssessment {
+        guard let session = sessions[sessionID] else {
+            return SessionCloseAssessment(
+                isActive: false,
+                hasDirtyWorktree: false,
+                participatesInWorkflow: false
+            )
+        }
+        let isActive = session.status == .working || session.status == .launching
+        var dirty = false
+        var leavesWorktreeOnDisk = false
+        var worktreeWarning: String?
+        if let worktree = session.worktree {
+            do {
+                dirty = try await worktrees.worktreeIsDirty(worktree)
+            } catch {
+                leavesWorktreeOnDisk = true
+                worktreeWarning = error.localizedDescription
+            }
+        }
+        let participates = managerWorkflows.contains { managerSessionID, workflow in
+            workflow.stage != .completed
+                && (managerSessionID == sessionID
+                    || workflow.participantSessionIDs.values.contains(sessionID))
+        }
+        return SessionCloseAssessment(
+            isActive: isActive,
+            hasDirtyWorktree: dirty,
+            participatesInWorkflow: participates,
+            leavesWorktreeOnDisk: leavesWorktreeOnDisk,
+            worktreeWarning: worktreeWarning
+        )
+    }
+
+    /// Returns an actionable error and retains the tab when cleanup fails.
+    func closeSession(
+        _ sessionID: UUID,
+        confirmedDestructiveCleanup: Bool = false,
+        ensureReplacement: Bool = true
+    ) async -> String? {
+        guard let session = sessions[sessionID],
+              let profileID = session.ownerProfileID,
+              let profile = profiles.first(where: { $0.id == profileID }) else {
+            return "This chat session no longer exists."
+        }
+
+        do {
+            let assessment = await closeAssessment(for: sessionID)
+            guard !assessment.requiresDestructiveConfirmation
+                    || confirmedDestructiveCleanup else {
+                return "This chat needs confirmation before it can be closed."
+            }
+
+            runGenerations[sessionID] = UUID()
+            connectedProfileIDs.remove(sessionID)
+            inFlightUserEntryIDs.removeValue(forKey: sessionID)
+            draftSaveTasks[sessionID]?.cancel()
+            draftSaveTasks[sessionID] = nil
+            await runtime.stop(
+                profile: runtimeProfile(for: profile, sessionID: sessionID)
+            )
+
+            if let worktree = session.worktree,
+               !assessment.leavesWorktreeOnDisk {
+                try await worktrees.removeWorktree(
+                    worktree,
+                    force: assessment.hasDirtyWorktree
+                )
+            }
+
+            for managerID in Array(managerWorkflows.keys) {
+                guard var workflow = managerWorkflows[managerID],
+                      managerID == sessionID
+                        || (workflow.stage != .completed
+                            && workflow.participantSessionIDs.values.contains(sessionID)) else {
+                    continue
+                }
+                if managerID == sessionID {
+                    managerWorkflows[managerID] = nil
+                } else {
+                    workflow.participantSessionIDs = workflow
+                        .participantSessionIDs
+                        .filter { $0.value != sessionID }
+                    workflow.isPaused = true
+                    workflow.pauseReason = "A participating chat session was closed."
+                    workflow.updatedAt = .now
+                    managerWorkflows[managerID] = workflow
+                }
+            }
+
+            sessions[sessionID] = nil
+            sessionOrder[profileID]?.removeAll { $0 == sessionID }
+            if ensureReplacement && sessionOrder[profileID]?.isEmpty != false {
+                _ = newChat(for: profileID)
+            } else if selectedSessionIDs[profileID] == sessionID {
+                selectedSessionIDs[profileID] = sessionOrder[profileID]?.first
+            }
+            save()
+            return nil
+        } catch {
+            append(
+                .init(
+                    kind: .system,
+                    text: "Could not close chat",
+                    detail: error.localizedDescription
+                ),
+                to: sessionID
+            )
+            return error.localizedDescription
+        }
     }
 
     func workflow(for managerProfileID: UUID) -> ManagerWorkflow? {
-        managerWorkflows[managerProfileID]
+        let sessionID = selectedSessionID(for: managerProfileID) ?? managerProfileID
+        if let workflow = managerWorkflows[sessionID] {
+            return workflow
+        }
+        return sessionID == managerProfileID
+            ? managerWorkflows[managerProfileID]
+            : nil
     }
 
     func isManagerTeamReady(_ managerProfileID: UUID) -> Bool {
@@ -332,7 +613,12 @@ final class AppModel: ObservableObject {
 
     func add(_ profile: BotProfile) {
         profiles.append(profile)
-        sessions[profile.id] = AgentSessionState()
+        sessions[profile.id] = AgentSessionState(
+            id: profile.id,
+            ownerProfileID: profile.id
+        )
+        sessionOrder[profile.id] = [profile.id]
+        selectedSessionIDs[profile.id] = profile.id
         selectedBotID = profile.id
         isAddingBot = false
         isInspectorVisible = true
@@ -358,16 +644,65 @@ final class AppModel: ObservableObject {
 
     func delete(_ profileID: UUID) {
         guard profiles.count > 1 else { return }
+        profileDeletionError = nil
+        let ownedSessionIDs = sessionOrder[profileID] ?? []
+        let requiresCleanup = ownedSessionIDs.contains { sessionID in
+            guard let session = sessions[sessionID] else { return false }
+            return session.worktree != nil
+                || session.status == .working
+                || session.status == .launching
+        }
+        if requiresCleanup {
+            Task { [weak self] in
+                guard let self else { return }
+                for sessionID in ownedSessionIDs {
+                    let assessment = await closeAssessment(for: sessionID)
+                    if assessment.leavesWorktreeOnDisk {
+                        profileDeletionError =
+                            "This bot has a worktree that cannot be removed safely. Close that chat first and choose to leave its worktree on disk."
+                        return
+                    }
+                    if let error = await closeSession(
+                        sessionID,
+                        confirmedDestructiveCleanup: true,
+                        ensureReplacement: false
+                    ) {
+                        profileDeletionError = error
+                        return
+                    }
+                }
+                deleteProfileRecord(profileID)
+            }
+        } else {
+            deleteProfileRecord(profileID)
+        }
+    }
+
+    private func deleteProfileRecord(_ profileID: UUID) {
+        let ownedSessionIDs = sessionOrder[profileID] ?? []
         if let profile = profiles.first(where: { $0.id == profileID }) {
-            Task {
-                await runtime.stop(profile: runtimeProfile(for: profile))
+            for sessionID in ownedSessionIDs {
+                Task {
+                    await runtime.stop(
+                        profile: runtimeProfile(
+                            for: profile,
+                            sessionID: sessionID
+                        )
+                    )
+                }
             }
         }
-        connectedProfileIDs.remove(profileID)
         launchedProfileIDs.remove(profileID)
-        inFlightUserEntryIDs.removeValue(forKey: profileID)
-        planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
-        runGenerations[profileID] = UUID()
+        for sessionID in ownedSessionIDs {
+            connectedProfileIDs.remove(sessionID)
+            inFlightUserEntryIDs.removeValue(forKey: sessionID)
+            planningTurnAssistantEntryIDs.removeValue(forKey: sessionID)
+            runGenerations[sessionID] = UUID()
+            draftSaveTasks[sessionID]?.cancel()
+            draftSaveTasks[sessionID] = nil
+            sessions[sessionID] = nil
+            managerWorkflows[sessionID] = nil
+        }
         for index in profiles.indices where profiles[index].id != profileID {
             guard var team = profiles[index].managerTeam else { continue }
             if team.builderProfileID == profileID {
@@ -382,8 +717,12 @@ final class AppModel: ObservableObject {
             profiles[index].managerTeam = team
         }
         profiles.removeAll { $0.id == profileID }
-        sessions[profileID] = nil
-        managerWorkflows[profileID] = nil
+        sessionOrder[profileID] = nil
+        selectedSessionIDs[profileID] = nil
+        for managerID in Array(managerWorkflows.keys)
+            where managerWorkflows[managerID]?.managerProfileID == profileID {
+            managerWorkflows[managerID] = nil
+        }
         for managerID in Array(managerWorkflows.keys) {
             guard var workflow = managerWorkflows[managerID],
                   workflow.stage != .completed,
@@ -441,24 +780,36 @@ final class AppModel: ObservableObject {
     }
 
     func launch(_ profileID: UUID) {
-        guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
-        let previousThreadID = sessions[profileID]?.sessionID
+        guard let profile = profiles.first(where: { $0.id == profileID }),
+              let chatID = selectedSessionID(for: profileID) else { return }
+        let previousThreadID = sessions[chatID]?.sessionID
         let generation = UUID()
-        runGenerations[profileID] = generation
-        connectedProfileIDs.remove(profileID)
+        runGenerations[chatID] = generation
+        connectedProfileIDs.remove(chatID)
         launchedProfileIDs.remove(profileID)
-        inFlightUserEntryIDs.removeValue(forKey: profileID)
-        if var resumedSession = sessions[profileID], previousThreadID != nil {
+        inFlightUserEntryIDs.removeValue(forKey: chatID)
+        planningTurnAssistantEntryIDs.removeValue(forKey: chatID)
+        if var resumedSession = sessions[chatID], previousThreadID != nil {
             resumedSession.status = .stopped
             resumedSession.hasUnreadCompletion = false
-            sessions[profileID] = resumedSession
+            sessions[chatID] = resumedSession
         } else {
-            sessions[profileID] = AgentSessionState()
+            sessions[chatID] = AgentSessionState(
+                id: chatID,
+                ownerProfileID: profileID,
+                worktree: sessions[chatID]?.worktree,
+                draft: sessions[chatID]?.draft ?? ""
+            )
         }
 
         Task {
-            await runtime.stop(profile: runtimeProfile(for: profile))
-            guard let preparedProfile = await prepareRuntimeProfile(profile) else {
+            await runtime.stop(
+                profile: runtimeProfile(for: profile, sessionID: chatID)
+            )
+            guard let preparedProfile = await prepareRuntimeProfile(
+                profile,
+                sessionID: chatID
+            ) else {
                 return
             }
             let launchStartedAt = ContinuousClock.now
@@ -473,7 +824,7 @@ final class AppModel: ObservableObject {
                 profile: preparedProfile,
                 coldStart: isColdStart
             )
-            consume(stream, for: profileID, generation: generation)
+            consume(stream, for: chatID, generation: generation)
         }
     }
 
@@ -484,18 +835,21 @@ final class AppModel: ObservableObject {
     }
 
     func stop(_ profileID: UUID) {
-        guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
-        connectedProfileIDs.remove(profileID)
+        guard let profile = profiles.first(where: { $0.id == profileID }),
+              let chatID = selectedSessionID(for: profileID) else { return }
+        connectedProfileIDs.remove(chatID)
         launchedProfileIDs.remove(profileID)
-        planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
-        runGenerations[profileID] = UUID()
+        planningTurnAssistantEntryIDs.removeValue(forKey: chatID)
+        runGenerations[chatID] = UUID()
         Task {
-            await runtime.stop(profile: runtimeProfile(for: profile))
+            await runtime.stop(
+                profile: runtimeProfile(for: profile, sessionID: chatID)
+            )
         }
-        apply(.status(.stopped), to: profileID)
+        apply(.status(.stopped), to: chatID)
         append(
             .init(kind: .system, text: "Session stopped by you."),
-            to: profileID
+            to: chatID
         )
     }
 
@@ -506,25 +860,28 @@ final class AppModel: ObservableObject {
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty,
-              let profile = profiles.first(where: { $0.id == profileID }) else {
+              let profile = profiles.first(where: { $0.id == profileID }),
+              let chatID = selectedSessionID(for: profileID) else {
             return
         }
-        let state = sessions[profileID] ?? AgentSessionState()
+        guard let state = sessions[chatID] else { return }
         guard state.status != .launching, state.status != .working else {
             return
         }
-        guard managerWorkflows[profileID]?.planApprovalEntryID == nil else {
+        guard managerWorkflows[chatID]?.planApprovalEntryID == nil else {
             return
         }
 
         let startedWorkflow = startWorkflowIfNeeded(
             request: trimmed,
-            manager: profile
+            manager: profile,
+            sessionID: chatID
         )
         performSend(
             trimmed,
             attachments: attachments,
             to: profileID,
+            sessionID: chatID,
             visibleEntry: .init(
                 kind: .user,
                 text: trimmed,
@@ -538,13 +895,14 @@ final class AppModel: ObservableObject {
                     text: "Managed workflow started",
                     detail: "Planning → Your approval → Building → Review → Conditional fixes & re-check → Documentation & draft PR"
                 ),
-                to: profileID
+                to: chatID
             )
         }
     }
 
     func retry(_ entryID: UUID, for profileID: UUID) {
-        let state = sessions[profileID] ?? AgentSessionState()
+        guard let chatID = selectedSessionID(for: profileID) else { return }
+        guard let state = sessions[chatID] else { return }
         guard state.status.allowsFailedMessageRetry,
               let entry = state.entries.first(where: { $0.id == entryID }),
               entry.kind == .user,
@@ -556,6 +914,7 @@ final class AppModel: ObservableObject {
             entry.text,
             attachments: entry.attachments ?? [],
             to: profileID,
+            sessionID: chatID,
             retryingEntryID: entryID
         )
     }
@@ -564,23 +923,28 @@ final class AppModel: ObservableObject {
         _ text: String,
         attachments: [ImageAttachment] = [],
         to profileID: UUID,
+        sessionID explicitSessionID: UUID? = nil,
         visibleEntry: TimelineEntry? = nil,
         retryingEntryID: UUID? = nil
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty,
               let profile = profiles.first(where: { $0.id == profileID }) else { return }
+        guard let chatID = explicitSessionID ?? selectedSessionID(for: profileID) else {
+            return
+        }
 
-        let currentState = sessions[profileID] ?? AgentSessionState()
+        guard let currentState = sessions[chatID],
+              currentState.ownerProfileID == profileID else { return }
         guard currentState.status != .launching, currentState.status != .working else { return }
 
-        let shouldLaunch = !connectedProfileIDs.contains(profileID)
+        let shouldLaunch = !connectedProfileIDs.contains(chatID)
             || currentState.status == .stopped
             || currentState.status == .failed
         let previousThreadID = currentState.sessionID
         let pendingHandoff = currentState.pendingHandoff
-        let generation = runGenerations[profileID] ?? UUID()
-        runGenerations[profileID] = generation
+        let generation = runGenerations[chatID] ?? UUID()
+        runGenerations[chatID] = generation
 
         var updatedSession = currentState
         updatedSession.status = shouldLaunch ? .launching : .working
@@ -589,7 +953,11 @@ final class AppModel: ObservableObject {
         }
         if let visibleEntry {
             updatedSession.entries.append(visibleEntry)
+            if updatedSession.title == "New chat", visibleEntry.kind == .user {
+                updatedSession.title = Self.sessionTitle(from: visibleEntry.text)
+            }
         }
+        updatedSession.updatedAt = .now
         let inFlightEntryID = visibleEntry?.id ?? retryingEntryID
         if let inFlightEntryID {
             if let index = updatedSession.entries.firstIndex(
@@ -597,28 +965,33 @@ final class AppModel: ObservableObject {
             ) {
                 updatedSession.entries[index].deliveryFailed = nil
             }
-            inFlightUserEntryIDs[profileID] = inFlightEntryID
+            inFlightUserEntryIDs[chatID] = inFlightEntryID
         }
-        sessions[profileID] = updatedSession
+        sessions[chatID] = updatedSession
         save()
         let turnStartedAt = ContinuousClock.now
         if shouldLaunch {
             launchedProfileIDs.remove(profileID)
         }
+        resumeWorkflowsForExplicitSend(to: chatID)
 
         Task { [weak self] in
             guard let self else { return }
             guard let preparedProfile = await prepareRuntimeProfile(
                 profile,
+                sessionID: chatID,
                 handoff: pendingHandoff
             ) else {
                 return
             }
 
             if shouldLaunch {
-                await runtime.stop(profile: runtimeProfile(for: profile))
+                await runtime.stop(
+                    profile: runtimeProfile(for: profile, sessionID: chatID)
+                )
                 let launchStartedAt = ContinuousClock.now
-                let isColdStart = launchedProfileIDs.insert(profileID).inserted
+                let isColdStart =
+                    launchedProfileIDs.insert(profileID).inserted
                 let launchStream = await runtime.start(
                     profile: preparedProfile,
                     resumeThreadID: previousThreadID
@@ -631,7 +1004,7 @@ final class AppModel: ObservableObject {
                 )
                 var reachedReady = false
                 for await event in launchStream {
-                    guard runGenerations[profileID] == generation else { return }
+                    guard runGenerations[chatID] == generation else { return }
                     if case .entry(let entry) = event, entry.kind == .question {
                         continue
                     }
@@ -639,7 +1012,7 @@ final class AppModel: ObservableObject {
                         reachedReady = true
                         break
                     }
-                    apply(event, to: profileID)
+                    apply(event, to: chatID)
                     if case .status(.failed) = event {
                         break
                     }
@@ -648,18 +1021,19 @@ final class AppModel: ObservableObject {
                 // The launch stream stays open as this session's lifecycle
                 // channel; keep consuming it so a later idle disconnect is
                 // still reported to the UI.
-                consume(launchStream, for: profileID, generation: generation)
+                consume(launchStream, for: chatID, generation: generation)
             }
 
             if pendingHandoff != nil {
-                var handoffConsumed = sessions[profileID] ?? AgentSessionState()
+                guard var handoffConsumed = sessions[chatID] else { return }
                 handoffConsumed.pendingHandoff = nil
-                sessions[profileID] = handoffConsumed
+                sessions[chatID] = handoffConsumed
                 save()
             }
             let runtimeMessage = runtimeMessage(
                 userMessage: workflowRuntimeMessage(
                     for: profile,
+                    sessionID: chatID,
                     userMessage: trimmed
                 ),
                 handoff: pendingHandoff
@@ -677,7 +1051,7 @@ final class AppModel: ObservableObject {
                 sessions[profileID]?.entries.count ?? 0
             var recordedFirstOutput = false
             for await event in responseStream {
-                guard runGenerations[profileID] == generation else { return }
+                guard runGenerations[chatID] == generation else { return }
                 if !recordedFirstOutput {
                     switch event {
                     case .entry, .upsertEntry:
@@ -691,7 +1065,7 @@ final class AppModel: ObservableObject {
                         break
                     }
                 }
-                apply(event, to: profileID)
+                apply(event, to: chatID)
                 if case .status(.completed) = event {
                     PerformanceMetrics.record(
                         name: .turnCompletion,
@@ -704,27 +1078,28 @@ final class AppModel: ObservableObject {
     }
 
     func resolveApproval(_ entryID: UUID, approved: Bool, for profileID: UUID) {
-        if managerWorkflows[profileID]?.stage == .planning,
-           managerWorkflows[profileID]?.planApprovalEntryID == entryID {
+        guard let chatID = selectedSessionID(for: profileID) else { return }
+        if managerWorkflows[chatID]?.stage == .planning,
+           managerWorkflows[chatID]?.planApprovalEntryID == entryID {
             resolveWorkflowPlanApproval(
                 entryID,
                 approved: approved,
-                for: profileID
+                for: chatID
             )
             return
         }
 
         guard let profile = profiles.first(where: { $0.id == profileID }) else { return }
 
-        let generation = runGenerations[profileID] ?? UUID()
-        runGenerations[profileID] = generation
+        let generation = runGenerations[chatID] ?? UUID()
+        runGenerations[chatID] = generation
         Task {
             let stream = await runtime.resolveApproval(
                 entryID: entryID,
                 approved: approved,
-                profile: runtimeProfile(for: profile)
+                profile: runtimeProfile(for: profile, sessionID: chatID)
             )
-            consume(stream, for: profileID, generation: generation)
+            consume(stream, for: chatID, generation: generation)
         }
     }
 
@@ -816,10 +1191,15 @@ final class AppModel: ObservableObject {
     }
 
     func markViewed(_ profileID: UUID) {
-        guard var state = sessions[profileID] else { return }
+        guard let chatID = selectedSessionID(for: profileID) else { return }
+        markSessionViewed(chatID)
+    }
+
+    private func markSessionViewed(_ chatID: UUID) {
+        guard var state = sessions[chatID] else { return }
         if state.status == .completed {
             state.hasUnreadCompletion = false
-            sessions[profileID] = state
+            sessions[chatID] = state
             save()
         }
     }
@@ -828,18 +1208,22 @@ final class AppModel: ObservableObject {
         guard sourceProfileID != targetProfileID,
               let source = profiles.first(where: { $0.id == sourceProfileID }),
               let target = profiles.first(where: { $0.id == targetProfileID }),
+              let sourceSessionID = selectedSessionID(for: sourceProfileID),
+              let targetSessionID = selectedSessionID(for: targetProfileID),
               source.role == .builder,
-              source.worktree != nil,
-              sessions[sourceProfileID]?.status != .working,
-              sessions[sourceProfileID]?.status != .launching else { return }
+              sessions[sourceSessionID]?.worktree != nil,
+              sessions[sourceSessionID]?.status != .working,
+              sessions[sourceSessionID]?.status != .launching else { return }
 
-        let sourceSession = sessions[sourceProfileID] ?? AgentSessionState()
+        guard let sourceSession = sessions[sourceSessionID] else { return }
+        var sourceForHandoff = source
+        sourceForHandoff.worktree = sourceSession.worktree
         Task { [weak self] in
             guard let self else { return }
             do {
                 let startedAt = ContinuousClock.now
                 let package = try await worktrees.makeHandoff(
-                    from: source,
+                    from: sourceForHandoff,
                     session: sourceSession
                 )
                 PerformanceMetrics.record(
@@ -847,11 +1231,17 @@ final class AppModel: ObservableObject {
                     duration: startedAt.duration(to: .now),
                     profile: source
                 )
-                await runtime.stop(profile: runtimeProfile(for: target))
-                connectedProfileIDs.remove(targetProfileID)
+                await runtime.stop(
+                    profile: runtimeProfile(for: target, sessionID: targetSessionID)
+                )
+                connectedProfileIDs.remove(targetSessionID)
                 launchedProfileIDs.remove(targetProfileID)
-                runGenerations[targetProfileID] = UUID()
+                runGenerations[targetSessionID] = UUID()
 
+                guard var targetSession = sessions[targetSessionID],
+                      var updatedSourceSession = sessions[sourceSessionID] else {
+                    return
+                }
                 if let targetIndex = profiles.firstIndex(
                     where: { $0.id == targetProfileID }
                 ) {
@@ -864,7 +1254,6 @@ final class AppModel: ObservableObject {
                     }
                 }
 
-                var targetSession = sessions[targetProfileID] ?? AgentSessionState()
                 targetSession.status = .stopped
                 targetSession.sessionID = nil
                 targetSession.pendingHandoff = package
@@ -876,10 +1265,8 @@ final class AppModel: ObservableObject {
                         detail: package.timelineDetail
                     )
                 )
-                sessions[targetProfileID] = targetSession
+                sessions[targetSessionID] = targetSession
 
-                var updatedSourceSession =
-                    sessions[sourceProfileID] ?? AgentSessionState()
                 updatedSourceSession.entries.append(
                     .init(
                         kind: .system,
@@ -887,8 +1274,9 @@ final class AppModel: ObservableObject {
                         detail: "\(package.branch) · Tests \(package.testStatus.label.lowercased())"
                     )
                 )
-                sessions[sourceProfileID] = updatedSourceSession
+                sessions[sourceSessionID] = updatedSourceSession
                 selectedBotID = targetProfileID
+                selectedSessionIDs[targetProfileID] = targetSessionID
                 save()
             } catch {
                 append(
@@ -897,7 +1285,7 @@ final class AppModel: ObservableObject {
                         text: "Could not create handoff",
                         detail: error.localizedDescription
                     ),
-                    to: sourceProfileID
+                    to: sourceSessionID
                 )
             }
         }
@@ -919,54 +1307,77 @@ final class AppModel: ObservableObject {
 
     private func prepareRuntimeProfile(
         _ profile: BotProfile,
+        sessionID: UUID? = nil,
         handoff: GitHandoffPackage? = nil
     ) async -> BotProfile? {
+        guard let chatID = sessionID ?? selectedSessionID(for: profile.id) else {
+            return nil
+        }
         guard profile.role == .builder, !profile.workingDirectory.isEmpty else {
-            return runtimeProfile(for: profile)
+            return runtimeProfile(for: profile, sessionID: chatID)
         }
 
         do {
             let startedAt = ContinuousClock.now
+            var worktreeProfile = profile
+            worktreeProfile.worktree = sessions[chatID]?.worktree
+            if let existingWorktree = worktreeProfile.worktree {
+                worktreeProfile.workingDirectory = existingWorktree.repositoryPath
+            }
             let ownership = try await worktrees.prepareWorktree(
-                for: profile,
+                for: worktreeProfile,
+                sessionID: chatID,
                 startingPoint: handoff?.branch,
                 handoffID: handoff?.id
-                    ?? sessions[profile.id]?.worktreeSeedID
+                    ?? sessions[chatID]?.worktreeSeedID
             )
             PerformanceMetrics.record(
                 name: .worktreePreparation,
                 duration: startedAt.duration(to: .now),
                 profile: profile
             )
-            var updated = profile
-            updated.workingDirectory = ownership.repositoryPath
-            updated.worktree = ownership
-            if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
-                profiles[index] = updated
+            guard var session = sessions[chatID] else {
+                try? await worktrees.removeWorktree(ownership, force: false)
+                return nil
             }
-            if var session = sessions[profile.id] {
-                session.worktreeSeedID = nil
-                sessions[profile.id] = session
+            session.worktreeSeedID = nil
+            session.worktree = ownership
+            session.updatedAt = .now
+            sessions[chatID] = session
+            // Keep the original tab's mirrored value for decoding compatibility
+            // with pre-tab state. New tabs never write ownership onto the bot.
+            if chatID == profile.id,
+               let index = profiles.firstIndex(where: { $0.id == profile.id }) {
+                var legacyMirror = ownership
+                legacyMirror.ownerSessionID = nil
+                profiles[index].worktree = legacyMirror
             }
             save()
-            return runtimeProfile(for: updated)
+            return runtimeProfile(for: profile, sessionID: chatID)
         } catch {
-            apply(.status(.failed), to: profile.id)
+            apply(.status(.failed), to: chatID)
             append(
                 .init(
                     kind: .system,
                     text: "Could not prepare isolated worktree",
                     detail: error.localizedDescription
                 ),
-                to: profile.id
+                to: chatID
             )
             return nil
         }
     }
 
-    private func runtimeProfile(for profile: BotProfile) -> BotProfile {
+    private func runtimeProfile(
+        for profile: BotProfile,
+        sessionID: UUID? = nil
+    ) -> BotProfile {
+        let chatID = sessionID ?? selectedSessionID(for: profile.id) ?? profile.id
         var runtimeProfile = profile
-        runtimeProfile.workingDirectory = profile.runtimeWorkingDirectory
+        runtimeProfile.id = chatID
+        runtimeProfile.worktree = sessions[chatID]?.worktree
+        runtimeProfile.workingDirectory =
+            sessions[chatID]?.worktree?.worktreePath ?? profile.workingDirectory
         return runtimeProfile
     }
 
@@ -983,10 +1394,11 @@ final class AppModel: ObservableObject {
 
     private func workflowRuntimeMessage(
         for profile: BotProfile,
+        sessionID: UUID,
         userMessage: String
     ) -> String {
         guard profile.role == .manager,
-              let workflow = managerWorkflows[profile.id],
+              let workflow = managerWorkflows[sessionID],
               workflow.stage == .planning,
               workflow.planApprovalEntryID == nil else {
             return userMessage
@@ -1031,20 +1443,65 @@ final class AppModel: ObservableObject {
 
     private func startWorkflowIfNeeded(
         request: String,
-        manager: BotProfile
+        manager: BotProfile,
+        sessionID: UUID
     ) -> Bool {
         guard let team = validatedTeam(for: manager),
-              managerWorkflows[manager.id]?.stage == .completed
-                || managerWorkflows[manager.id] == nil else {
+              managerWorkflows[sessionID]?.stage == .completed
+                || managerWorkflows[sessionID] == nil else {
             return false
         }
 
-        managerWorkflows[manager.id] = ManagerWorkflow(
+        var participants: [AgentRole: UUID] = [.manager: sessionID]
+        if let profileID = team.builderProfileID,
+           let participantID = selectedSessionID(for: profileID) {
+            participants[.builder] = participantID
+        }
+        if let profileID = team.reviewerProfileID,
+           let participantID = selectedSessionID(for: profileID) {
+            participants[.reviewer] = participantID
+        }
+        if let profileID = team.publisherProfileID,
+           let participantID = selectedSessionID(for: profileID) {
+            participants[.publisher] = participantID
+        }
+        guard participants.count == AgentRole.allCases.count else {
+            append(
+                .init(
+                    kind: .system,
+                    text: "Could not start managed workflow",
+                    detail: "Every assigned bot needs an available chat session."
+                ),
+                to: sessionID
+            )
+            return false
+        }
+        let claimedSessionIDs = Set(
+            managerWorkflows
+                .filter { workflowID, workflow in
+                    workflowID != sessionID && workflow.stage != .completed
+                }
+                .flatMap { $0.value.participantSessionIDs.values }
+        )
+        let conflicts = Set(participants.values).intersection(claimedSessionIDs)
+        guard conflicts.isEmpty else {
+            append(
+                .init(
+                    kind: .system,
+                    text: "Could not start managed workflow",
+                    detail: "One or more selected participant chats are already assigned to an active workflow."
+                ),
+                to: sessionID
+            )
+            return false
+        }
+        managerWorkflows[sessionID] = ManagerWorkflow(
             managerProfileID: manager.id,
             team: team,
             request: request.isEmpty
                 ? "Work from the attached context."
-                : request
+                : request,
+            participantSessionIDs: participants
         )
         workflowStageStartedAt[manager.id] = .now
         save(immediately: true)
@@ -1056,17 +1513,37 @@ final class AppModel: ObservableObject {
     ) -> UUID? {
         switch workflow.stage {
         case .planning, .reporting:
-            workflow.managerProfileID
+            workflow.participantSessionIDs[.manager] ?? workflow.managerProfileID
         case .building, .revising:
-            workflow.team.builderProfileID
-        case .reviewing:
-            workflow.team.reviewerProfileID
-        case .verifying:
-            workflow.team.reviewerProfileID
+            workflow.participantSessionIDs[.builder]
+                ?? workflow.team.builderProfileID
+        case .reviewing, .verifying:
+            workflow.participantSessionIDs[.reviewer]
+                ?? workflow.team.reviewerProfileID
         case .publishing:
-            workflow.team.publisherProfileID
+            workflow.participantSessionIDs[.publisher]
+                ?? workflow.team.publisherProfileID
         case .completed:
             nil
+        }
+    }
+
+    private func participantSessionID(
+        _ role: AgentRole,
+        in workflow: ManagerWorkflow
+    ) -> UUID? {
+        if let sessionID = workflow.participantSessionIDs[role] {
+            return sessionID
+        }
+        switch role {
+        case .manager:
+            return workflow.managerProfileID
+        case .builder:
+            return workflow.team.builderProfileID
+        case .reviewer:
+            return workflow.team.reviewerProfileID
+        case .publisher:
+            return workflow.team.publisherProfileID
         }
     }
 
@@ -1078,6 +1555,11 @@ final class AppModel: ObservableObject {
         guard previousStatus != status else { return }
         let matchingManagerIDs = managerWorkflows.compactMap { managerID, workflow in
             workflow.stage != .completed
+                && (!workflow.isPaused
+                    || status == .launching
+                    || status == .working)
+                && (workflow.participantSessionIDs.isEmpty
+                    || workflow.participantSessionIDs.values.contains(profileID))
                 && expectedProfileID(for: workflow) == profileID
                 ? managerID
                 : nil
@@ -1085,23 +1567,36 @@ final class AppModel: ObservableObject {
 
         for managerID in matchingManagerIDs {
             switch status {
-            case .needsApproval, .needsAnswer:
+            case .needsAnswer:
+                if let workflow = managerWorkflows[managerID],
+                   workflow.stage == .reviewing
+                    || workflow.stage == .verifying,
+                   latestReviewOutput(for: profileID).disposition != nil {
+                    resumeWorkflowIndicator(managerID)
+                    advanceWorkflow(managerID, completedBy: profileID)
+                } else {
+                    pauseWorkflow(
+                        managerID,
+                        reason: "\(profileNameForSession(profileID)) needs attention: \(status.label)."
+                    )
+                }
+            case .needsApproval:
                 pauseWorkflow(
                     managerID,
-                    reason: "\(profileName(profileID)) needs attention: \(status.label)."
+                    reason: "\(profileNameForSession(profileID)) needs attention: \(status.label)."
                 )
             case .failed:
                 planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
                 pauseWorkflow(
                     managerID,
-                    reason: "\(profileName(profileID)) needs attention: \(status.label)."
+                    reason: "\(profileNameForSession(profileID)) needs attention: \(status.label)."
                 )
             case .stopped:
                 planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
                 if previousStatus == .working || previousStatus == .launching {
                     pauseWorkflow(
                         managerID,
-                        reason: "\(profileName(profileID)) was stopped."
+                        reason: "\(profileNameForSession(profileID)) was stopped."
                     )
                 }
             case .launching, .working:
@@ -1144,6 +1639,22 @@ final class AppModel: ObservableObject {
         save(immediately: true)
     }
 
+    private func resumeWorkflowsForExplicitSend(to sessionID: UUID) {
+        let managerIDs: [UUID] = managerWorkflows.compactMap { managerID, workflow in
+            guard workflow.isPaused,
+                  workflow.planApprovalEntryID == nil,
+                  expectedProfileID(for: workflow) == sessionID,
+                  workflow.participantSessionIDs.isEmpty
+                    || workflow.participantSessionIDs.values.contains(sessionID) else {
+                return nil
+            }
+            return managerID
+        }
+        for managerID in managerIDs {
+            resumeWorkflowIndicator(managerID)
+        }
+    }
+
     private func transitionWorkflow(
         _ managerID: UUID,
         to stage: ManagerWorkflowStage,
@@ -1184,7 +1695,6 @@ final class AppModel: ObservableObject {
             workflow.stage == .reviewing || workflow.stage == .verifying
                 ? latestReviewOutput(for: profileID)
                 : nil
-
         if workflow.stage == .planning {
             let capturedEntryIDs =
                 planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
@@ -1214,26 +1724,20 @@ final class AppModel: ObservableObject {
         case .planning:
             break
         case .building:
-            guard let reviewerID = workflow.team.reviewerProfileID,
-                  profiles.contains(where: {
-                      $0.id == reviewerID && $0.role == .reviewer
-                  }) else {
-                pauseWorkflow(
-                    managerID,
-                    reason: "The assigned Reviewer is no longer available."
-                )
+            guard let next = transitionWorkflow(managerID, to: .reviewing),
+                  let reviewerID = next.team.reviewerProfileID,
+                  let reviewerSessionID = participantSessionID(.reviewer, in: next) else {
                 return
             }
-            guard let next = transitionWorkflow(
-                managerID,
-                to: .reviewing
-            ) else { return }
             Task { [weak self] in
                 await self?.dispatchBuilderHandoff(
                     workflow: next,
-                    builderID: profileID,
-                    to: reviewerID,
-                    instruction: Self.initialReviewInstruction
+                    builderSessionID: profileID,
+                    reviewerProfileID: reviewerID,
+                    reviewerSessionID: reviewerSessionID,
+                    instruction: Self.initialReviewInstruction,
+                    pass: .initial,
+                    resetRecipient: true
                 )
             }
 
@@ -1254,12 +1758,16 @@ final class AppModel: ObservableObject {
 
         case .revising:
             guard let next = transitionWorkflow(managerID, to: .verifying),
-                  let reviewerID = next.team.reviewerProfileID else { return }
+                  let reviewerID = next.team.reviewerProfileID,
+                  let reviewerSessionID = participantSessionID(.reviewer, in: next) else {
+                return
+            }
             Task { [weak self] in
                 await self?.dispatchBuilderHandoff(
                     workflow: next,
-                    builderID: profileID,
-                    to: reviewerID,
+                    builderSessionID: profileID,
+                    reviewerProfileID: reviewerID,
+                    reviewerSessionID: reviewerSessionID,
                     instruction: Self.verificationInstruction,
                     pass: .revision,
                     resetRecipient: false
@@ -1285,7 +1793,7 @@ final class AppModel: ObservableObject {
             guard let draftURL = latestPullRequestURL(for: profileID) else {
                 pauseWorkflow(
                     managerID,
-                    reason: "\(profileName(profileID)) finished without a draft PR URL."
+                    reason: "\(profileNameForSession(profileID)) finished without a draft PR URL."
                 )
                 append(
                     .init(
@@ -1598,6 +2106,10 @@ final class AppModel: ObservableObject {
     ) {
         guard var workflow = managerWorkflows[managerID],
               let builderID = workflow.team.builderProfileID,
+              let builderSessionID = participantSessionID(
+                  .builder,
+                  in: workflow
+              ),
               profiles.contains(where: {
                   $0.id == builderID && $0.role == .builder
               }) else {
@@ -1636,6 +2148,7 @@ final class AppModel: ObservableObject {
         dispatchWorkflowMessage(
             from: reviewerID,
             to: builderID,
+            targetSessionID: builderSessionID,
             title: "Review findings",
             visibleText: reviewSummary,
             runtimeMessage: """
@@ -1655,6 +2168,10 @@ final class AppModel: ObservableObject {
     ) {
         guard let workflow = managerWorkflows[managerID],
               let publisherID = workflow.team.publisherProfileID,
+              let publisherSessionID = participantSessionID(
+                  .publisher,
+                  in: workflow
+              ),
               profiles.contains(where: {
                   $0.id == publisherID && $0.role == .publisher
               }) else {
@@ -1677,8 +2194,9 @@ final class AppModel: ObservableObject {
             await self?.dispatchPublishing(
                 workflow: next,
                 reviewSummary: reviewSummary,
-                reviewerID: reviewerID,
-                to: publisherID
+                reviewerSessionID: reviewerID,
+                publisherProfileID: publisherID,
+                publisherSessionID: publisherSessionID
             )
         }
     }
@@ -1784,7 +2302,8 @@ final class AppModel: ObservableObject {
                from: previousStatus,
                to: .needsApproval
            ),
-           let manager = profiles.first(where: { $0.id == managerID }),
+           let ownerID = sessions[managerID]?.ownerProfileID,
+           let manager = profiles.first(where: { $0.id == ownerID }),
            !isAppWindowActive() {
             notifications?.post(notice, for: manager)
         }
@@ -1795,108 +2314,84 @@ final class AppModel: ObservableObject {
         handoff: BuilderImplementationHandoff,
         to builderID: UUID
     ) async {
-        guard let currentWorkflow = managerWorkflows[
-            workflow.managerProfileID
-        ],
+        let managerSessionID =
+            workflow.participantSessionIDs[.manager]
+                ?? workflow.managerProfileID
+        guard let currentWorkflow = managerWorkflows[managerSessionID],
               currentWorkflow.stage == .building,
               currentWorkflow.approvedPlanEntryID
                 == handoff.approvalEntryID,
               currentWorkflow.implementationPlan == handoff.approvedPlan,
-              sessions[workflow.managerProfileID]?.entries.contains(where: {
+              sessions[managerSessionID]?.entries.contains(where: {
                   $0.id == handoff.approvalEntryID
                       && $0.kind == .approval
                       && $0.approvalState == .approved
                       && $0.text == handoff.approvedPlan
               }) == true else {
             pauseWorkflow(
-                workflow.managerProfileID,
+                managerSessionID,
                 reason: "The approved implementation plan is missing or inconsistent. The Builder was not dispatched."
             )
             return
         }
 
+        guard let builderSessionID = participantSessionID(.builder, in: workflow) else {
+            pauseWorkflow(
+                managerSessionID,
+                reason: "The assigned Builder session is no longer available."
+            )
+            return
+        }
         guard await resetWorkflowRecipient(
             builderID,
+            sessionID: builderSessionID,
             worktreeSeedID: workflow.id
         ) else {
             pauseWorkflow(
-                workflow.managerProfileID,
+                workflow.participantSessionIDs[.manager] ?? workflow.managerProfileID,
                 reason: "The assigned Builder is no longer available."
             )
             return
         }
         append(
             handoff.visibleEntry(
-                sourceName: profileName(workflow.managerProfileID)
+                sourceName: profileNameForSession(managerSessionID)
             ),
-            to: builderID
+            to: builderSessionID
         )
-        performSend(handoff.runtimeMessage, to: builderID)
+        performSend(
+            handoff.runtimeMessage,
+            to: builderID,
+            sessionID: builderSessionID
+        )
     }
 
     private func dispatchBuilderHandoff(
         workflow: ManagerWorkflow,
-        builderID: UUID,
-        to reviewerID: UUID,
+        builderSessionID: UUID,
+        reviewerProfileID: UUID,
+        reviewerSessionID: UUID,
         instruction: String,
         pass: BuilderHandoffPass = .initial,
         resetRecipient: Bool = true
     ) async {
-        guard let package = await prepareBuilderHandoff(
-            workflow: workflow,
-            builderID: builderID,
-            pass: pass
-        ) else { return }
-
-        if resetRecipient {
-            guard await resetWorkflowRecipient(
-                reviewerID,
-                handoff: package
-            ) else {
-                pauseWorkflow(
-                    workflow.managerProfileID,
-                    reason: "The assigned Reviewer is no longer available."
-                )
-                return
-            }
-        } else {
-            var reviewerSession =
-                sessions[reviewerID] ?? AgentSessionState()
-            reviewerSession.pendingHandoff = package
-            reviewerSession.entries.append(
-                .init(
-                    kind: .handoff,
-                    title: "Updated implementation",
-                    text: package.taskContext,
-                    detail: package.timelineDetail
-                )
-            )
-            sessions[reviewerID] = reviewerSession
-            save(immediately: true)
-        }
-        performSend(
-            instruction,
-            to: reviewerID
-        )
-    }
-
-    private func prepareBuilderHandoff(
-        workflow: ManagerWorkflow,
-        builderID: UUID,
-        pass: BuilderHandoffPass
-    ) async -> GitHandoffPackage? {
-        guard let builder = profiles.first(where: { $0.id == builderID }) else {
+        let managerSessionID =
+            workflow.participantSessionIDs[.manager] ?? workflow.managerProfileID
+        guard let builderProfileID = sessions[builderSessionID]?.ownerProfileID,
+              var builder = profiles.first(where: { $0.id == builderProfileID }),
+              let builderSession = sessions[builderSessionID] else {
             pauseWorkflow(
-                workflow.managerProfileID,
+                managerSessionID,
                 reason: "The assigned Builder is no longer available."
             )
-            return nil
+            return
         }
+        builder.worktree = builderSession.worktree
         do {
             let startedAt = ContinuousClock.now
             var package = try await worktrees.makeHandoff(
                 from: builder,
-                session: sessions[builderID] ?? AgentSessionState()
+                session: builderSession
             )
             PerformanceMetrics.record(
                 name: .handoffPreparation,
@@ -1904,7 +2399,8 @@ final class AppModel: ObservableObject {
                 profile: builder,
                 stage: workflow.stage
             )
-            package.taskContext = workflow.request
+            package.taskContext =
+                workflow.implementationPlan ?? workflow.request
             let previousRevision =
                 workflow.latestHandoff?.headRevision ?? package.baseRevision
             let lacksRequiredCommit =
@@ -1929,7 +2425,7 @@ final class AppModel: ObservableObject {
                   !hasUncommittedChanges,
                   !hasInvalidTests else {
                 _ = transitionWorkflow(
-                    workflow.managerProfileID,
+                    managerSessionID,
                     to: pass.fallbackStage
                 )
                 let reason: String
@@ -1946,50 +2442,78 @@ final class AppModel: ObservableObject {
                     reason =
                         "The Builder handoff does not report passing tests from the revision pass."
                 }
-                pauseWorkflow(workflow.managerProfileID, reason: reason)
+                pauseWorkflow(managerSessionID, reason: reason)
                 append(
                     .init(
                         kind: .question,
                         title: "Builder handoff is not ready",
                         text: "\(reason) Ask this bot to finish the work, run the required tests, and commit any changes."
                     ),
-                    to: builderID
+                    to: builderSessionID
                 )
-                return nil
+                return
             }
-            record(package, for: workflow.managerProfileID)
-            return package
+            record(package, for: managerSessionID)
+            if resetRecipient {
+                guard await resetWorkflowRecipient(
+                    reviewerProfileID,
+                    sessionID: reviewerSessionID,
+                    handoff: package
+                ) else {
+                    pauseWorkflow(
+                        managerSessionID,
+                        reason: "The assigned Reviewer is no longer available."
+                    )
+                    return
+                }
+            } else {
+                attach(
+                    package,
+                    from: builderSessionID,
+                    to: reviewerSessionID,
+                    title: "Updated implementation"
+                )
+            }
+            performSend(
+                instruction,
+                to: reviewerProfileID,
+                sessionID: reviewerSessionID
+            )
         } catch {
             pauseWorkflow(
-                workflow.managerProfileID,
+                managerSessionID,
                 reason: "Could not prepare the Builder handoff: \(error.localizedDescription)"
             )
-            return nil
+            return
         }
     }
 
     private func dispatchPublishing(
         workflow: ManagerWorkflow,
         reviewSummary: String,
-        reviewerID: UUID,
-        to publisherID: UUID
+        reviewerSessionID: UUID,
+        publisherProfileID: UUID,
+        publisherSessionID: UUID
     ) async {
+        let managerSessionID =
+            workflow.participantSessionIDs[.manager] ?? workflow.managerProfileID
         guard let package = managerWorkflows[
-            workflow.managerProfileID
+            managerSessionID
         ]?.latestHandoff else {
             pauseWorkflow(
-                workflow.managerProfileID,
+                managerSessionID,
                 reason: "The verified Builder handoff is missing."
             )
             return
         }
         guard await resetWorkflowRecipient(
-            publisherID,
+            publisherProfileID,
+            sessionID: publisherSessionID,
             handoff: package,
-            sourceProfileID: reviewerID
+            sourceProfileID: sessions[reviewerSessionID]?.ownerProfileID
         ) else {
             pauseWorkflow(
-                workflow.managerProfileID,
+                managerSessionID,
                 reason: "The assigned Documenter / PR Writer is no longer available."
             )
             return
@@ -2003,12 +2527,14 @@ final class AppModel: ObservableObject {
 
             Update the relevant user-facing and developer documentation for the completed change. Run final verification, commit all completed work on the current branch, push that branch, and create a draft pull request. Respect every approval request surfaced by bl00p. Finish with a concise summary containing the branch, tests, and the full draft PR URL.
             """,
-            to: publisherID
+            to: publisherProfileID,
+            sessionID: publisherSessionID
         )
     }
 
     private func resetWorkflowRecipient(
         _ profileID: UUID,
+        sessionID: UUID,
         handoff: GitHandoffPackage? = nil,
         sourceProfileID: UUID? = nil,
         worktreeSeedID: UUID? = nil
@@ -2017,10 +2543,15 @@ final class AppModel: ObservableObject {
             where: { $0.id == profileID }
         ) else { return false }
 
-        connectedProfileIDs.remove(profileID)
+        guard sessions[sessionID]?.ownerProfileID == profileID
+                || sessionID == profileID else { return false }
+        connectedProfileIDs.remove(sessionID)
         launchedProfileIDs.remove(profileID)
-        runGenerations[profileID] = UUID()
-        await runtime.stop(profile: runtimeProfile(for: profile))
+        planningTurnAssistantEntryIDs.removeValue(forKey: sessionID)
+        runGenerations[sessionID] = UUID()
+        await runtime.stop(
+            profile: runtimeProfile(for: profile, sessionID: sessionID)
+        )
 
         if let index = profiles.firstIndex(where: { $0.id == profileID }) {
             if profiles[index].role == .builder {
@@ -2037,12 +2568,15 @@ final class AppModel: ObservableObject {
             }
         }
 
-        var state = sessions[profileID] ?? AgentSessionState()
+        guard var state = sessions[sessionID] else { return false }
         state.status = .stopped
         state.sessionID = nil
         state.codexTurnModeVersion = nil
         state.pendingHandoff = handoff
         state.worktreeSeedID = worktreeSeedID
+        if worktreeSeedID != nil || handoff != nil {
+            state.worktree = nil
+        }
         if let handoff {
             let sourceName = profileName(
                 sourceProfileID ?? handoff.sourceProfileID
@@ -2056,9 +2590,29 @@ final class AppModel: ObservableObject {
                 )
             )
         }
-        sessions[profileID] = state
+        sessions[sessionID] = state
         save(immediately: true)
         return true
+    }
+
+    private func attach(
+        _ package: GitHandoffPackage,
+        from sourceProfileID: UUID,
+        to targetProfileID: UUID,
+        title: String
+    ) {
+        guard var state = sessions[targetProfileID] else { return }
+        state.pendingHandoff = package
+        state.entries.append(
+            .init(
+                kind: .handoff,
+                title: title,
+                text: package.taskContext,
+                detail: package.timelineDetail
+            )
+        )
+        sessions[targetProfileID] = state
+        save(immediately: true)
     }
 
     private func record(
@@ -2076,6 +2630,7 @@ final class AppModel: ObservableObject {
     private func dispatchWorkflowMessage(
         from sourceProfileID: UUID,
         to targetProfileID: UUID,
+        targetSessionID: UUID,
         title: String,
         visibleText: String,
         runtimeMessage: String
@@ -2085,11 +2640,15 @@ final class AppModel: ObservableObject {
                 kind: .handoff,
                 title: title,
                 text: visibleText,
-                detail: "From \(profileName(sourceProfileID))"
+                detail: "From \(profileNameForSession(sourceProfileID))"
             ),
-            to: targetProfileID
+            to: targetSessionID
         )
-        performSend(runtimeMessage, to: targetProfileID)
+        performSend(
+            runtimeMessage,
+            to: targetProfileID,
+            sessionID: targetSessionID
+        )
     }
 
     private func latestAssistantResponse(
@@ -2161,6 +2720,13 @@ final class AppModel: ObservableObject {
         profiles.first(where: { $0.id == profileID })?.name ?? "Assigned bot"
     }
 
+    private func profileNameForSession(_ sessionID: UUID) -> String {
+        guard let ownerID = sessions[sessionID]?.ownerProfileID else {
+            return profileName(sessionID)
+        }
+        return profileName(ownerID)
+    }
+
     private func pullRequestURL(in text: String) -> String? {
         let pattern = #"https://github\.com/[^\s\]\)]+/pull/[0-9]+"#
         guard let expression = try? NSRegularExpression(pattern: pattern),
@@ -2221,7 +2787,8 @@ final class AppModel: ObservableObject {
     }
 
     private func apply(_ event: AgentEvent, to profileID: UUID) {
-        var state = sessions[profileID] ?? AgentSessionState()
+        guard var state = sessions[profileID] else { return }
+        let ownerProfileID = state.ownerProfileID ?? profileID
         var notice: AgentAttentionNotice?
         var statusTransition: (from: AgentStatus, to: AgentStatus)?
 
@@ -2254,13 +2821,18 @@ final class AppModel: ObservableObject {
             }
             if status == .completed {
                 state.hasUnreadCompletion =
-                    selectedBotID != profileID || !NSApplication.shared.isActive
+                    selectedBotID != ownerProfileID
+                        || selectedSessionID(for: ownerProfileID) != profileID
+                        || !NSApplication.shared.isActive
             }
         case .entry(let entry):
             state.entries.append(entry)
             if entry.kind == .assistant,
                planningTurnAssistantEntryIDs[profileID] != nil {
                 planningTurnAssistantEntryIDs[profileID]?.insert(entry.id)
+            }
+            if state.title == "New chat", entry.kind == .user {
+                state.title = Self.sessionTitle(from: entry.text)
             }
         case .upsertEntry(let entry):
             if let index = state.entries.firstIndex(where: { $0.id == entry.id }) {
@@ -2278,12 +2850,13 @@ final class AppModel: ObservableObject {
             }
         case .sessionID(let sessionID):
             state.sessionID = sessionID
-            if profiles.first(where: { $0.id == profileID })?.provider == .codex {
+            if profiles.first(where: { $0.id == ownerProfileID })?.provider == .codex {
                 state.codexTurnModeVersion = CodexThreadConfiguration.turnModeVersion
             }
             connectedProfileIDs.insert(profileID)
         }
 
+        state.updatedAt = .now
         sessions[profileID] = state
         let requiresImmediatePersistence: Bool
         switch event {
@@ -2302,7 +2875,7 @@ final class AppModel: ObservableObject {
         save(immediately: requiresImmediatePersistence)
         if notificationsArePrepared,
            let notice,
-           let profile = profiles.first(where: { $0.id == profileID }),
+           let profile = profiles.first(where: { $0.id == ownerProfileID }),
            !isAppWindowActive() {
             notifications?.post(notice, for: profile)
         }
@@ -2325,8 +2898,9 @@ final class AppModel: ObservableObject {
         to profileID: UUID,
         immediately: Bool = false
     ) {
-        var state = sessions[profileID] ?? AgentSessionState()
+        guard var state = sessions[profileID] else { return }
         state.entries.append(entry)
+        state.updatedAt = .now
         sessions[profileID] = state
         save(immediately: immediately)
     }
@@ -2346,7 +2920,9 @@ final class AppModel: ObservableObject {
             profiles: profiles,
             sessions: sessions,
             selectedBotID: selectedBotID,
-            managerWorkflows: managerWorkflows
+            managerWorkflows: managerWorkflows,
+            sessionOrder: sessionOrder,
+            selectedSessionIDs: selectedSessionIDs
         )
     }
 
@@ -2374,6 +2950,19 @@ final class AppModel: ObservableObject {
         var migrated = profile
         migrated.name = profile.provider.displayName
         return migrated
+    }
+
+    static func sessionTitle(from message: String) -> String {
+        let singleLine = message
+            .split(whereSeparator: \.isNewline)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !singleLine.isEmpty else { return "New chat" }
+        let limit = 36
+        guard singleLine.count > limit else { return singleLine }
+        return String(singleLine.prefix(limit - 1))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            + "…"
     }
 
     private static func isPrototypeStarterEntry(_ entry: TimelineEntry) -> Bool {

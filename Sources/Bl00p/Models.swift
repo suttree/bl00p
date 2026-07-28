@@ -305,10 +305,27 @@ struct ManagerTeamConfiguration: Codable, Hashable, Sendable {
 
 struct GitWorktreeOwnership: Codable, Hashable, Sendable {
     var ownerProfileID: UUID
+    var ownerSessionID: UUID?
     var repositoryPath: String
     var worktreePath: String
     var branch: String
     var baseRevision: String
+
+    init(
+        ownerProfileID: UUID,
+        ownerSessionID: UUID? = nil,
+        repositoryPath: String,
+        worktreePath: String,
+        branch: String,
+        baseRevision: String
+    ) {
+        self.ownerProfileID = ownerProfileID
+        self.ownerSessionID = ownerSessionID
+        self.repositoryPath = repositoryPath
+        self.worktreePath = worktreePath
+        self.branch = branch
+        self.baseRevision = baseRevision
+    }
 }
 
 enum HandoffTestStatus: String, Codable, Hashable, Sendable {
@@ -519,6 +536,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     var pauseReason: String?
     var startedAt: Date
     var updatedAt: Date
+    var participantSessionIDs: [AgentRole: UUID]
 
     init(
         id: UUID = UUID(),
@@ -540,7 +558,8 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         isPaused: Bool = false,
         pauseReason: String? = nil,
         startedAt: Date = .now,
-        updatedAt: Date = .now
+        updatedAt: Date = .now,
+        participantSessionIDs: [AgentRole: UUID] = [:]
     ) {
         self.id = id
         self.managerProfileID = managerProfileID
@@ -562,6 +581,62 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         self.pauseReason = pauseReason
         self.startedAt = startedAt
         self.updatedAt = updatedAt
+        self.participantSessionIDs = participantSessionIDs
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, managerProfileID, team, request, implementationPlan
+        case planApprovalEntryID, approvedPlanEntryID
+        case stage, branch, pullRequestURL
+        case verificationSummary, publisherSummary, revisionRounds
+        case latestHandoff, reviewSummary, revisionStartedAt
+        case isPaused, pauseReason, startedAt, updatedAt, participantSessionIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        managerProfileID = try container.decode(UUID.self, forKey: .managerProfileID)
+        team = try container.decode(ManagerTeamConfiguration.self, forKey: .team)
+        request = try container.decode(String.self, forKey: .request)
+        implementationPlan = try container.decodeIfPresent(String.self, forKey: .implementationPlan)
+        planApprovalEntryID = try container.decodeIfPresent(UUID.self, forKey: .planApprovalEntryID)
+        approvedPlanEntryID = try container.decodeIfPresent(
+            UUID.self,
+            forKey: .approvedPlanEntryID
+        )
+        stage = try container.decode(ManagerWorkflowStage.self, forKey: .stage)
+        branch = try container.decodeIfPresent(String.self, forKey: .branch)
+        pullRequestURL = try container.decodeIfPresent(String.self, forKey: .pullRequestURL)
+        verificationSummary = try container.decodeIfPresent(
+            String.self,
+            forKey: .verificationSummary
+        )
+        publisherSummary = try container.decodeIfPresent(
+            String.self,
+            forKey: .publisherSummary
+        )
+        revisionRounds = try container.decodeIfPresent(
+            Int.self,
+            forKey: .revisionRounds
+        ) ?? 0
+        latestHandoff = try container.decodeIfPresent(GitHandoffPackage.self, forKey: .latestHandoff)
+        reviewSummary = try container.decodeIfPresent(
+            String.self,
+            forKey: .reviewSummary
+        )
+        revisionStartedAt = try container.decodeIfPresent(
+            Date.self,
+            forKey: .revisionStartedAt
+        )
+        isPaused = try container.decode(Bool.self, forKey: .isPaused)
+        pauseReason = try container.decodeIfPresent(String.self, forKey: .pauseReason)
+        startedAt = try container.decode(Date.self, forKey: .startedAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        participantSessionIDs = try container.decodeIfPresent(
+            [AgentRole: UUID].self,
+            forKey: .participantSessionIDs
+        ) ?? [:]
     }
 }
 
@@ -638,6 +713,11 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
 }
 
 struct AgentSessionState: Codable, Sendable {
+    var id: UUID = UUID()
+    var ownerProfileID: UUID?
+    var title = "New chat"
+    var createdAt: Date = .now
+    var updatedAt: Date = .now
     var status: AgentStatus = .stopped
     var entries: [TimelineEntry] = []
     var hasUnreadCompletion = false
@@ -645,24 +725,90 @@ struct AgentSessionState: Codable, Sendable {
     var codexTurnModeVersion: Int?
     var pendingHandoff: GitHandoffPackage? = nil
     var worktreeSeedID: UUID? = nil
+    var worktree: GitWorktreeOwnership?
+    var draft = ""
+
+    enum CodingKeys: String, CodingKey {
+        case id, ownerProfileID, title, createdAt, updatedAt, status, entries
+        case hasUnreadCompletion, sessionID, codexTurnModeVersion
+        case pendingHandoff, worktreeSeedID, worktree, draft
+    }
+
+    init(
+        id: UUID = UUID(),
+        ownerProfileID: UUID? = nil,
+        title: String = "New chat",
+        createdAt: Date = .now,
+        updatedAt: Date = .now,
+        status: AgentStatus = .stopped,
+        entries: [TimelineEntry] = [],
+        hasUnreadCompletion: Bool = false,
+        sessionID: String? = nil,
+        codexTurnModeVersion: Int? = nil,
+        pendingHandoff: GitHandoffPackage? = nil,
+        worktreeSeedID: UUID? = nil,
+        worktree: GitWorktreeOwnership? = nil,
+        draft: String = ""
+    ) {
+        self.id = id
+        self.ownerProfileID = ownerProfileID
+        self.title = title
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.status = status
+        self.entries = entries
+        self.hasUnreadCompletion = hasUnreadCompletion
+        self.sessionID = sessionID
+        self.codexTurnModeVersion = codexTurnModeVersion
+        self.pendingHandoff = pendingHandoff
+        self.worktreeSeedID = worktreeSeedID
+        self.worktree = worktree
+        self.draft = draft
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        ownerProfileID = try container.decodeIfPresent(UUID.self, forKey: .ownerProfileID)
+        title = try container.decodeIfPresent(String.self, forKey: .title) ?? "New chat"
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .now
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        status = try container.decodeIfPresent(AgentStatus.self, forKey: .status) ?? .stopped
+        entries = try container.decodeIfPresent([TimelineEntry].self, forKey: .entries) ?? []
+        hasUnreadCompletion = try container.decodeIfPresent(Bool.self, forKey: .hasUnreadCompletion) ?? false
+        sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID)
+        codexTurnModeVersion = try container.decodeIfPresent(Int.self, forKey: .codexTurnModeVersion)
+        pendingHandoff = try container.decodeIfPresent(GitHandoffPackage.self, forKey: .pendingHandoff)
+        worktreeSeedID = try container.decodeIfPresent(UUID.self, forKey: .worktreeSeedID)
+        worktree = try container.decodeIfPresent(GitWorktreeOwnership.self, forKey: .worktree)
+        draft = try container.decodeIfPresent(String.self, forKey: .draft) ?? ""
+    }
 }
+
+typealias ChatSession = AgentSessionState
 
 struct PersistedAppState: Codable, Sendable {
     var profiles: [BotProfile]
     var sessions: [UUID: AgentSessionState]
     var selectedBotID: UUID?
     var managerWorkflows: [UUID: ManagerWorkflow]
+    var sessionOrder: [UUID: [UUID]]
+    var selectedSessionIDs: [UUID: UUID]
 
     init(
         profiles: [BotProfile],
         sessions: [UUID: AgentSessionState],
         selectedBotID: UUID?,
-        managerWorkflows: [UUID: ManagerWorkflow] = [:]
+        managerWorkflows: [UUID: ManagerWorkflow] = [:],
+        sessionOrder: [UUID: [UUID]] = [:],
+        selectedSessionIDs: [UUID: UUID] = [:]
     ) {
         self.profiles = profiles
         self.sessions = sessions
         self.selectedBotID = selectedBotID
         self.managerWorkflows = managerWorkflows
+        self.sessionOrder = sessionOrder
+        self.selectedSessionIDs = selectedSessionIDs
     }
 
     init(from decoder: Decoder) throws {
@@ -679,6 +825,14 @@ struct PersistedAppState: Codable, Sendable {
         managerWorkflows = try container.decodeIfPresent(
             [UUID: ManagerWorkflow].self,
             forKey: .managerWorkflows
+        ) ?? [:]
+        sessionOrder = try container.decodeIfPresent(
+            [UUID: [UUID]].self,
+            forKey: .sessionOrder
+        ) ?? [:]
+        selectedSessionIDs = try container.decodeIfPresent(
+            [UUID: UUID].self,
+            forKey: .selectedSessionIDs
         ) ?? [:]
     }
 }
