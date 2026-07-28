@@ -96,7 +96,13 @@ servers. The current allowlist supports repository inspection, file edits for
 Builder and Documenter roles, common test commands, and read-only Linear tools.
 Manager and Reviewer roles cannot edit files. Actions outside that allowlist
 pause in the conversation, where the user can approve or decline the exact
-tool call before Claude continues.
+tool call before Claude continues. Build and test commands accept both bare and
+argument-bearing invocations for compatibility with Claude CLI permission
+matching. The permission identity also recognizes the supported output filters
+in commands such as `swift build 2>&1 | tail -20`, without allowing `tail` to
+read arbitrary files. Completed or approved actions are removed from repeated
+permission denials, so a retry is not reported as blocked after it has already
+run successfully.
 
 ## Roadmap
 
