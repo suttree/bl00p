@@ -53,6 +53,7 @@ struct ClaudeInvocation: Sendable {
             "--output-format", "stream-json",
             "--input-format", "stream-json",
             "--verbose",
+            "--permission-mode", "default",
             "--permission-prompt-tool", "stdio",
             "--append-system-prompt", systemPrompt,
             "--setting-sources", profile.loadProjectInstructions
@@ -153,31 +154,51 @@ struct ClaudeInvocation: Sendable {
             "Bash(git merge-base:*)",
             "Bash(git ls-files:*)",
             "Bash(git grep:*)",
-            "Bash(swift --version:*)",
-            "Bash(swift test:*)",
-            "Bash(swift build:*)",
-            "Bash(env swift --version:*)",
-            "Bash(xcrun --find swift:*)",
-            "Bash(xcrun swift test:*)",
-            "Bash(xcrun swift build:*)",
-            "Bash(xcode-select -p:*)",
-            "Bash(xcodebuild test:*)",
-            "Bash(xcodebuild build:*)",
-            "Bash(npm test:*)",
-            "Bash(npm run test:*)",
-            "Bash(npm run lint:*)",
-            "Bash(npm run typecheck:*)",
-            "Bash(pnpm test:*)",
-            "Bash(pnpm lint:*)",
-            "Bash(yarn test:*)",
-            "Bash(cargo test:*)",
-            "Bash(go test:*)",
-            "Bash(pytest:*)"
         ]
+
+        tools.append(
+            contentsOf: [
+                "swift --version",
+                "swift test",
+                "swift build",
+                "env swift --version",
+                "xcrun --find swift",
+                "xcrun swift test",
+                "xcrun swift build",
+                "xcode-select -p",
+                "xcodebuild test",
+                "xcodebuild build",
+                "npm test",
+                "npm run test",
+                "npm run lint",
+                "npm run typecheck",
+                "pnpm test",
+                "pnpm lint",
+                "yarn test",
+                "cargo test",
+                "go test",
+                "pytest",
+                // Claude checks each pipeline segment independently.
+                "tail"
+            ]
+                .flatMap(Self.exactAndArgumentBearingBashRules)
+        )
 
         if profile.role == .builder || profile.role == .publisher {
             tools.append(contentsOf: ["Edit", "Write", "NotebookEdit"])
         }
         return tools
+    }
+
+    private static func exactAndArgumentBearingBashRules(
+        for command: String
+    ) -> [String] {
+        // Claude's documented prefix form uses a space before the trailing
+        // wildcard. Keep the exact form too because it does not match a bare
+        // command.
+        [
+            "Bash(\(command))",
+            "Bash(\(command) *)"
+        ]
     }
 }

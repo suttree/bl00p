@@ -4,6 +4,7 @@ actor ClaudeRuntime: AgentRuntime {
     private struct PendingApproval: Sendable {
         let requestID: String
         let toolInput: JSONValue
+        let actionKey: String
     }
 
     private struct PendingTurn {
@@ -24,14 +25,21 @@ actor ClaudeRuntime: AgentRuntime {
         var currentAttemptID: UUID?
         var pendingTurn: PendingTurn?
         var toolEntries: [String: TimelineEntry] = [:]
+        var toolActionKeys: [String: String] = [:]
+        var successfulToolActionKeys: Set<String> = []
+        var approvedToolActionKeys: Set<String> = []
         var assistantTexts: Set<String> = []
         var receivedResult = false
         var stagedAttachmentDirectory: URL?
         var pendingApprovals: [UUID: PendingApproval] = [:]
     }
 
-    private let locator = ClaudeExecutableLocator()
+    private let locator: ClaudeExecutableLocator
     private var sessions: [UUID: Session] = [:]
+
+    init(locator: ClaudeExecutableLocator = ClaudeExecutableLocator()) {
+        self.locator = locator
+    }
 
     func start(
         profile: BotProfile,
@@ -157,6 +165,9 @@ actor ClaudeRuntime: AgentRuntime {
             profile: profile
         )
         session.toolEntries.removeAll()
+        session.toolActionKeys.removeAll()
+        session.successfulToolActionKeys.removeAll()
+        session.approvedToolActionKeys.removeAll()
         session.assistantTexts.removeAll()
         session.receivedResult = false
         session.pendingApprovals.removeAll()
@@ -205,6 +216,9 @@ actor ClaudeRuntime: AgentRuntime {
             }
 
             activeSession.pendingApprovals.removeValue(forKey: entryID)
+            if approved {
+                activeSession.approvedToolActionKeys.insert(pending.actionKey)
+            }
             activeSession.currentContinuation?.yield(
                 .approvalResolved(entryID, approved ? .approved : .declined)
             )
@@ -409,7 +423,11 @@ actor ClaudeRuntime: AgentRuntime {
         let entry = approval.timelineEntry()
         session.pendingApprovals[entry.id] = PendingApproval(
             requestID: requestID,
-            toolInput: approval.toolInput
+            toolInput: approval.toolInput,
+            actionKey: ClaudePermissionDenials.actionKey(
+                toolName: approval.toolName,
+                toolInput: approval.toolInput
+            )
         )
         sessions[profileID] = session
         session.currentContinuation?.yield(.entry(entry))
@@ -510,6 +528,10 @@ actor ClaudeRuntime: AgentRuntime {
             isError: false
         )
         session.toolEntries[toolID] = entry
+        session.toolActionKeys[toolID] = ClaudePermissionDenials.actionKey(
+            toolName: name,
+            toolInput: input
+        )
         sessions[profileID] = session
         yield(.upsertEntry(entry), profileID: profileID)
     }
@@ -531,6 +553,10 @@ actor ClaudeRuntime: AgentRuntime {
                 entry.detail = result.trimmedForClaudeTimeline
             }
             session.toolEntries[toolID] = entry
+            if block["is_error"]?.boolValue != true,
+               let actionKey = session.toolActionKeys[toolID] {
+                session.successfulToolActionKeys.insert(actionKey)
+            }
             sessions[profileID] = session
             yield(.upsertEntry(entry), profileID: profileID)
         }
@@ -546,7 +572,12 @@ actor ClaudeRuntime: AgentRuntime {
             .compactMap(\.stringValue)
             .joined(separator: "\n")
         let failureDetail = result?.isEmpty == false ? result : errors
-        let permissionDenials = event["permission_denials"]?.arrayValue ?? []
+        let reportedPermissionDenials = event["permission_denials"]?.arrayValue ?? []
+        let permissionDenials = ClaudePermissionDenials.unresolved(
+            reportedPermissionDenials,
+            resolvedActionKeys: session.successfulToolActionKeys
+                .union(session.approvedToolActionKeys)
+        )
 
         if failed,
            session.shouldResume,
@@ -610,7 +641,7 @@ actor ClaudeRuntime: AgentRuntime {
                     .init(
                         kind: .question,
                         title: "Some actions were blocked",
-                        text: "Claude could not run every requested action. Review its response, then tell it how you want to proceed.",
+                        text: "Claude could not run one or more required actions. Retry and approve the bl00p prompt, or adjust the applicable Claude deny rule before continuing.",
                         detail: ClaudePermissionDenials
                             .readableDetail(for: permissionDenials)
                     )
@@ -860,6 +891,42 @@ enum ClaudeTurnOutcome {
 }
 
 enum ClaudePermissionDenials {
+    static func unresolved(
+        _ denials: [JSONValue],
+        resolvedActionKeys: Set<String>
+    ) -> [JSONValue] {
+        var keys: [String] = []
+        var unique: [String: JSONValue] = [:]
+
+        for denial in denials {
+            let key = actionKey(
+                toolName: denial["tool_name"]?.stringValue ?? "unknown",
+                toolInput: denial["tool_input"] ?? .object([:])
+            )
+            guard !resolvedActionKeys.contains(key) else { continue }
+
+            if let previous = unique[key] {
+                unique[key] = preferredDenial(previous, denial)
+            } else {
+                keys.append(key)
+                unique[key] = denial
+            }
+        }
+
+        return keys.compactMap { unique[$0] }
+    }
+
+    static func actionKey(
+        toolName: String,
+        toolInput: JSONValue
+    ) -> String {
+        if toolName == "Bash",
+           let command = toolInput["command"]?.stringValue {
+            return "Bash:\(primaryShellAction(command))"
+        }
+        return "\(toolName):\(toolInput.compactDescription)"
+    }
+
     static func readableDetail(for denials: [JSONValue]) -> String {
         let lines = denials.compactMap { denial -> String? in
             let input = denial["tool_input"]
@@ -895,6 +962,41 @@ enum ClaudePermissionDenials {
                 try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8))
             }
         return readableDetail(for: denials)
+    }
+
+    private static func primaryShellAction(_ command: String) -> String {
+        let firstPipelineSegment = command
+            .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+            .first
+            .map(String.init) ?? command
+        let withoutRedirection = firstPipelineSegment
+            .replacingOccurrences(
+                of: #"\s+\d*>&\d+\s*"#,
+                with: " ",
+                options: .regularExpression
+            )
+        let beforeOutputRedirection = withoutRedirection
+            .split(separator: ">", maxSplits: 1, omittingEmptySubsequences: false)
+            .first
+            .map(String.init) ?? withoutRedirection
+        let normalized = beforeOutputRedirection
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        if normalized.hasPrefix("xcrun swift ") {
+            return String(normalized.dropFirst("xcrun ".count))
+        }
+        return normalized
+    }
+
+    private static func preferredDenial(
+        _ lhs: JSONValue,
+        _ rhs: JSONValue
+    ) -> JSONValue {
+        let lhsCommand = lhs["tool_input"]?["command"]?.stringValue ?? ""
+        let rhsCommand = rhs["tool_input"]?["command"]?.stringValue ?? ""
+        guard !rhsCommand.isEmpty else { return lhs }
+        guard !lhsCommand.isEmpty else { return rhs }
+        return rhsCommand.count < lhsCommand.count ? rhs : lhs
     }
 }
 
