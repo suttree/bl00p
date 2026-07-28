@@ -1567,10 +1567,23 @@ final class AppModel: ObservableObject {
 
         for managerID in matchingManagerIDs {
             switch status {
-            case .needsApproval, .needsAnswer:
+            case .needsAnswer:
+                if let workflow = managerWorkflows[managerID],
+                   workflow.stage == .reviewing
+                    || workflow.stage == .verifying,
+                   latestReviewOutput(for: profileID).disposition != nil {
+                    resumeWorkflowIndicator(managerID)
+                    advanceWorkflow(managerID, completedBy: profileID)
+                } else {
+                    pauseWorkflow(
+                        managerID,
+                        reason: "\(profileNameForSession(profileID)) needs attention: \(status.label)."
+                    )
+                }
+            case .needsApproval:
                 pauseWorkflow(
                     managerID,
-                    reason: "\(profileName(profileID)) needs attention: \(status.label)."
+                    reason: "\(profileNameForSession(profileID)) needs attention: \(status.label)."
                 )
             case .failed:
                 planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
@@ -1682,7 +1695,6 @@ final class AppModel: ObservableObject {
             workflow.stage == .reviewing || workflow.stage == .verifying
                 ? latestReviewOutput(for: profileID)
                 : nil
-
         if workflow.stage == .planning {
             let capturedEntryIDs =
                 planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
@@ -2387,7 +2399,8 @@ final class AppModel: ObservableObject {
                 profile: builder,
                 stage: workflow.stage
             )
-            package.taskContext = workflow.request
+            package.taskContext =
+                workflow.implementationPlan ?? workflow.request
             let previousRevision =
                 workflow.latestHandoff?.headRevision ?? package.baseRevision
             let lacksRequiredCommit =

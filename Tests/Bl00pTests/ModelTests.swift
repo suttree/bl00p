@@ -347,6 +347,50 @@ func fencedMarkdownAndShellBlocksPreserveLinesWithoutLanguageLabels() throws {
 }
 
 @Test
+func markdownTablesRenderAsMonospacedAsciiBlocks() throws {
+    let blocks = TranscriptMarkdown.blocks(
+        """
+        ## Status
+
+        | # | Finding | Status |
+        |---|---|---|
+        | 1 | Missing test | Not addressed |
+        | 2 | Unsafe command | Fixed |
+
+        Continue with the remaining work.
+        """
+    )
+    let code = blocks.compactMap { block -> String? in
+        guard case .code(let text) = block.content else { return nil }
+        return text
+    }
+    let prose = blocks.compactMap { block -> String? in
+        guard case .prose(let text) = block.content else { return nil }
+        return String(text.characters)
+    }.joined(separator: "\n")
+
+    #expect(code.count == 1)
+    #expect(code[0].contains("| # | Finding | Status |"))
+    #expect(code[0].contains("| 2 | Unsafe command | Fixed |"))
+    #expect(prose.contains("Continue with the remaining work."))
+}
+
+@Test
+func reviewDispositionParsesAndRemovesItsProtocolLine() {
+    let response = """
+    Two findings remain.
+
+    BL00P_REVIEW_DISPOSITION: changesRequested
+    """
+
+    #expect(ReviewDisposition.parse(from: response) == .changesRequested)
+    #expect(
+        ReviewDisposition.removingProtocolLines(from: response)
+            == "Two findings remain."
+    )
+}
+
+@Test
 func codexBotsUseGeneralTurnsInsteadOfInheritingReviewMode() {
     let request = CodexTurnRequest.make(
         threadID: "document-thread",
@@ -1607,6 +1651,13 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
                 && $0.detail?.contains(revisedPackage.headRevision) == true
         })
     )
+    let reviewerHandoff = try #require(
+        model.session(for: reviewerID).entries.first(where: {
+            $0.kind == .handoff
+                && $0.title?.hasPrefix("Workflow handoff") == true
+        })
+    )
+    #expect(reviewerHandoff.text == orchestrationImplementationPlan)
 
     let restoredModel = AppModel(runtime: runtime, store: store)
     let restoredWorkflow = try #require(
@@ -5405,6 +5456,28 @@ func permissionDenialsProduceAReadableAttentionState() throws {
         ClaudePermissionDenials.readableDetail(for: [denial])
             == "• Run tests using Xcode\n  xcrun swift test"
     )
+    #expect(
+        ClaudeTurnOutcome.permissionDenialsRequiringAttention(
+            [denial],
+            role: .reviewer,
+            responses: [
+                """
+                The implementation needs a regression test.
+
+                BL00P_REVIEW_DISPOSITION: changesRequested
+                """
+            ]
+        ).isEmpty
+    )
+    #expect(
+        ClaudeTurnOutcome.permissionDenialsRequiringAttention(
+            [denial],
+            role: .builder,
+            responses: [
+                "BL00P_REVIEW_DISPOSITION: changesRequested"
+            ]
+        ) == [denial]
+    )
 }
 
 @Test
@@ -7123,7 +7196,16 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
             for assistantEntry in assistantEntries {
                 continuation.yield(.entry(assistantEntry))
             }
-            continuation.yield(.status(.completed))
+            let hasStructuredReview = responses.contains {
+                ReviewDisposition.parse(from: $0) != nil
+            }
+            continuation.yield(
+                .status(
+                    profile.role == .reviewer && hasStructuredReview
+                        ? .needsAnswer
+                        : .completed
+                )
+            )
             if profile.role == .reviewer {
                 continuation.yield(
                     .entry(

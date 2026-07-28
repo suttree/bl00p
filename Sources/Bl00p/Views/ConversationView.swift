@@ -643,13 +643,13 @@ private struct TimelineEntryView: View {
                     TimelineTimestamp(entry.timestamp)
                 }
 
-                Text(entry.text)
-                    .font(
-                        entry.kind == .command
-                            ? .bl00p(.callout, design: .monospaced)
-                            : .bl00p(.callout)
-                    )
-                    .textSelection(.enabled)
+                if entry.kind == .handoff {
+                    MarkdownMessageView(source: entry.text)
+                } else {
+                    Text(entry.text)
+                        .font(.bl00p(.callout))
+                        .textSelection(.enabled)
+                }
 
                 if let detail = entry.detail {
                     Text(detail)
@@ -1029,25 +1029,28 @@ private struct MarkdownMessageView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
 
                 case .code(let code):
-                    Text(code)
-                        .font(.bl00p(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                        .background(
-                            Color(nsColor: .controlBackgroundColor),
-                            in: RoundedRectangle(
-                                cornerRadius: 10,
-                                style: .continuous
-                            )
+                    ScrollView(.horizontal) {
+                        Text(code)
+                            .font(.bl00p(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: true, vertical: true)
+                            .padding(12)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        Color(nsColor: .controlBackgroundColor),
+                        in: RoundedRectangle(
+                            cornerRadius: 10,
+                            style: .continuous
                         )
-                        .overlay {
-                            RoundedRectangle(
-                                cornerRadius: 10,
-                                style: .continuous
-                            )
-                            .stroke(.quaternary, lineWidth: 1)
-                        }
+                    )
+                    .overlay {
+                        RoundedRectangle(
+                            cornerRadius: 10,
+                            style: .continuous
+                        )
+                        .stroke(.quaternary, lineWidth: 1)
+                    }
                 }
             }
         }
@@ -1140,6 +1143,7 @@ enum TranscriptMarkdown {
         var proseLines: [String] = []
         var codeLines: [String] = []
         var activeFence: String?
+        var lineIndex = 0
 
         func appendProse() {
             let prose = proseLines
@@ -1165,7 +1169,8 @@ enum TranscriptMarkdown {
             codeLines.removeAll()
         }
 
-        for line in lines {
+        while lineIndex < lines.count {
+            let line = lines[lineIndex]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
             if let fence = activeFence {
@@ -1175,14 +1180,25 @@ enum TranscriptMarkdown {
                 } else {
                     codeLines.append(line)
                 }
+                lineIndex += 1
                 continue
             }
 
             if let fence = openingFence(in: trimmed) {
                 appendProse()
                 activeFence = fence
+                lineIndex += 1
+            } else if isTableStart(at: lineIndex, in: lines) {
+                appendProse()
+                while lineIndex < lines.count,
+                      isTableRow(lines[lineIndex]) {
+                    codeLines.append(lines[lineIndex])
+                    lineIndex += 1
+                }
+                appendCode()
             } else {
                 proseLines.append(line)
+                lineIndex += 1
             }
         }
 
@@ -1192,6 +1208,41 @@ enum TranscriptMarkdown {
             appendProse()
         }
         return result
+    }
+
+    private static func isTableStart(
+        at index: Int,
+        in lines: [String]
+    ) -> Bool {
+        guard index + 1 < lines.count,
+              isTableRow(lines[index]) else {
+            return false
+        }
+        let separatorCells = tableCells(in: lines[index + 1])
+        return separatorCells.count >= 2
+            && separatorCells.allSatisfy { cell in
+                let marker = cell.replacingOccurrences(of: ":", with: "")
+                return marker.count >= 3
+                    && marker.allSatisfy { $0 == "-" }
+            }
+    }
+
+    private static func isTableRow(_ line: String) -> Bool {
+        tableCells(in: line).count >= 2
+    }
+
+    private static func tableCells(in line: String) -> [String] {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("|"), trimmed.hasSuffix("|") else {
+            return []
+        }
+        return trimmed
+            .dropFirst()
+            .dropLast()
+            .split(separator: "|", omittingEmptySubsequences: false)
+            .map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }
     }
 
     private static func openingFence(in line: String) -> String? {
