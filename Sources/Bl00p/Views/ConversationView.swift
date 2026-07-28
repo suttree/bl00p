@@ -5,10 +5,14 @@ struct ConversationView: View {
     @ObservedObject var model: AppModel
     @State private var draft = ""
     @State private var attachments: [ImageAttachment] = []
+    @State private var closeRequest: SessionCloseRequest?
+    @State private var closeError: String?
+    @State private var scrollPositions: [UUID: UUID] = [:]
 
     var body: some View {
         if let profile = model.selectedProfile {
             let session = model.session(for: profile.id)
+            let sessionID = model.selectedSessionID(for: profile.id) ?? session.id
             let isAwaitingPlanApproval =
                 model.workflow(for: profile.id)?.planApprovalEntryID != nil
 
@@ -22,6 +26,16 @@ struct ConversationView: View {
                         model.handoff(from: profile.id, to: targetID)
                     },
                     showSettings: { model.isInspectorVisible.toggle() }
+                )
+
+                Divider()
+
+                ConversationTabBar(
+                    sessions: model.sessions(for: profile.id),
+                    selectedSessionID: sessionID,
+                    select: { model.selectSession($0, for: profile.id) },
+                    create: { model.newChat(for: profile.id) },
+                    close: { requestClose($0) }
                 )
 
                 Divider()
@@ -40,6 +54,11 @@ struct ConversationView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     TranscriptView(
+                        sessionID: sessionID,
+                        scrollPosition: Binding(
+                            get: { scrollPositions[sessionID] },
+                            set: { scrollPositions[sessionID] = $0 }
+                        ),
                         entries: session.entries,
                         profile: profile,
                         canRetryFailedMessage:
@@ -54,7 +73,7 @@ struct ConversationView: View {
                 }
 
                 ComposerView(
-                    profileID: profile.id,
+                    profileID: sessionID,
                     draft: $draft,
                     attachments: $attachments,
                     isEnabled: session.status != .launching
@@ -74,9 +93,40 @@ struct ConversationView: View {
                 )
             }
             .background(Color(nsColor: .textBackgroundColor))
-            .onChange(of: profile.id) { _, _ in
-                draft = ""
+            .task(id: sessionID) {
+                draft = model.sessions[sessionID]?.draft ?? ""
                 attachments = []
+            }
+            .onChange(of: draft) { _, updated in
+                model.updateDraft(updated, for: sessionID)
+            }
+            .alert(
+                closeRequest?.assessment.requiresDestructiveConfirmation == true
+                    ? "Close this chat and clean up its worktree?"
+                    : "Close this chat?",
+                isPresented: Binding(
+                    get: { closeRequest != nil },
+                    set: { if !$0 { closeRequest = nil } }
+                ),
+                presenting: closeRequest
+            ) { request in
+                Button("Cancel", role: .cancel) {}
+                Button("Close Chat", role: .destructive) {
+                    close(request)
+                }
+            } message: { request in
+                Text(request.message)
+            }
+            .alert(
+                "Could not close chat",
+                isPresented: Binding(
+                    get: { closeError != nil },
+                    set: { if !$0 { closeError = nil } }
+                )
+            ) {
+                Button("OK") {}
+            } message: {
+                Text(closeError ?? "")
             }
         } else {
             ContentUnavailableView(
@@ -85,6 +135,126 @@ struct ConversationView: View {
                 description: Text("Choose or add a bot to begin.")
             )
         }
+    }
+
+    private func requestClose(_ sessionID: UUID) {
+        Task {
+            do {
+                let assessment = try await model.closeAssessment(for: sessionID)
+                closeRequest = SessionCloseRequest(
+                    sessionID: sessionID,
+                    assessment: assessment
+                )
+            } catch {
+                closeError = error.localizedDescription
+            }
+        }
+    }
+
+    private func close(_ request: SessionCloseRequest) {
+        Task {
+            let error = await model.closeSession(
+                request.sessionID,
+                confirmedDestructiveCleanup: true
+            )
+            if let error {
+                closeError = error
+            }
+            closeRequest = nil
+        }
+    }
+}
+
+private struct SessionCloseRequest: Identifiable {
+    let sessionID: UUID
+    let assessment: SessionCloseAssessment
+
+    var id: UUID { sessionID }
+
+    var message: String {
+        var warnings: [String] = [
+            "The local chat history will be deleted. Its Git branch is retained for recovery."
+        ]
+        if assessment.isActive {
+            warnings.append("The agent is active and will be stopped.")
+        }
+        if assessment.hasDirtyWorktree {
+            warnings.append("The worktree has uncommitted changes and will be removed.")
+        }
+        if assessment.participatesInWorkflow {
+            warnings.append("Its managed workflow will be paused.")
+        }
+        return warnings.joined(separator: "\n\n")
+    }
+}
+
+private struct ConversationTabBar: View {
+    let sessions: [AgentSessionState]
+    let selectedSessionID: UUID
+    let select: (UUID) -> Void
+    let create: () -> Void
+    let close: (UUID) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(sessions, id: \.id) { session in
+                    HStack(spacing: 7) {
+                        if session.status == .working || session.status == .launching {
+                            ProgressView()
+                                .controlSize(.mini)
+                        } else if session.status.needsAttention
+                                    || session.hasUnreadCompletion {
+                            Circle()
+                                .fill(Color.bl00pPink)
+                                .frame(width: 7, height: 7)
+                        }
+
+                        Button(session.title) {
+                            select(session.id)
+                        }
+                        .buttonStyle(.plain)
+                        .lineLimit(1)
+
+                        Button {
+                            close(session.id)
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Close chat")
+                    }
+                    .font(.bl00p(.caption1, weight: .semibold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(
+                        session.id == selectedSessionID
+                            ? Color.bl00pPinkSoft
+                            : Color(nsColor: .controlBackgroundColor),
+                        in: RoundedRectangle(cornerRadius: 8)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(
+                                session.id == selectedSessionID
+                                    ? Color.bl00pPink.opacity(0.55)
+                                    : Color(nsColor: .separatorColor),
+                                lineWidth: 1
+                            )
+                    }
+                }
+
+                Button(action: create) {
+                    Label("New chat", systemImage: "plus")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+        }
+        .background(.bar)
     }
 }
 
@@ -227,7 +397,7 @@ private struct ConversationHeader: View {
             Spacer()
 
             if profile.role == .builder,
-               profile.worktree != nil,
+               session.worktree != nil,
                !handoffTargets.isEmpty {
                 Menu {
                     ForEach(handoffTargets) { target in
@@ -266,7 +436,7 @@ private struct ConversationHeader: View {
     }
 
     private var directoryLabel: String {
-        if let worktree = profile.worktree {
+        if let worktree = session.worktree {
             return "\(worktree.branch) · \(worktree.worktreePath)"
         }
         if profile.workingDirectory.isEmpty {
@@ -277,6 +447,8 @@ private struct ConversationHeader: View {
 }
 
 private struct TranscriptView: View {
+    let sessionID: UUID
+    @Binding var scrollPosition: UUID?
     let entries: [TimelineEntry]
     let profile: BotProfile
     let canRetryFailedMessage: Bool
@@ -300,24 +472,25 @@ private struct TranscriptView: View {
 
                     Color.clear
                         .frame(height: 24)
-                        .id("transcript-bottom-\(profile.id.uuidString)")
+                        .id(sessionID)
                 }
                 .padding(.horizontal, 32)
                 .padding(.top, 24)
                 .frame(maxWidth: 884)
                 .frame(maxWidth: .infinity)
             }
-            .task(id: profile.id) {
+            .scrollPosition(id: $scrollPosition)
+            .task(id: sessionID) {
                 try? await Task.sleep(for: .milliseconds(60))
                 proxy.scrollTo(
-                    "transcript-bottom-\(profile.id.uuidString)",
+                    scrollPosition ?? sessionID,
                     anchor: .bottom
                 )
             }
             .onChange(of: entries.count) { _, _ in
                 withAnimation(.easeOut(duration: 0.2)) {
                     proxy.scrollTo(
-                        "transcript-bottom-\(profile.id.uuidString)",
+                        sessionID,
                         anchor: .bottom
                     )
                 }
@@ -384,6 +557,8 @@ private struct TimelineEntryView: View {
                     )
                     .foregroundStyle(Color.bl00pUserBubbleText)
 
+                TimelineTimestamp(entry.timestamp)
+
                 if entry.deliveryFailed == true {
                     HStack(spacing: 7) {
                         Label("Failed to send", systemImage: "exclamationmark.circle.fill")
@@ -411,9 +586,12 @@ private struct TimelineEntryView: View {
                 size: 28
             )
             VStack(alignment: .leading, spacing: 4) {
-                Text(profile.name)
-                    .font(.bl00p(.caption1, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 7) {
+                    Text(profile.name)
+                        .font(.bl00p(.caption1, weight: .semibold))
+                    TimelineTimestamp(entry.timestamp)
+                }
+                .foregroundStyle(.secondary)
                 MarkdownMessageView(source: entry.text)
             }
             Spacer(minLength: 60)
@@ -431,6 +609,7 @@ private struct TimelineEntryView: View {
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                 }
+                TimelineTimestamp(entry.timestamp)
             }
         }
         .font(.bl00p(.callout))
@@ -447,9 +626,13 @@ private struct TimelineEntryView: View {
                 .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
 
             VStack(alignment: .leading, spacing: 7) {
-                if let title = entry.title {
-                    Text(title)
-                        .font(.bl00p(.callout, weight: .semibold))
+                HStack {
+                    if let title = entry.title {
+                        Text(title)
+                            .font(.bl00p(.callout, weight: .semibold))
+                    }
+                    Spacer()
+                    TimelineTimestamp(entry.timestamp)
                 }
 
                 Text(entry.text)
@@ -488,6 +671,7 @@ private struct TimelineEntryView: View {
                     .font(.bl00p(.callout, weight: .bold))
                     .foregroundStyle(Color.bl00pPinkText)
                 Spacer()
+                TimelineTimestamp(entry.timestamp)
                 if let state = entry.approvalState, state != .pending {
                     Text(state == .approved ? "Approved" : "Declined")
                         .font(.bl00p(.caption1, weight: .semibold))
@@ -570,6 +754,8 @@ private struct ToolCallCard: View {
                     }
 
                     Spacer()
+
+                    TimelineTimestamp(entry.timestamp)
 
                     Image(systemName: "chevron.right")
                         .font(.system(size: 11, weight: .bold))
@@ -858,6 +1044,59 @@ private struct MarkdownMessageView: View {
             }
         }
         .padding(.vertical, 2)
+    }
+}
+
+private struct TimelineTimestamp: View {
+    let date: Date
+
+    init(_ date: Date) {
+        self.date = date
+    }
+
+    var body: some View {
+        Text(TimelineTimestampFormatter.string(for: date))
+            .font(.bl00p(.caption2))
+            .foregroundStyle(.tertiary)
+            .help(TimelineTimestampFormatter.fullString(for: date))
+            .accessibilityLabel(
+                Text(TimelineTimestampFormatter.fullString(for: date))
+            )
+    }
+}
+
+enum TimelineTimestampFormatter {
+    static func string(
+        for date: Date,
+        now: Date = .now,
+        calendar: Calendar = .autoupdatingCurrent,
+        locale: Locale = .autoupdatingCurrent,
+        timeZone: TimeZone = .autoupdatingCurrent
+    ) -> String {
+        var calendar = calendar
+        calendar.timeZone = timeZone
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.timeZone = timeZone
+        if calendar.isDate(date, inSameDayAs: now) {
+            formatter.setLocalizedDateFormatFromTemplate("jm")
+        } else {
+            formatter.setLocalizedDateFormatFromTemplate("yMMMdjm")
+        }
+        return formatter.string(from: date)
+    }
+
+    static func fullString(
+        for date: Date,
+        locale: Locale = .autoupdatingCurrent,
+        timeZone: TimeZone = .autoupdatingCurrent
+    ) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.timeZone = timeZone
+        formatter.dateStyle = .full
+        formatter.timeStyle = .long
+        return formatter.string(from: date)
     }
 }
 

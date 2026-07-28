@@ -599,6 +599,258 @@ func persistedStateRoundTrips() throws {
     #expect(decoded.managerWorkflows[profile.id]?.revisionRounds == 2)
 }
 
+@MainActor
+@Test
+func legacyProfileSessionsMigrateIntoSelectedTabsWithTheirWorktree() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-tab-migration-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    var profile = BotProfile.defaults[0]
+    profile.worktree = GitWorktreeOwnership(
+        ownerProfileID: profile.id,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-legacy",
+        branch: "bl00p/legacy",
+        baseRevision: "abc123"
+    )
+    let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    store.save(
+        PersistedAppState(
+            profiles: [profile],
+            sessions: [
+                profile.id: AgentSessionState(
+                    entries: [.init(kind: .user, text: "Preserve this conversation")]
+                )
+            ],
+            selectedBotID: profile.id
+        )
+    )
+
+    let model = AppModel(runtime: ImmediateRecordingRuntime(), store: store)
+    let migrated = try #require(model.sessions[profile.id])
+
+    #expect(migrated.id == profile.id)
+    #expect(migrated.ownerProfileID == profile.id)
+    #expect(migrated.title == "Preserve this conversation")
+    #expect(migrated.worktree?.ownerSessionID == profile.id)
+    #expect(model.sessionOrder[profile.id] == [profile.id])
+    #expect(model.selectedSessionIDs[profile.id] == profile.id)
+}
+
+@MainActor
+@Test
+func chatTabsKeepIndependentDraftsHistoriesAndRuntimeIdentities() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-tab-isolation-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let runtime = SessionRecordingRuntime()
+    let model = AppModel(
+        runtime: runtime,
+        store: AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    )
+    let profile = try #require(model.profiles.first)
+    let firstID = try #require(model.selectedSessionID(for: profile.id))
+    model.updateDraft("first draft", for: firstID)
+    model.send("First task", to: profile.id)
+
+    let secondID = model.newChat(for: profile.id)
+    model.updateDraft("second draft", for: secondID)
+    model.send("Second task", to: profile.id)
+
+    for _ in 0..<50 where await runtime.respondedSessionIDs.count < 2 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(firstID != secondID)
+    #expect(Set(await runtime.respondedSessionIDs) == Set([firstID, secondID]))
+    #expect(model.sessions[firstID]?.draft == "first draft")
+    #expect(model.sessions[secondID]?.draft == "second draft")
+    #expect(model.sessions[firstID]?.entries.contains(where: { $0.text.contains("First task") }) == true)
+    #expect(model.sessions[firstID]?.entries.contains(where: { $0.text.contains("Second task") }) == false)
+    #expect(model.sessions[secondID]?.entries.contains(where: { $0.text.contains("Second task") }) == true)
+    #expect(model.sessions[firstID]?.title == "First task")
+    #expect(model.sessions[secondID]?.title == "Second task")
+}
+
+@MainActor
+@Test
+func managedWorkflowParticipantsStayBoundToTheSessionsChosenAtStart() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-workflow-tabs-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let managerID = UUID()
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "",
+        managerTeam: ManagerTeamConfiguration(
+            builderProfileID: builderID,
+            reviewerProfileID: reviewerID,
+            publisherProfileID: publisherID
+        )
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: ""
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: ""
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Publisher",
+        provider: .claude,
+        role: .publisher,
+        instructions: ""
+    )
+    let profiles = [manager, builder, reviewer, publisher]
+    let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    store.save(
+        PersistedAppState(
+            profiles: profiles,
+            sessions: Dictionary(
+                uniqueKeysWithValues: profiles.map {
+                    ($0.id, AgentSessionState(id: $0.id, ownerProfileID: $0.id))
+                }
+            ),
+            selectedBotID: managerID
+        )
+    )
+    let model = AppModel(runtime: ImmediateRecordingRuntime(), store: store)
+    let chosenBuilderSessionID = try #require(model.selectedSessionID(for: builderID))
+    model.send("Plan this change", to: managerID)
+    let workflow = try #require(model.workflow(for: managerID))
+    let otherBuilderSessionID = model.newChat(for: builderID)
+
+    #expect(otherBuilderSessionID != chosenBuilderSessionID)
+    #expect(workflow.participantSessionIDs[.manager] == managerID)
+    #expect(workflow.participantSessionIDs[.builder] == chosenBuilderSessionID)
+    #expect(model.workflow(for: managerID)?.participantSessionIDs[.builder]
+        == chosenBuilderSessionID)
+}
+
+@MainActor
+@Test
+func closingTheFinalTabCreatesAFreshUsableReplacement() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-close-final-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let model = AppModel(
+        runtime: ImmediateRecordingRuntime(),
+        store: AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    )
+    let profile = try #require(model.profiles.first)
+    let originalID = try #require(model.selectedSessionID(for: profile.id))
+
+    let error = await model.closeSession(
+        originalID,
+        confirmedDestructiveCleanup: true
+    )
+    let replacementID = try #require(model.selectedSessionID(for: profile.id))
+
+    #expect(error == nil)
+    #expect(model.sessions[originalID] == nil)
+    #expect(replacementID != originalID)
+    #expect(model.sessions[replacementID]?.entries.isEmpty == true)
+    #expect(model.sessions[replacementID]?.sessionID == nil)
+}
+
+@MainActor
+@Test
+func failedWorktreeCleanupRetainsTheChatAndShowsAnActionableError() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-close-failure-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    var profile = BotProfile.defaults[0]
+    profile.workingDirectory = "/tmp/project"
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: profile.id,
+        ownerSessionID: profile.id,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-session",
+        branch: "bl00p/session",
+        baseRevision: "abc123"
+    )
+    let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    store.save(
+        PersistedAppState(
+            profiles: [profile],
+            sessions: [
+                profile.id: AgentSessionState(
+                    id: profile.id,
+                    ownerProfileID: profile.id,
+                    worktree: ownership
+                )
+            ],
+            selectedBotID: profile.id
+        )
+    )
+    let model = AppModel(
+        runtime: ImmediateRecordingRuntime(),
+        worktrees: FailingCleanupWorktreeManager(ownership: ownership),
+        store: store
+    )
+
+    let error = await model.closeSession(
+        profile.id,
+        confirmedDestructiveCleanup: true
+    )
+
+    #expect(error == "Simulated cleanup failure.")
+    #expect(model.sessions[profile.id] != nil)
+    #expect(model.sessions[profile.id]?.entries.last?.text == "Could not close chat")
+    #expect(model.sessionOrder[profile.id] == [profile.id])
+}
+
+@Test
+func timelineTimestampsRespectDayLocaleAndTimeZone() throws {
+    let timeZone = try #require(TimeZone(identifier: "Europe/London"))
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = timeZone
+    let now = try #require(
+        calendar.date(from: DateComponents(year: 2026, month: 7, day: 28, hour: 18))
+    )
+    let today = try #require(
+        calendar.date(from: DateComponents(year: 2026, month: 7, day: 28, hour: 9, minute: 5))
+    )
+    let older = try #require(
+        calendar.date(from: DateComponents(year: 2026, month: 7, day: 27, hour: 21, minute: 30))
+    )
+
+    let todayText = TimelineTimestampFormatter.string(
+        for: today,
+        now: now,
+        calendar: calendar,
+        locale: Locale(identifier: "en_GB"),
+        timeZone: timeZone
+    )
+    let olderText = TimelineTimestampFormatter.string(
+        for: older,
+        now: now,
+        calendar: calendar,
+        locale: Locale(identifier: "en_GB"),
+        timeZone: timeZone
+    )
+
+    #expect(todayText.contains("09:05"))
+    #expect(!todayText.contains("2026"))
+    #expect(olderText.contains("27"))
+    #expect(olderText.contains("2026"))
+    #expect(olderText.contains("21:30"))
+}
+
 @Test
 func worktreeManagerCreatesIsolatedBranchesAndHandoffSnapshots() async throws {
     let root = FileManager.default.temporaryDirectory
@@ -762,6 +1014,90 @@ func handoffEvidenceIgnoresGenericToolOutputThatMentionsTests() {
 
     #expect(evidence.status == .notRun)
     #expect(evidence.recordedAt == nil)
+}
+
+@Test
+func oneBuilderProfileGetsUniqueSessionWorktreesAndCleanupRetainsBranches() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-session-worktrees-\(UUID().uuidString)")
+    let repository = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try runGit(["init", "-b", "main"], in: repository)
+    try Data("initial\n".utf8).write(to: repository.appendingPathComponent("README.md"))
+    try runGit(["add", "README.md"], in: repository)
+    try runGit(
+        [
+            "-c", "user.name=bl00p Tests",
+            "-c", "user.email=tests@bl00p.dev",
+            "commit", "-m", "Initial commit"
+        ],
+        in: repository
+    )
+
+    let profile = BotProfile(
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "",
+        workingDirectory: repository.path
+    )
+    let firstSessionID = UUID()
+    let secondSessionID = UUID()
+    let manager = GitWorktreeManager()
+    let first = try await manager.prepareWorktree(
+        for: profile,
+        sessionID: firstSessionID,
+        startingPoint: nil,
+        handoffID: nil
+    )
+    let second = try await manager.prepareWorktree(
+        for: profile,
+        sessionID: secondSessionID,
+        startingPoint: nil,
+        handoffID: nil
+    )
+
+    #expect(first.ownerSessionID == firstSessionID)
+    #expect(second.ownerSessionID == secondSessionID)
+    #expect(first.worktreePath != second.worktreePath)
+    #expect(first.branch != second.branch)
+    #expect(try await manager.worktreeIsDirty(first) == false)
+
+    try await manager.removeWorktree(first, force: false)
+    #expect(!FileManager.default.fileExists(atPath: first.worktreePath))
+    #expect(
+        try gitOutput(
+            ["show-ref", "--verify", "--quiet", "refs/heads/\(first.branch)"],
+            in: repository
+        ).isEmpty
+    )
+
+    try Data("dirty\n".utf8).write(
+        to: URL(fileURLWithPath: second.worktreePath)
+            .appendingPathComponent("uncommitted.txt")
+    )
+    #expect(try await manager.worktreeIsDirty(second))
+    try await manager.removeWorktree(second, force: true)
+    #expect(!FileManager.default.fileExists(atPath: second.worktreePath))
+    #expect(
+        try gitOutput(
+            ["show-ref", "--verify", "--quiet", "refs/heads/\(second.branch)"],
+            in: repository
+        ).isEmpty
+    )
+
+    let unsafe = GitWorktreeOwnership(
+        ownerProfileID: profile.id,
+        ownerSessionID: UUID(),
+        repositoryPath: repository.path,
+        worktreePath: repository.path,
+        branch: "main",
+        baseRevision: "HEAD"
+    )
+    await #expect(throws: GitWorktreeError.self) {
+        _ = try await manager.worktreeIsDirty(unsafe)
+    }
 }
 
 @MainActor
@@ -6039,6 +6375,40 @@ private actor StubWorktreeManager: GitWorktreeManaging {
     }
 }
 
+private actor FailingCleanupWorktreeManager: GitWorktreeManaging {
+    let ownership: GitWorktreeOwnership
+
+    init(ownership: GitWorktreeOwnership) {
+        self.ownership = ownership
+    }
+
+    func prepareWorktree(
+        for profile: BotProfile,
+        startingPoint: String?,
+        handoffID: UUID?
+    ) async throws -> GitWorktreeOwnership {
+        ownership
+    }
+
+    func makeHandoff(
+        from profile: BotProfile,
+        session: AgentSessionState
+    ) async throws -> GitHandoffPackage {
+        throw GitWorktreeError.commandFailed("No handoff expected.")
+    }
+
+    func worktreeIsDirty(_ ownership: GitWorktreeOwnership) async throws -> Bool {
+        false
+    }
+
+    func removeWorktree(
+        _ ownership: GitWorktreeOwnership,
+        force: Bool
+    ) async throws {
+        throw GitWorktreeError.commandFailed("Simulated cleanup failure.")
+    }
+}
+
 private actor HandoffRecordingRuntime: AgentRuntime {
     private(set) var messages: [String] = []
     private(set) var startedDirectories: [String] = []
@@ -6521,6 +6891,53 @@ private actor ImmediateRecordingRuntime: AgentRuntime {
         return AsyncStream { continuation in
             continuation.yield(
                 .entry(.init(kind: .assistant, text: "Working on \(message)"))
+            )
+            continuation.yield(.status(.completed))
+            continuation.finish()
+        }
+    }
+
+    func resolveApproval(
+        entryID: UUID,
+        approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func stop(profile: BotProfile) async {}
+}
+
+private actor SessionRecordingRuntime: AgentRuntime {
+    private(set) var respondedSessionIDs: [UUID] = []
+
+    func start(
+        profile: BotProfile,
+        resumeThreadID: String?
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(
+                .sessionID(resumeThreadID ?? "session-\(profile.id.uuidString)")
+            )
+            continuation.yield(.status(.needsAnswer))
+            continuation.finish()
+        }
+    }
+
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        respondedSessionIDs.append(profile.id)
+        return AsyncStream { continuation in
+            continuation.yield(
+                .entry(
+                    .init(
+                        kind: .assistant,
+                        text: "\(profile.id.uuidString): \(message)"
+                    )
+                )
             )
             continuation.yield(.status(.completed))
             continuation.finish()
