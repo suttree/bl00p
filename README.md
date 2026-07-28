@@ -79,7 +79,15 @@ persisted workflow with this sequence:
 8. The Manager reports the draft PR link and delivery summary.
 
 Questions, failures, and approval requests pause the workflow for the user.
+The Manager's implementation plan approval is persisted with the workflow, so a
+relaunch can restore a missing or interrupted approval card without dispatching
+the Builder twice. Unrelated runtime permission approvals remain runtime
+approvals, and declining the plan leaves the workflow paused for revision
+feedback.
 Leaving any team assignment unset keeps that Manager in standalone chat mode.
+
+The persistence rules and restore invariants are documented in
+[docs/MANAGED_WORKFLOWS.md](docs/MANAGED_WORKFLOWS.md).
 
 ## Runtime boundary
 

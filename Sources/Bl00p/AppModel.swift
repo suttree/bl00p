@@ -1207,6 +1207,8 @@ final class AppModel: ObservableObject {
             let savedPlan = Self.nonEmptyPlan(
                 workflow.implementationPlan
             )
+            // Prefer the saved plan's matching card so recovery preserves the
+            // intended card when more than one pending plan is present.
             let matchingSavedPlan = savedPlan.flatMap { plan in
                 pendingPlanEntries.last(where: {
                     $0.entry.text == plan

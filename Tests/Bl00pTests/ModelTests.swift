@@ -1145,7 +1145,8 @@ func relaunchDoesNotTurnARuntimeApprovalIntoAPlanApproval() throws {
                             approvalState: .pending
                         )
                     ],
-                    sessionID: "legacy-manager-thread"
+                    sessionID: "legacy-manager-thread",
+                    codexTurnModeVersion: CodexThreadConfiguration.turnModeVersion
                 )
             ],
             selectedBotID: fixture.manager.id,

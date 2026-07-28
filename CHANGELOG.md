@@ -49,6 +49,9 @@ All notable changes to bl00p are documented in this file.
 - Stage Claude image attachments in an isolated temporary directory and remove them after each turn.
 - Keep Manager sessions plan-only and read-only, prevent hidden delegation,
   and reserve team dispatch for bl00p's visible managed workflow.
+- Restore interrupted Manager plan approvals from valid saved evidence without
+  turning unrelated runtime permission approvals into plan approvals or
+  dispatching a Builder twice.
 
 ### Tests
 
@@ -58,3 +61,5 @@ All notable changes to bl00p are documented in this file.
 - Cover the Codex approval mode toggle and backward-compatible decoding of bot profiles missing newer fields.
 - Cover Manager plan approval, visible team dispatch, restart persistence,
   read-only Codex configuration, and role-specific avatar colors.
+- Cover idempotent plan-approval restoration, stale or duplicate approval-card
+  cleanup, and relaunch behavior for unrelated runtime approvals.
