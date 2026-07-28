@@ -9,7 +9,12 @@ struct ProfileInspectorView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 HStack(spacing: 10) {
-                    BotAvatar(name: profile.name, provider: profile.provider, size: 38)
+                    BotAvatar(
+                        name: profile.name,
+                        provider: profile.provider,
+                        role: profile.role,
+                        size: 38
+                    )
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Bot settings")
                             .font(.bl00p(.headline, weight: .semibold))

@@ -28,6 +28,8 @@ actor ClaudeRuntime: AgentRuntime {
         var receivedResult = false
         var stagedAttachmentDirectory: URL?
         var pendingApprovals: [UUID: PendingApproval] = [:]
+        var pendingQuestions =
+            QuestionRequestQueue<String, ClaudeQuestionRequest>()
     }
 
     private let locator = ClaudeExecutableLocator()
@@ -160,6 +162,7 @@ actor ClaudeRuntime: AgentRuntime {
         session.assistantTexts.removeAll()
         session.receivedResult = false
         session.pendingApprovals.removeAll()
+        _ = session.pendingQuestions.drain()
         sessions[profile.id] = session
         pair.continuation.yield(.status(.working))
 
@@ -210,9 +213,11 @@ actor ClaudeRuntime: AgentRuntime {
             )
             activeSession.currentContinuation?.yield(
                 .status(
-                    activeSession.pendingApprovals.isEmpty
-                        ? .working
-                        : .needsApproval
+                    !activeSession.pendingQuestions.isEmpty
+                        ? .needsAnswer
+                        : activeSession.pendingApprovals.isEmpty
+                            ? .working
+                            : .needsApproval
                 )
             )
             sessions[profile.id] = activeSession
@@ -231,9 +236,119 @@ actor ClaudeRuntime: AgentRuntime {
         }
     }
 
+    func resolveQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer?,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        guard var session = sessions[profile.id],
+              let client = session.currentClient,
+              var pending = session.pendingQuestions.first else {
+            return emptyStream()
+        }
+
+        guard let answer else {
+            guard pending.beginDecline(entryID: entryID) else {
+                return emptyStream()
+            }
+            session.pendingQuestions.updateFirst(pending)
+            sessions[profile.id] = session
+            do {
+                try await client.respond(
+                    to: pending.requestID,
+                    result: pending.request.declinedResult
+                )
+                completeQuestion(
+                    entryID: entryID,
+                    answer: nil,
+                    resolutionState: .cancelled,
+                    profileID: profile.id
+                )
+                return emptyStream()
+            } catch {
+                resetQuestionResponse(entryID: entryID, profileID: profile.id)
+                return questionFailureStream(
+                    entryID: entryID,
+                    title: "Could not decline Claude's question",
+                    detail: error.localizedDescription
+                )
+            }
+        }
+
+        guard let progress = pending.record(
+            entryID: entryID,
+            answer: answer
+        ) else {
+            return emptyStream()
+        }
+        session.pendingQuestions.updateFirst(pending)
+        sessions[profile.id] = session
+
+        if case .next = progress {
+            session.currentContinuation?.yield(
+                .questionResolved(entryID, answer, .answered)
+            )
+            session.currentContinuation?.yield(
+                .entry(
+                    questionEntry(
+                        for: pending.request.questions[pending.currentIndex],
+                        id: pending.entryID
+                    )
+                )
+            )
+            session.currentContinuation?.yield(.status(.needsAnswer))
+            return emptyStream()
+        }
+
+        guard let result = pending.request.result(answers: pending.answers) else {
+            resetQuestionResponse(entryID: entryID, profileID: profile.id)
+            return questionFailureStream(
+                entryID: entryID,
+                title: "Could not answer Claude",
+                detail: "The selected answers were not valid for this request."
+            )
+        }
+
+        do {
+            try await client.respond(to: pending.requestID, result: result)
+            guard sessions[profile.id]?.pendingQuestions.first?.entryID
+                    == entryID else {
+                return questionFailureStream(
+                    entryID: entryID,
+                    title: "Claude stopped before receiving the answer.",
+                    detail: nil,
+                    status: .failed
+                )
+            }
+            completeQuestion(
+                entryID: entryID,
+                answer: answer,
+                resolutionState: .answered,
+                profileID: profile.id
+            )
+            return emptyStream()
+        } catch {
+            resetQuestionResponse(entryID: entryID, profileID: profile.id)
+            return questionFailureStream(
+                entryID: entryID,
+                title: "Could not answer Claude",
+                detail: error.localizedDescription
+            )
+        }
+    }
+
     func stop(profile: BotProfile) async {
         guard let session = sessions.removeValue(forKey: profile.id) else { return }
         session.listenerTask?.cancel()
+        if let client = session.currentClient {
+            for pending in session.pendingQuestions.requests
+            where !pending.isResponding {
+                try? await client.respondError(
+                    to: pending.requestID,
+                    message: "The question was cancelled because the session stopped."
+                )
+            }
+        }
         session.currentContinuation?.finish()
         if let directory = session.stagedAttachmentDirectory {
             try? FileManager.default.removeItem(at: directory)
@@ -380,6 +495,71 @@ actor ClaudeRuntime: AgentRuntime {
               var session = sessions[profileID],
               let client = session.currentClient else { return }
 
+        if subtype == "can_use_tool",
+           request["tool_name"]?.stringValue == "AskUserQuestion" {
+            guard let questionRequest = ClaudeQuestionRequest(request: request) else {
+                do {
+                    try await client.respondError(
+                        to: requestID,
+                        message: "AskUserQuestion did not include valid questions"
+                    )
+                } catch {
+                    yield(
+                        .entry(
+                            .init(
+                                kind: .system,
+                                text: "Could not reject Claude's unreadable question",
+                                detail: error.localizedDescription
+                            )
+                        ),
+                        profileID: profileID
+                    )
+                }
+                session.currentContinuation?.yield(
+                    .entry(
+                        .init(
+                            kind: .system,
+                            text: "Claude sent an unreadable question",
+                            detail: "The request was rejected so the turn can continue."
+                        )
+                    )
+                )
+                session.currentContinuation?.yield(
+                    .status(attentionStatus(for: session))
+                )
+                return
+            }
+            let wasEmpty = session.pendingQuestions.isEmpty
+            let existingEntryID = request["tool_use_id"]?.stringValue
+                .flatMap { session.toolEntries[$0]?.id }
+                ?? UUID()
+            guard let pending = session.pendingQuestions.enqueue(
+                requestID: requestID,
+                request: questionRequest,
+                questions: questionRequest.questions,
+                entryID: existingEntryID
+            ) else { return }
+            sessions[profileID] = session
+            if wasEmpty {
+                let entry = questionEntry(
+                    for: questionRequest.questions[0],
+                    id: pending.entryID
+                )
+                if let toolUseID = request["tool_use_id"]?.stringValue,
+                   session.toolEntries[toolUseID] != nil {
+                    session.toolEntries[toolUseID] = entry
+                    sessions[profileID] = session
+                    session.currentContinuation?.yield(.upsertEntry(entry))
+                } else {
+                    session.currentContinuation?.yield(
+                        .entry(entry)
+                    )
+                }
+                session.currentContinuation?.yield(.status(.needsAnswer))
+            }
+            return
+        }
+
         guard subtype == "can_use_tool",
               let approval = ClaudeToolApprovalRequest(request: request) else {
             do {
@@ -421,8 +601,40 @@ actor ClaudeRuntime: AgentRuntime {
         profileID: UUID
     ) {
         guard let requestID = event["request_id"]?.stringValue,
-              var session = sessions[profileID],
-              let cancelled = session.pendingApprovals.first(where: {
+              var session = sessions[profileID] else { return }
+
+        if let cancelled = session.pendingQuestions.cancel(
+            requestID: requestID
+        ) {
+            if cancelled.wasActive {
+                session.currentContinuation?.yield(
+                    .questionResolved(
+                        cancelled.request.entryID,
+                        nil,
+                        .cancelled
+                    )
+                )
+                if let next = session.pendingQuestions.first {
+                    session.currentContinuation?.yield(
+                        .entry(
+                            questionEntry(
+                                for: next.request.questions[next.currentIndex],
+                                id: next.entryID
+                            )
+                        )
+                    )
+                    session.currentContinuation?.yield(.status(.needsAnswer))
+                } else {
+                    session.currentContinuation?.yield(
+                        .status(session.pendingApprovals.isEmpty ? .working : .needsApproval)
+                    )
+                }
+            }
+            sessions[profileID] = session
+            return
+        }
+
+        guard let cancelled = session.pendingApprovals.first(where: {
                   $0.value.requestID == requestID
               }) else { return }
 
@@ -432,9 +644,9 @@ actor ClaudeRuntime: AgentRuntime {
         )
         session.currentContinuation?.yield(
             .status(
-                session.pendingApprovals.isEmpty
-                    ? .working
-                    : .needsApproval
+                !session.pendingQuestions.isEmpty
+                    ? .needsAnswer
+                    : session.pendingApprovals.isEmpty ? .working : .needsApproval
             )
         )
         sessions[profileID] = session
@@ -502,6 +714,31 @@ actor ClaudeRuntime: AgentRuntime {
 
         let input = block["input"] ?? .object([:])
         let existingID = session.toolEntries[toolID]?.id ?? UUID()
+        if name == "AskUserQuestion" {
+            guard let request = ClaudeQuestionRequest(input: input) else {
+                yield(
+                    .entry(
+                        .init(
+                            kind: .system,
+                            text: "Claude attempted to ask an unreadable question"
+                        )
+                    ),
+                    profileID: profileID
+                )
+                return
+            }
+            let prompts = request.questions.map(\.text)
+            let entry = TimelineEntry(
+                id: existingID,
+                kind: .question,
+                title: request.questions.first?.header ?? "Claude asks",
+                text: prompts.joined(separator: "\n")
+            )
+            session.toolEntries[toolID] = entry
+            sessions[profileID] = session
+            yield(.upsertEntry(entry), profileID: profileID)
+            return
+        }
         let entry = toolEntry(
             id: existingID,
             name: name,
@@ -625,7 +862,20 @@ actor ClaudeRuntime: AgentRuntime {
             )
         }
         session.pendingApprovals.removeAll()
+        let pendingQuestions = session.pendingQuestions.drain()
+        if let pending = pendingQuestions.first {
+            session.currentContinuation?.yield(
+                .questionResolved(pending.entryID, nil, .cancelled)
+            )
+        }
         if let client = session.currentClient {
+            sessions[profileID] = session
+            for pending in pendingQuestions where !pending.isResponding {
+                try? await client.respondError(
+                    to: pending.requestID,
+                    message: "The question was cancelled because the turn ended."
+                )
+            }
             await client.finishInput()
         }
         session.currentContinuation?.yield(
@@ -658,6 +908,7 @@ actor ClaudeRuntime: AgentRuntime {
             session.currentAttemptID = nil
             session.pendingTurn = nil
             session.pendingApprovals.removeAll()
+            _ = session.pendingQuestions.drain()
             if let directory = session.stagedAttachmentDirectory {
                 try? FileManager.default.removeItem(at: directory)
                 session.stagedAttachmentDirectory = nil
@@ -669,6 +920,11 @@ actor ClaudeRuntime: AgentRuntime {
         for entryID in session.pendingApprovals.keys {
             session.currentContinuation?.yield(
                 .approvalResolved(entryID, .declined)
+            )
+        }
+        if let pending = session.pendingQuestions.first {
+            session.currentContinuation?.yield(
+                .questionResolved(pending.entryID, nil, .cancelled)
             )
         }
         let exitStatus = event["exit_status"]?.intValue ?? -1
@@ -691,6 +947,105 @@ actor ClaudeRuntime: AgentRuntime {
         session.currentContinuation?.yield(.status(.failed))
         session.currentContinuation?.finish()
         session.currentContinuation = nil
+    }
+
+    private func questionEntry(
+        for question: InteractiveQuestion,
+        id: UUID
+    ) -> TimelineEntry {
+        .init(
+            id: id,
+            kind: .question,
+            title: question.header,
+            text: question.text,
+            question: question
+        )
+    }
+
+    private func attentionStatus(for session: Session) -> AgentStatus {
+        if !session.pendingQuestions.isEmpty {
+            return .needsAnswer
+        }
+        return session.pendingApprovals.isEmpty ? .working : .needsApproval
+    }
+
+    private func completeQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer?,
+        resolutionState: QuestionResolutionState,
+        profileID: UUID
+    ) {
+        guard var session = sessions[profileID],
+              session.pendingQuestions.first?.entryID == entryID else {
+            return
+        }
+        session.pendingQuestions.removeFirst()
+        if let toolUseID = session.toolEntries.first(where: {
+            $0.value.id == entryID
+        })?.key {
+            session.toolEntries[toolUseID]?.question?.answer = answer
+            session.toolEntries[toolUseID]?.question?.resolutionState =
+                resolutionState
+        }
+        session.currentContinuation?.yield(
+            .questionResolved(entryID, answer, resolutionState)
+        )
+        if let next = session.pendingQuestions.first {
+            session.currentContinuation?.yield(
+                .entry(
+                    questionEntry(
+                        for: next.currentQuestion,
+                        id: next.entryID
+                    )
+                )
+            )
+            session.currentContinuation?.yield(.status(.needsAnswer))
+        } else {
+            session.currentContinuation?.yield(
+                .status(
+                    session.pendingApprovals.isEmpty
+                        ? .working
+                        : .needsApproval
+                )
+            )
+        }
+        sessions[profileID] = session
+    }
+
+    private func resetQuestionResponse(
+        entryID: UUID,
+        profileID: UUID
+    ) {
+        guard var session = sessions[profileID],
+              var pending = session.pendingQuestions.first,
+              pending.entryID == entryID else {
+            return
+        }
+        pending.resetResponse()
+        session.pendingQuestions.updateFirst(pending)
+        sessions[profileID] = session
+    }
+
+    private func questionFailureStream(
+        entryID: UUID,
+        title: String,
+        detail: String?,
+        status: AgentStatus = .needsAnswer
+    ) -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(
+                .questionResolved(
+                    entryID,
+                    nil,
+                    status == .failed ? .cancelled : .pending
+                )
+            )
+            continuation.yield(
+                .entry(.init(kind: .system, text: title, detail: detail))
+            )
+            continuation.yield(.status(status))
+            continuation.finish()
+        }
     }
 
     private func toolEntry(

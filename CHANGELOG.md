@@ -6,6 +6,8 @@ All notable changes to bl00p are documented in this file.
 
 ### Added
 
+- Add approval-style interactive question cards for Claude and Codex agents,
+  with single-select, multi-select, custom answers, and decline actions.
 - Add signed automatic update checks, installation, and relaunch through
   Sparkle and GitHub Releases.
 - Add automatic light and dark appearances across every app surface.
@@ -16,6 +18,8 @@ All notable changes to bl00p are documented in this file.
 - Add image attachments through drag and drop, with previews in the composer and conversation timeline.
 - Add macOS notifications and a Dock badge when a bot finishes, fails, asks a question, or needs approval.
 - Add bot renaming from the sidebar.
+- Add managed Manager workflows with an explicit user approval gate between
+  planning and the Builder handoff.
 
 ### Changed
 
@@ -29,9 +33,13 @@ All notable changes to bl00p are documented in this file.
 - Refresh the conversation, composer, sidebar, avatars, typography, and app icon.
 - Present tool activity in compact, expandable cards and use clearer status text throughout the app.
 - Increase the app build number from 2 to 6.
+- Use hot pink avatars for Manager bots across the sidebar, conversation,
+  settings, and bot-creation surfaces.
 
 ### Fixed
 
+- Keep provider question requests queued and resumable while presenting one
+  prompt at a time, preventing duplicate responses and orphaned requests.
 - Keep the selected provider when adding a bot, including after switching between Claude and Codex.
 - Focus the message composer when the app opens or the user switches bots.
 - Keep loading saved profiles and sessions when a bot profile gains new fields, instead of silently discarding all persisted state on decode failure.
@@ -43,10 +51,17 @@ All notable changes to bl00p are documented in this file.
 - Prevent duplicate sends while a bot is launching or working.
 - Migrate legacy bot names, starter cards, permission messages, and Codex review sessions when restoring saved state.
 - Stage Claude image attachments in an isolated temporary directory and remove them after each turn.
+- Keep Manager sessions plan-only and read-only, prevent hidden delegation,
+  and reserve team dispatch for bl00p's visible managed workflow.
 
 ### Tests
 
+- Cover interactive question parsing, answer and decline lifecycles, queueing,
+  provider routing, persistence, transport recovery, and the Claude control
+  protocol round trip.
 - Cover active-window notification suppression independently from Dock badge
   updates.
 - Expand coverage for notifications, Dock badges, model and prompt isolation, image attachments, session recovery, state migration, composer sizing, automatic reconnects, and long-lived runtime streams.
 - Cover the Codex approval mode toggle and backward-compatible decoding of bot profiles missing newer fields.
+- Cover Manager plan approval, visible team dispatch, restart persistence,
+  read-only Codex configuration, and role-specific avatar colors.

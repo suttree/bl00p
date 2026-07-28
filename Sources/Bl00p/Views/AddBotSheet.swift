@@ -9,7 +9,12 @@ struct AddBotSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack(spacing: 12) {
-                BotAvatar(name: draft.name, provider: draft.provider, size: 44)
+                BotAvatar(
+                    name: draft.name,
+                    provider: draft.provider,
+                    role: draft.role,
+                    size: 44
+                )
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Add a bot")
                         .font(.bl00p(.title2, weight: .bold))

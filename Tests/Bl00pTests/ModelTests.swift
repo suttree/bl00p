@@ -73,6 +73,31 @@ func themeAdaptsToSystemAppearanceWithLegibleBrandSurfaces() throws {
 }
 
 @Test
+func avatarBackgroundUsesPinkForManagersAndMintForOtherRoles() throws {
+    let light = try #require(NSAppearance(named: .aqua))
+    let dark = try #require(NSAppearance(named: .darkAqua))
+
+    for appearance in [light, dark] {
+        let managerBackground = resolved(
+            Bl00pTheme.avatarBackground(for: .manager),
+            for: appearance
+        )
+        let pink = resolved(Bl00pTheme.hotPink, for: appearance)
+        #expect(managerBackground == pink)
+        #expect(contrastRatio(managerBackground, Bl00pTheme.avatarInk) >= 4.5)
+
+        for role in AgentRole.allCases where role != .manager {
+            let background = resolved(
+                Bl00pTheme.avatarBackground(for: role),
+                for: appearance
+            )
+            let mint = resolved(Bl00pTheme.mint, for: appearance)
+            #expect(background == mint)
+        }
+    }
+}
+
+@Test
 func defaultProfilesCoverTheLoop() {
     #expect(BotProfile.defaults.map(\.role) == [.builder, .reviewer, .publisher])
     #expect(Set(BotProfile.defaults.map(\.provider)) == [.claude, .codex])
@@ -404,6 +429,32 @@ func codexThreadConfigurationHonorsTheApprovalModeToggle() {
     )
     #expect(autoParameters["approvalPolicy"]?.stringValue == "on-request")
     #expect(autoParameters["sandbox"]?.stringValue == "workspace-write")
+}
+
+@Test
+func codexManagersHaveANonEscalatableReadOnlyBoundary() {
+    let manager = BotProfile(
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate the configured team.",
+        approvalMode: .auto
+    )
+
+    let parameters = CodexThreadConfiguration.parameters(
+        profile: manager,
+        workingDirectory: "/tmp/project"
+    )
+    let instructions = parameters["developerInstructions"]?.stringValue
+
+    #expect(parameters["sandbox"]?.stringValue == "read-only")
+    #expect(parameters["approvalPolicy"]?.stringValue == "never")
+    #expect(instructions?.contains("selected working directory is read-only") == true)
+    #expect(instructions?.contains("Do not spawn or delegate") == true)
+    #expect(
+        instructions?
+            .contains("Workspace file writes are enabled") == false
+    )
 }
 
 @Test
@@ -794,6 +845,47 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
 
     model.send("Add optional orchestration", to: managerID)
 
+    for _ in 0..<100
+        where model.session(for: managerID).status != .needsApproval {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let awaitingApproval = try #require(model.workflow(for: managerID))
+    let approvalEntry = try #require(
+        model.session(for: managerID).entries.last(where: {
+            $0.kind == .approval && $0.approvalState == .pending
+        })
+    )
+    #expect(awaitingApproval.stage == .planning)
+    #expect(awaitingApproval.isPaused)
+    #expect(
+        awaitingApproval.pauseReason
+            == "Waiting for your approval of the implementation plan."
+    )
+    #expect(
+        awaitingApproval.implementationPlan
+            == "Implement the feature with persistence and tests."
+    )
+    let planningCalls = await runtime.calls
+    #expect(planningCalls.map(\.role) == [.manager])
+    #expect(planningCalls[0].message.contains("planning phase"))
+    #expect(planningCalls[0].message.contains("Do not edit files"))
+    #expect(planningCalls[0].message.contains("spawn or delegate"))
+
+    model.send("Looks good; start coding", to: managerID)
+    #expect(await runtime.calls.map(\.role) == [.manager])
+    #expect(model.session(for: managerID).status == .needsApproval)
+    #expect(
+        model.workflow(for: managerID)?.planApprovalEntryID
+            == approvalEntry.id
+    )
+
+    model.resolveApproval(
+        approvalEntry.id,
+        approved: true,
+        for: managerID
+    )
+
     for _ in 0..<200
         where model.workflow(for: managerID)?.stage != .completed {
         try await Task.sleep(for: .milliseconds(10))
@@ -825,6 +917,7 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     #expect(calls[4].message.contains("Re-check the updated"))
     #expect(calls[5].message.contains("create a draft pull request"))
     #expect(calls[6].message.contains("https://github.com/suttree/bl00p/pull/99"))
+    #expect(await runtime.approvalResolutionCount == 0)
     #expect(
         model.profiles.first(where: { $0.id == reviewerID })?
             .workingDirectory == ownership.worktreePath
@@ -833,6 +926,92 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
         model.profiles.first(where: { $0.id == publisherID })?
             .workingDirectory == ownership.worktreePath
     )
+}
+
+@MainActor
+@Test
+func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-manager-plan-decline-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    var builder = BotProfile.defaults[0]
+    var reviewer = BotProfile.defaults[1]
+    var publisher = BotProfile.defaults[2]
+    builder.id = UUID()
+    reviewer.id = UUID()
+    publisher.id = UUID()
+    let manager = BotProfile(
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: ManagerTeamConfiguration(
+            builderProfileID: builder.id,
+            reviewerProfileID: reviewer.id,
+            publisherProfileID: publisher.id
+        )
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer, publisher],
+            sessions: Dictionary(
+                uniqueKeysWithValues: [manager, builder, reviewer, publisher]
+                    .map { ($0.id, AgentSessionState()) }
+            ),
+            selectedBotID: manager.id
+        )
+    )
+    let runtime = OrchestrationRecordingRuntime()
+    let model = AppModel(runtime: runtime, store: store)
+
+    model.send("Plan this change", to: manager.id)
+    for _ in 0..<100
+        where model.session(for: manager.id).status != .needsApproval {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let approvalEntry = try #require(
+        model.session(for: manager.id).entries.last(where: {
+            $0.kind == .approval && $0.approvalState == .pending
+        })
+    )
+    let restoredModel = AppModel(runtime: runtime, store: store)
+    #expect(restoredModel.session(for: manager.id).status == .needsApproval)
+    #expect(
+        restoredModel.workflow(for: manager.id)?.planApprovalEntryID
+            == approvalEntry.id
+    )
+
+    restoredModel.resolveApproval(
+        approvalEntry.id,
+        approved: false,
+        for: manager.id
+    )
+
+    let workflow = try #require(restoredModel.workflow(for: manager.id))
+    let resolvedEntry = try #require(
+        restoredModel.session(for: manager.id).entries.first(where: {
+            $0.id == approvalEntry.id
+        })
+    )
+    #expect(workflow.stage == .planning)
+    #expect(workflow.isPaused)
+    #expect(workflow.planApprovalEntryID == nil)
+    #expect(
+        workflow.pauseReason
+            == "Plan declined. Send feedback to the Manager to request a revised plan."
+    )
+    #expect(resolvedEntry.approvalState == .declined)
+    #expect(restoredModel.session(for: manager.id).status == .needsAnswer)
+    #expect(await runtime.calls.map(\.role) == [.manager])
+    #expect(await runtime.approvalResolutionCount == 0)
 }
 
 @MainActor
@@ -2123,6 +2302,14 @@ private actor HandoffRecordingRuntime: AgentRuntime {
         AsyncStream { $0.finish() }
     }
 
+    func resolveQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer?,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
     func stop(profile: BotProfile) async {}
 }
 
@@ -2133,6 +2320,7 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
     }
 
     private(set) var calls: [Call] = []
+    private(set) var approvalResolutionCount = 0
     private var roleResponseCounts: [AgentRole: Int] = [:]
 
     func start(
@@ -2193,6 +2381,15 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
         approved: Bool,
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent> {
+        approvalResolutionCount += 1
+        return AsyncStream { $0.finish() }
+    }
+
+    func resolveQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer?,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
         AsyncStream { $0.finish() }
     }
 
@@ -2236,6 +2433,14 @@ private actor ImmediateRecordingRuntime: AgentRuntime {
     func resolveApproval(
         entryID: UUID,
         approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func resolveQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer?,
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent> {
         AsyncStream { $0.finish() }
@@ -2290,6 +2495,14 @@ private actor FailOnceRuntime: AgentRuntime {
     func resolveApproval(
         entryID: UUID,
         approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func resolveQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer?,
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent> {
         AsyncStream { $0.finish() }
@@ -2354,6 +2567,14 @@ private actor LongLivedStartupRuntime: AgentRuntime {
     func resolveApproval(
         entryID: UUID,
         approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func resolveQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer?,
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent> {
         AsyncStream { $0.finish() }

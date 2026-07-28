@@ -39,20 +39,6 @@ actor CodexAppServerRuntime: AgentRuntime {
         let response: CodexApprovalResponse
     }
 
-    private struct CodexQuestion: Sendable {
-        let id: String
-        let header: String?
-        let prompt: String
-        let options: [String]
-    }
-
-    private struct PendingQuestion: Sendable {
-        let requestID: JSONValue
-        let questions: [CodexQuestion]
-        var answers: [String: String] = [:]
-        var currentIndex = 0
-    }
-
     private struct Session {
         let client: CodexAppServerClient
         var threadID: String
@@ -60,7 +46,8 @@ actor CodexAppServerRuntime: AgentRuntime {
         var currentTurnID: String?
         var lifecycleContinuation: AsyncStream<AgentEvent>.Continuation?
         var currentContinuation: AsyncStream<AgentEvent>.Continuation?
-        var pendingQuestion: PendingQuestion?
+        var pendingQuestions =
+            QuestionRequestQueue<JSONValue, CodexQuestionRequest>()
         var pendingApprovals: [UUID: PendingApproval] = [:]
         var timelineIDs: [String: UUID] = [:]
         var diffEntryID: UUID?
@@ -206,74 +193,6 @@ actor CodexAppServerRuntime: AgentRuntime {
             )
         }
 
-        if let pendingQuestion = session.pendingQuestion {
-            guard attachments.isEmpty else {
-                return singleEventStream(
-                    .entry(
-                        .init(
-                            kind: .system,
-                            text: "Codex can't accept image attachments while answering a question.",
-                            detail: "Remove the attachment and resend your answer as text."
-                        )
-                    ),
-                    finalStatus: .needsAnswer
-                )
-            }
-
-            var updatedQuestion = pendingQuestion
-            let currentQuestion = updatedQuestion.questions[updatedQuestion.currentIndex]
-            updatedQuestion.answers[currentQuestion.id] = message
-
-            if updatedQuestion.currentIndex + 1 < updatedQuestion.questions.count {
-                updatedQuestion.currentIndex += 1
-                session.pendingQuestion = updatedQuestion
-                sessions[profile.id] = session
-                session.currentContinuation?.yield(
-                    .entry(questionEntry(for: updatedQuestion.questions[updatedQuestion.currentIndex]))
-                )
-                session.currentContinuation?.yield(.status(.needsAnswer))
-                return emptyStream()
-            }
-
-            do {
-                let answers = Dictionary(
-                    uniqueKeysWithValues: updatedQuestion.answers.map {
-                        ($0.key, JSONValue.object(["answers": .array([.string($0.value)])]))
-                    }
-                )
-                try await session.client.respond(
-                    to: pendingQuestion.requestID,
-                    result: .object(["answers": .object(answers)])
-                )
-                guard var connectedSession = sessions[profile.id] else {
-                    return singleEventStream(
-                        .entry(
-                            .init(
-                                kind: .system,
-                                text: "Codex disconnected before receiving the answer."
-                            )
-                        ),
-                        finalStatus: .failed
-                    )
-                }
-                connectedSession.pendingQuestion = nil
-                connectedSession.currentContinuation?.yield(.status(.working))
-                sessions[profile.id] = connectedSession
-                return emptyStream()
-            } catch {
-                return singleEventStream(
-                    .entry(
-                        .init(
-                            kind: .system,
-                            text: "Could not answer Codex",
-                            detail: error.localizedDescription
-                        )
-                    ),
-                    finalStatus: .failed
-                )
-            }
-        }
-
         guard session.currentContinuation == nil else {
             return singleEventStream(
                 .entry(
@@ -361,7 +280,15 @@ actor CodexAppServerRuntime: AgentRuntime {
             connectedSession.currentContinuation?.yield(
                 .approvalResolved(entryID, approved ? .approved : .declined)
             )
-            connectedSession.currentContinuation?.yield(.status(approved ? .working : .needsAnswer))
+            let status: AgentStatus
+            if !connectedSession.pendingQuestions.isEmpty {
+                status = .needsAnswer
+            } else if !connectedSession.pendingApprovals.isEmpty {
+                status = .needsApproval
+            } else {
+                status = approved ? .working : .needsAnswer
+            }
+            connectedSession.currentContinuation?.yield(.status(status))
             sessions[profile.id] = connectedSession
             return emptyStream()
         } catch {
@@ -378,9 +305,118 @@ actor CodexAppServerRuntime: AgentRuntime {
         }
     }
 
+    func resolveQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer?,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        guard var session = sessions[profile.id],
+              var pending = session.pendingQuestions.first else {
+            return emptyStream()
+        }
+
+        guard let answer else {
+            guard pending.beginDecline(entryID: entryID) else {
+                return emptyStream()
+            }
+            session.pendingQuestions.updateFirst(pending)
+            sessions[profile.id] = session
+            do {
+                try await session.client.respondError(
+                    to: pending.requestID,
+                    code: -32000,
+                    message: "The user declined to answer this question."
+                )
+                completeQuestion(
+                    entryID: entryID,
+                    answer: nil,
+                    resolutionState: .cancelled,
+                    profileID: profile.id
+                )
+                return emptyStream()
+            } catch {
+                resetQuestionResponse(entryID: entryID, profileID: profile.id)
+                return questionFailureStream(
+                    entryID: entryID,
+                    title: "Could not decline Codex's question",
+                    detail: error.localizedDescription
+                )
+            }
+        }
+
+        guard let progress = pending.record(
+            entryID: entryID,
+            answer: answer
+        ) else {
+            return emptyStream()
+        }
+        session.pendingQuestions.updateFirst(pending)
+        sessions[profile.id] = session
+
+        if case .next = progress {
+            session.currentContinuation?.yield(
+                .questionResolved(entryID, answer, .answered)
+            )
+            session.currentContinuation?.yield(
+                .entry(
+                    questionEntry(
+                        for: pending.request.questions[pending.currentIndex],
+                        id: pending.entryID
+                    )
+                )
+            )
+            session.currentContinuation?.yield(.status(.needsAnswer))
+            return emptyStream()
+        }
+
+        guard let result = pending.request.result(answers: pending.answers) else {
+            resetQuestionResponse(entryID: entryID, profileID: profile.id)
+            return questionFailureStream(
+                entryID: entryID,
+                title: "Could not answer Codex",
+                detail: "The selected answers were not valid for this request."
+            )
+        }
+
+        do {
+            try await session.client.respond(to: pending.requestID, result: result)
+            guard sessions[profile.id]?.pendingQuestions.first?.entryID
+                    == entryID else {
+                return questionFailureStream(
+                    entryID: entryID,
+                    title: "Codex disconnected before receiving the answer.",
+                    detail: nil,
+                    status: .failed
+                )
+            }
+            completeQuestion(
+                entryID: entryID,
+                answer: answer,
+                resolutionState: .answered,
+                profileID: profile.id
+            )
+            return emptyStream()
+        } catch {
+            resetQuestionResponse(entryID: entryID, profileID: profile.id)
+            return questionFailureStream(
+                entryID: entryID,
+                title: "Could not answer Codex",
+                detail: error.localizedDescription
+            )
+        }
+    }
+
     func stop(profile: BotProfile) async {
         guard let session = sessions.removeValue(forKey: profile.id) else { return }
         session.listenerTask?.cancel()
+        for pending in session.pendingQuestions.requests
+        where !pending.isResponding {
+            try? await session.client.respondError(
+                to: pending.requestID,
+                code: -32000,
+                message: "The question was cancelled because the session stopped."
+            )
+        }
         session.currentContinuation?.finish()
         session.lifecycleContinuation?.finish()
 
@@ -448,7 +484,10 @@ actor CodexAppServerRuntime: AgentRuntime {
             handleDiff(params, profileID: profileID)
 
         case "turn/completed":
-            handleTurnCompleted(params, profileID: profileID)
+            await handleTurnCompleted(params, profileID: profileID)
+
+        case "serverRequest/resolved":
+            handleServerRequestResolved(params, profileID: profileID)
 
         case "error", "warning", "guardianWarning", "configWarning", "deprecationNotice":
             let detail = params["message"]?.stringValue
@@ -490,6 +529,40 @@ actor CodexAppServerRuntime: AgentRuntime {
         default:
             break
         }
+    }
+
+    private func handleServerRequestResolved(
+        _ params: JSONValue,
+        profileID: UUID
+    ) {
+        guard let requestID = params["requestId"],
+              var session = sessions[profileID],
+              let cancelled = session.pendingQuestions.cancel(
+                  requestID: requestID
+              ) else {
+            return
+        }
+        if cancelled.wasActive {
+            session.currentContinuation?.yield(
+                .questionResolved(cancelled.request.entryID, nil, .cancelled)
+            )
+            if let next = session.pendingQuestions.first {
+                session.currentContinuation?.yield(
+                    .entry(
+                        questionEntry(
+                            for: next.request.questions[next.currentIndex],
+                            id: next.entryID
+                        )
+                    )
+                )
+                session.currentContinuation?.yield(.status(.needsAnswer))
+            } else {
+                session.currentContinuation?.yield(
+                    .status(session.pendingApprovals.isEmpty ? .working : .needsApproval)
+                )
+            }
+        }
+        sessions[profileID] = session
     }
 
     private func handleServerRequest(
@@ -676,18 +749,7 @@ actor CodexAppServerRuntime: AgentRuntime {
             session.currentContinuation?.yield(.status(.needsApproval))
 
         case "item/tool/requestUserInput":
-            let questions: [CodexQuestion] = (params["questions"]?.arrayValue ?? []).compactMap { question in
-                guard let id = question["id"]?.stringValue else { return nil }
-                return CodexQuestion(
-                    id: id,
-                    header: question["header"]?.stringValue,
-                    prompt: question["question"]?.stringValue ?? "Codex needs your input.",
-                    options: question["options"]?.arrayValue?
-                        .compactMap { $0["label"]?.stringValue } ?? []
-                )
-            }
-
-            guard let firstQuestion = questions.first else {
+            guard let request = CodexQuestionRequest(params: params) else {
                 do {
                     try await session.client.respondError(
                         to: requestID,
@@ -697,17 +759,38 @@ actor CodexAppServerRuntime: AgentRuntime {
                 } catch {
                     yieldTransportError(error, profileID: profileID)
                 }
+                session.currentContinuation?.yield(
+                    .entry(
+                        .init(
+                            kind: .system,
+                            text: "Codex sent an unreadable question",
+                            detail: "The request was rejected so the turn can continue."
+                        )
+                    )
+                )
+                session.currentContinuation?.yield(
+                    .status(attentionStatus(for: session))
+                )
                 return
             }
 
-            session.pendingQuestion = PendingQuestion(
+            let wasEmpty = session.pendingQuestions.isEmpty
+            guard let pending = session.pendingQuestions.enqueue(
                 requestID: requestID,
-                questions: questions
-            )
-            session.currentContinuation?.yield(
-                .entry(questionEntry(for: firstQuestion))
-            )
-            session.currentContinuation?.yield(.status(.needsAnswer))
+                request: request,
+                questions: request.questions
+            ) else { return }
+            if wasEmpty {
+                session.currentContinuation?.yield(
+                    .entry(
+                        questionEntry(
+                            for: request.questions[0],
+                            id: pending.entryID
+                        )
+                    )
+                )
+                session.currentContinuation?.yield(.status(.needsAnswer))
+            }
 
         default:
             do {
@@ -849,16 +932,19 @@ actor CodexAppServerRuntime: AgentRuntime {
         )
     }
 
-    private func handleTurnCompleted(_ params: JSONValue, profileID: UUID) {
+    private func handleTurnCompleted(
+        _ params: JSONValue,
+        profileID: UUID
+    ) async {
         let status = params["turn"]?["status"]?.stringValue ?? "failed"
         if status == "completed" {
-            finishTurn(profileID: profileID, status: .completed)
+            await finishTurn(profileID: profileID, status: .completed)
         } else if status == "interrupted" {
             yield(
                 .entry(.init(kind: .system, text: "Codex turn interrupted.")),
                 profileID: profileID
             )
-            finishTurn(profileID: profileID, status: .stopped)
+            await finishTurn(profileID: profileID, status: .stopped)
         } else {
             let detail = params["turn"]?["error"]?["message"]?.stringValue
             yield(
@@ -871,17 +957,38 @@ actor CodexAppServerRuntime: AgentRuntime {
                 ),
                 profileID: profileID
             )
-            finishTurn(profileID: profileID, status: .failed)
+            await finishTurn(profileID: profileID, status: .failed)
         }
     }
 
-    private func finishTurn(profileID: UUID, status: AgentStatus) {
+    private func finishTurn(
+        profileID: UUID,
+        status: AgentStatus
+    ) async {
         guard var session = sessions[profileID] else { return }
+        let pendingQuestions = session.pendingQuestions.drain()
+        if let pending = pendingQuestions.first {
+            session.currentContinuation?.yield(
+                .questionResolved(pending.entryID, nil, .cancelled)
+            )
+        }
+        sessions[profileID] = session
+        for pending in pendingQuestions where !pending.isResponding {
+            try? await session.client.respondError(
+                to: pending.requestID,
+                code: -32000,
+                message: "The question was cancelled because the turn ended."
+            )
+        }
+        for entryID in session.pendingApprovals.keys {
+            session.currentContinuation?.yield(
+                .approvalResolved(entryID, .declined)
+            )
+        }
         session.currentContinuation?.yield(.status(status))
         session.currentContinuation?.finish()
         session.currentContinuation = nil
         session.currentTurnID = nil
-        session.pendingQuestion = nil
         session.pendingApprovals.removeAll()
         sessions[profileID] = session
     }
@@ -933,17 +1040,96 @@ actor CodexAppServerRuntime: AgentRuntime {
         )
     }
 
-    private func questionEntry(for question: CodexQuestion) -> TimelineEntry {
-        let options = question.options.isEmpty
-            ? nil
-            : "Options: \(question.options.joined(separator: " · "))"
+    private func questionEntry(
+        for question: InteractiveQuestion,
+        id: UUID
+    ) -> TimelineEntry {
         return .init(
+            id: id,
             kind: .question,
-            title: question.header ?? "Codex has a question",
-            text: [question.prompt, options]
-                .compactMap { $0 }
-                .joined(separator: "\n")
+            title: question.header,
+            text: question.text,
+            question: question
         )
+    }
+
+    private func attentionStatus(for session: Session) -> AgentStatus {
+        if !session.pendingQuestions.isEmpty {
+            return .needsAnswer
+        }
+        return session.pendingApprovals.isEmpty ? .working : .needsApproval
+    }
+
+    private func completeQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer?,
+        resolutionState: QuestionResolutionState,
+        profileID: UUID
+    ) {
+        guard var session = sessions[profileID],
+              session.pendingQuestions.first?.entryID == entryID else {
+            return
+        }
+        session.pendingQuestions.removeFirst()
+        session.currentContinuation?.yield(
+            .questionResolved(entryID, answer, resolutionState)
+        )
+        if let next = session.pendingQuestions.first {
+            session.currentContinuation?.yield(
+                .entry(
+                    questionEntry(
+                        for: next.currentQuestion,
+                        id: next.entryID
+                    )
+                )
+            )
+            session.currentContinuation?.yield(.status(.needsAnswer))
+        } else {
+            session.currentContinuation?.yield(
+                .status(
+                    session.pendingApprovals.isEmpty
+                        ? .working
+                        : .needsApproval
+                )
+            )
+        }
+        sessions[profileID] = session
+    }
+
+    private func resetQuestionResponse(
+        entryID: UUID,
+        profileID: UUID
+    ) {
+        guard var session = sessions[profileID],
+              var pending = session.pendingQuestions.first,
+              pending.entryID == entryID else {
+            return
+        }
+        pending.resetResponse()
+        session.pendingQuestions.updateFirst(pending)
+        sessions[profileID] = session
+    }
+
+    private func questionFailureStream(
+        entryID: UUID,
+        title: String,
+        detail: String?,
+        status: AgentStatus = .needsAnswer
+    ) -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(
+                .questionResolved(
+                    entryID,
+                    nil,
+                    status == .failed ? .cancelled : .pending
+                )
+            )
+            continuation.yield(
+                .entry(.init(kind: .system, text: title, detail: detail))
+            )
+            continuation.yield(.status(status))
+            continuation.finish()
+        }
     }
 
     private func yieldTransportError(_ error: any Error, profileID: UUID) {
@@ -1033,33 +1219,47 @@ enum CodexThreadConfiguration {
     // Increment whenever the execution boundary changes. Persisted threads from
     // an older boundary must start fresh because app-server can retain their
     // original sandbox and environment across process restarts.
-    static let turnModeVersion = 2
+    static let turnModeVersion = 3
 
-    private static let runtimeInstructions = """
+    private static let writableRuntimeInstructions = """
     bl00p runtime capabilities:
     - Workspace file writes are enabled for the selected working directory.
     - If Git metadata, network access, or another necessary operation is blocked, request elevated permission through Codex instead of asking the user to run the command in Terminal.
     - Prefer the authenticated GitHub connected app for pull-request and repository mutations. A failing `gh auth status` is not a blocker when the connected app can perform the action.
     """
 
+    private static let readOnlyManagerRuntimeInstructions = """
+    bl00p Manager runtime boundary:
+    - The selected working directory is read-only.
+    - Do not request additional permissions, edit files, run mutating commands, or perform Git mutations.
+    - Do not spawn or delegate to hidden sub-agents. bl00p dispatches approved plans to the configured visible agents.
+    """
+
     static func parameters(
         profile: BotProfile,
         workingDirectory: String
     ) -> [String: JSONValue] {
+        let isReadOnlyManager = profile.role == .manager
         var parameters: [String: JSONValue] = [
             "cwd": .string(workingDirectory),
             "runtimeWorkspaceRoots": .array([.string(workingDirectory)]),
-            // Auto mode still needs Codex to emit approval requests for actions
-            // outside the workspace sandbox (including writes to .git). bl00p
-            // answers those requests automatically in handleServerRequest.
-            "approvalPolicy": .string("on-request"),
+            // Writable roles still emit approval requests for actions outside
+            // the workspace sandbox. Managers cannot escalate their read-only
+            // boundary, even when their saved approval mode is automatic.
+            "approvalPolicy": .string(
+                isReadOnlyManager ? "never" : "on-request"
+            ),
             "approvalsReviewer": .string("user"),
-            "sandbox": .string("workspace-write"),
+            "sandbox": .string(
+                isReadOnlyManager ? "read-only" : "workspace-write"
+            ),
             "developerInstructions": .string(
                 [
                     profile.instructions,
                     roleBoundary(for: profile.role),
-                    runtimeInstructions
+                    isReadOnlyManager
+                        ? readOnlyManagerRuntimeInstructions
+                        : writableRuntimeInstructions
                 ]
                     .filter { !$0.isEmpty }
                     .joined(separator: "\n\n")
@@ -1080,7 +1280,7 @@ enum CodexThreadConfiguration {
         case .publisher:
             "You are the documenter and PR writer. Update documentation, run final verification, commit the completed work, push the branch, and create a draft pull request when asked and approved."
         case .manager:
-            "You are a coordinator. Prepare implementation briefs and delivery summaries, but do not edit code, commit, push, or publish."
+            "You are a plan-only coordinator. Prepare implementation briefs and delivery summaries, but do not implement, review, edit code, commit, push, publish, or delegate to other agents yourself."
         }
     }
 }
