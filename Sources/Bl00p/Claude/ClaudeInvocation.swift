@@ -53,6 +53,7 @@ struct ClaudeInvocation: Sendable {
             "--output-format", "stream-json",
             "--input-format", "stream-json",
             "--verbose",
+            "--permission-mode", "default",
             "--permission-prompt-tool", "stdio",
             "--append-system-prompt", systemPrompt,
             "--setting-sources", profile.loadProjectInstructions

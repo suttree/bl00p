@@ -79,6 +79,13 @@ All notable changes to bl00p are documented in this file.
 - Stage Claude image attachments in an isolated temporary directory and remove them after each turn.
 - Keep Manager sessions plan-only and read-only, prevent hidden delegation,
   and reserve team dispatch for bl00p's visible managed workflow.
+- Keep Claude permission matching compatible with exact and argument-bearing
+  command forms, including common build/test pipelines such as
+  `swift build 2>&1 | tail -20`, while keeping the `tail` filter allowlist
+  narrow.
+- Deduplicate Claude permission denials against actions that already completed
+  or received approval, so successful retries do not remain blocked by stale
+  denial reports.
 - Restore interrupted Manager plan approvals from valid saved evidence without
   turning unrelated runtime permission approvals into plan approvals or
   dispatching a Builder twice.

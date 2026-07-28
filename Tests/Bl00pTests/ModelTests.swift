@@ -950,6 +950,21 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
         )
     )
     let runtime = OrchestrationRecordingRuntime(
+        reviewerResponseBlocks: [
+            [
+                "Review finding: add a regression test.",
+                """
+                Also verify pipeline permissions.
+                BL00P_REVIEW_DISPOSITION: changesRequested
+                """
+            ],
+            [
+                """
+                Review clean. Ready to publish.
+                BL00P_REVIEW_DISPOSITION: clean
+                """
+            ]
+        ],
         managerPlanningResponses: [orchestrationImplementationPlan]
     )
     let model = AppModel(
@@ -1080,8 +1095,10 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     #expect(calls[2].message.contains("Source branch: \(ownership.branch)"))
     #expect(calls[2].message.contains("Test state: Not run"))
     #expect(calls[3].message.contains("Review finding"))
+    #expect(calls[3].message.contains("Also verify pipeline permissions."))
     #expect(calls[4].message.contains("Re-check the updated"))
     #expect(calls[5].message.contains("create a draft pull request"))
+    #expect(!calls[5].message.contains("Review finding:"))
     #expect(calls[5].message.contains("Source branch: \(ownership.branch)"))
     #expect(calls[5].message.contains("Source HEAD: \(revisedPackage.headRevision)"))
     #expect(calls[5].message.contains("Test state: Passed"))
@@ -3698,6 +3715,39 @@ func jsonValueAcceptsFoundationJSONObjects() throws {
 }
 
 @Test
+func jsonValueCompactDescriptionSortsObjectKeys() {
+    let first = JSONValue.object([
+        "zeta": .number(2),
+        "alpha": .object([
+            "two": .bool(true),
+            "one": .string("first")
+        ])
+    ])
+    let second = JSONValue.object([
+        "alpha": .object([
+            "one": .string("first"),
+            "two": .bool(true)
+        ]),
+        "zeta": .number(2)
+    ])
+
+    #expect(first.compactDescription == second.compactDescription)
+    #expect(
+        first.compactDescription
+            == #"{"alpha":{"one":"first","two":true},"zeta":2}"#
+    )
+    #expect(
+        ClaudePermissionDenials.actionKey(
+            toolName: "Edit",
+            toolInput: first
+        ) == ClaudePermissionDenials.actionKey(
+            toolName: "Edit",
+            toolInput: second
+        )
+    )
+}
+
+@Test
 func locatesBundledCodexBeforeBrokenShellShims() throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("bl00p-codex-locator-\(UUID().uuidString)")
@@ -3756,11 +3806,27 @@ func claudeBuilderInvocationIsResumableAndConservative() throws {
     #expect(!invocation.arguments.contains("--resume"))
     #expect(invocation.arguments.contains("Edit"))
     #expect(invocation.arguments.contains("Write"))
+    #expect(invocation.arguments.contains("Bash(swift build)"))
+    #expect(invocation.arguments.contains("Bash(swift build *)"))
+    #expect(invocation.arguments.contains("Bash(swift build:*)"))
+    #expect(invocation.arguments.contains("Bash(swift test)"))
+    #expect(invocation.arguments.contains("Bash(swift test *)"))
     #expect(invocation.arguments.contains("Bash(swift test:*)"))
+    #expect(invocation.arguments.contains("Bash(xcrun swift build)"))
+    #expect(invocation.arguments.contains("Bash(xcrun swift build *)"))
+    #expect(invocation.arguments.contains("Bash(xcrun swift build:*)"))
+    #expect(invocation.arguments.contains("Bash(xcrun swift test)"))
+    #expect(invocation.arguments.contains("Bash(xcrun swift test *)"))
     #expect(invocation.arguments.contains("Bash(xcrun swift test:*)"))
+    #expect(invocation.arguments.contains("Bash(tail -20)"))
+    #expect(!invocation.arguments.contains("Bash(tail *)"))
     #expect(invocation.arguments.contains("--input-format"))
     #expect(invocation.arguments.contains("--permission-prompt-tool"))
     #expect(invocation.arguments.contains("stdio"))
+    let permissionModeIndex = try #require(
+        invocation.arguments.firstIndex(of: "--permission-mode")
+    )
+    #expect(invocation.arguments[permissionModeIndex + 1] == "default")
     #expect(!invocation.arguments.contains("dontAsk"))
     let toolRules = invocation.arguments.filter { $0.hasPrefix("Bash(") }
     #expect(!toolRules.contains(where: { $0.contains("git push") }))
@@ -3787,6 +3853,55 @@ func claudeReviewerInvocationStaysReadOnly() throws {
     #expect(!invocation.arguments.contains("Write"))
     #expect(invocation.arguments.contains("Read"))
     #expect(!invocation.arguments.contains(where: { $0.hasPrefix("Bash(") }))
+}
+
+@Test
+func claudePublisherInvocationUsesExplicitBuildAndTestRules() throws {
+    let profile = BotProfile.defaults[2]
+    let invocation = try ClaudeInvocation(
+        sessionID: "64bfaf39-9db2-45b9-9f10-03a13ea2e772",
+        resume: false,
+        profile: profile,
+        prompt: "Run final verification"
+    )
+
+    #expect(invocation.arguments.contains("Edit"))
+    #expect(invocation.arguments.contains("Write"))
+    for command in [
+        "swift build",
+        "swift test",
+        "xcrun swift build",
+        "xcrun swift test",
+        "xcodebuild build",
+        "xcodebuild test"
+    ] {
+        #expect(invocation.arguments.contains("Bash(\(command))"))
+        #expect(invocation.arguments.contains("Bash(\(command) *)"))
+        #expect(invocation.arguments.contains("Bash(\(command):*)"))
+    }
+}
+
+@Test
+func claudeInvocationKeepsProjectDeniesAndInteractiveApprovalsEnabled() throws {
+    var profile = BotProfile.defaults[1]
+    profile.loadProjectInstructions = true
+    let invocation = try ClaudeInvocation(
+        sessionID: "64bfaf39-9db2-45b9-9f10-03a13ea2e772",
+        resume: false,
+        profile: profile,
+        prompt: "Review HEAD"
+    )
+
+    let settingSourcesIndex = try #require(
+        invocation.arguments.firstIndex(of: "--setting-sources")
+    )
+    #expect(
+        invocation.arguments[settingSourcesIndex + 1]
+            == "user,project,local"
+    )
+    #expect(invocation.arguments.contains("--permission-prompt-tool"))
+    #expect(invocation.arguments.contains("--permission-mode"))
+    #expect(!invocation.arguments.contains("--dangerously-skip-permissions"))
 }
 
 @Test
@@ -3973,6 +4088,146 @@ func claudeCLIClientCompletesThePermissionRoundTrip() async throws {
 
     #expect(receivedPermission)
     #expect(receivedResult == "allow")
+}
+
+@Test
+func unmatchedClaudeCommandReachesTheApprovalCardFlow() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-claude-runtime-control-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    try FileManager.default.createDirectory(
+        at: directory,
+        withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let executable = directory.appendingPathComponent("fake-claude")
+    try """
+    #!/usr/bin/env python3
+    import json
+    import sys
+
+    if sys.argv[1:] == ["auth", "status"]:
+        print(json.dumps({"loggedIn": True}))
+        sys.exit(0)
+
+    assert "--permission-mode" in sys.argv
+    mode_index = sys.argv.index("--permission-mode")
+    assert sys.argv[mode_index + 1] == "default"
+    expected_rules = [
+        "Bash(swift build)",
+        "Bash(swift build *)",
+        "Bash(swift build:*)",
+        "Bash(xcrun swift test)",
+        "Bash(xcrun swift test *)",
+        "Bash(xcrun swift test:*)",
+        "Bash(tail -20)"
+    ]
+    assert all(rule in sys.argv for rule in expected_rules)
+    assert "Bash(tail *)" not in sys.argv
+
+    for line in sys.stdin:
+        message = json.loads(line)
+        if message.get("type") == "control_request":
+            request = message.get("request", {})
+            if request.get("subtype") == "initialize":
+                print(json.dumps({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": message["request_id"],
+                        "response": {"commands": []}
+                    }
+                }), flush=True)
+        elif message.get("type") == "user":
+            print(json.dumps({
+                "type": "control_request",
+                "request_id": "permission-1",
+                "request": {
+                    "subtype": "can_use_tool",
+                    "tool_name": "Bash",
+                    "input": {
+                        "command": "uname -a",
+                        "description": "Inspect the host"
+                    },
+                    "tool_use_id": "toolu_1"
+                }
+            }), flush=True)
+        elif message.get("type") == "control_response":
+            print(json.dumps({
+                "type": "result",
+                "is_error": False,
+                "result": "Approved and completed",
+                "permission_denials": [{
+                    "tool_name": "Bash",
+                    "tool_input": {
+                        "command": "uname -a",
+                        "description": "Inspect the host"
+                    }
+                }]
+            }), flush=True)
+            break
+    """.write(to: executable, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: executable.path
+    )
+
+    var profile = BotProfile.defaults[0]
+    profile.workingDirectory = directory.path
+    let runtime = ClaudeRuntime(
+        locator: ClaudeExecutableLocator(candidateURLs: [executable])
+    )
+    for await _ in await runtime.start(profile: profile, resumeThreadID: nil) {}
+
+    let stream = await runtime.respond(
+        to: "Run an unmatched command",
+        attachments: [],
+        profile: profile
+    )
+    var approvalEntry: TimelineEntry?
+    var sawNeedsApproval = false
+    var sawApprovedResolution = false
+    var sawBlockedQuestion = false
+    var finalStatus: AgentStatus?
+
+    for await event in stream {
+        switch event {
+        case .entry(let entry) where entry.kind == .approval:
+            approvalEntry = entry
+
+        case .entry(let entry) where entry.title == "Some actions were blocked":
+            sawBlockedQuestion = true
+
+        case .status(.needsApproval):
+            sawNeedsApproval = true
+            let entry = try #require(approvalEntry)
+            for await _ in await runtime.resolveApproval(
+                entryID: entry.id,
+                approved: true,
+                profile: profile
+            ) {}
+
+        case .approvalResolved(let entryID, .approved):
+            sawApprovedResolution = entryID == approvalEntry?.id
+
+        case .status(let status):
+            finalStatus = status
+
+        default:
+            break
+        }
+    }
+    await runtime.stop(profile: profile)
+
+    #expect(approvalEntry?.text == "uname -a")
+    #expect(approvalEntry?.approvalState == .pending)
+    #expect(sawNeedsApproval)
+    #expect(sawApprovedResolution)
+    #expect(!sawBlockedQuestion)
+    #expect(finalStatus == .completed)
 }
 
 @Test
@@ -4592,6 +4847,190 @@ func permissionDenialsProduceAReadableAttentionState() throws {
     #expect(
         ClaudePermissionDenials.readableDetail(for: [denial])
             == "• Run tests using Xcode\n  xcrun swift test"
+    )
+}
+
+@Test
+func permissionDenialsAreDeduplicatedByUnderlyingAction() throws {
+    let denials = try JSONDecoder().decode(
+        [JSONValue].self,
+        from: Data(
+            """
+            [
+              {
+                "tool_name": "Bash",
+                "tool_input": {
+                  "description": "Build the package",
+                  "command": "swift build 2>&1 | tail -20"
+                }
+              },
+              {
+                "tool_name": "Bash",
+                "tool_input": {
+                  "description": "Build the package",
+                  "command": "swift build"
+                }
+              }
+            ]
+            """.utf8
+        )
+    )
+
+    let unresolved = ClaudePermissionDenials.unresolved(
+        denials,
+        resolvedActionKeys: []
+    )
+
+    #expect(unresolved.count == 1)
+    #expect(
+        ClaudePermissionDenials.readableDetail(for: unresolved)
+            == "• Build the package\n  swift build"
+    )
+}
+
+@Test
+func successfulRetryClearsStalePermissionDenials() throws {
+    let denial = try JSONDecoder().decode(
+        JSONValue.self,
+        from: Data(
+            """
+            {
+              "tool_name": "Bash",
+              "tool_input": {
+                "description": "Build the package",
+                "command": "swift build 2>&1 | tail -20"
+              }
+            }
+            """.utf8
+        )
+    )
+    let successfulAction = ClaudePermissionDenials.actionKey(
+        toolName: "Bash",
+        toolInput: .object([
+            "command": .string("xcrun swift build")
+        ])
+    )
+    let unresolved = ClaudePermissionDenials.unresolved(
+        [denial],
+        resolvedActionKeys: [successfulAction]
+    )
+
+    #expect(unresolved.isEmpty)
+    #expect(
+        ClaudeTurnOutcome.status(
+            failed: false,
+            permissionDenials: unresolved
+        ) == .completed
+    )
+}
+
+@Test
+func successfulCommandDoesNotMaskBlockedPipelineOrRedirection() throws {
+    let blockedPipeline = JSONValue.object([
+        "tool_name": .string("Bash"),
+        "tool_input": .object([
+            "command": .string("swift build | upload-artifacts")
+        ])
+    ])
+    let blockedRedirection = JSONValue.object([
+        "tool_name": .string("Bash"),
+        "tool_input": .object([
+            "command": .string("swift build > /protected/build.log")
+        ])
+    ])
+    let successfulBuild = ClaudePermissionDenials.actionKey(
+        toolName: "Bash",
+        toolInput: .object([
+            "command": .string("swift build")
+        ])
+    )
+
+    let unresolved = ClaudePermissionDenials.unresolved(
+        [blockedPipeline, blockedRedirection],
+        resolvedActionKeys: [successfulBuild]
+    )
+
+    #expect(unresolved == [blockedPipeline, blockedRedirection])
+}
+
+@Test
+func permissionActionKeysNormalizeShellWhitespaceAndXcrun() {
+    let direct = ClaudePermissionDenials.actionKey(
+        toolName: "Bash",
+        toolInput: .object([
+            "command": .string("swift build")
+        ])
+    )
+    let wrapped = ClaudePermissionDenials.actionKey(
+        toolName: "Bash",
+        toolInput: .object([
+            "command": .string("  xcrun  swift \n build  ")
+        ])
+    )
+    let quotedWhitespace = ClaudePermissionDenials.actionKey(
+        toolName: "Bash",
+        toolInput: .object([
+            "command": .string(#"printf 'two  spaces'"#)
+        ])
+    )
+
+    #expect(wrapped == direct)
+    #expect(quotedWhitespace == #"Bash:printf 'two  spaces'"#)
+}
+
+@Test
+func quotedShellOperatorsDoNotMergeDistinctPermissionActions() {
+    let quotedAction = ClaudePermissionDenials.actionKey(
+        toolName: "Bash",
+        toolInput: .object([
+            "command": .string(#"printf 'build|result>value'"#)
+        ])
+    )
+    let escapedAction = ClaudePermissionDenials.actionKey(
+        toolName: "Bash",
+        toolInput: .object([
+            "command": .string(#"printf build\|result\>value"#)
+        ])
+    )
+
+    #expect(quotedAction == #"Bash:printf 'build|result>value'"#)
+    #expect(escapedAction == #"Bash:printf build\|result\>value"#)
+    #expect(quotedAction != "Bash:printf 'build")
+}
+
+@Test
+func explicitPermissionDenialRemainsUnresolvedWithoutASuccessfulRetry() throws {
+    let denial = try JSONDecoder().decode(
+        JSONValue.self,
+        from: Data(
+            """
+            {
+              "tool_name": "Bash",
+              "tool_input": {
+                "description": "Publish the branch",
+                "command": "git push origin feature/example"
+              }
+            }
+            """.utf8
+        )
+    )
+    let unrelatedSuccess = ClaudePermissionDenials.actionKey(
+        toolName: "Bash",
+        toolInput: .object([
+            "command": .string("git status")
+        ])
+    )
+    let unresolved = ClaudePermissionDenials.unresolved(
+        [denial],
+        resolvedActionKeys: [unrelatedSuccess]
+    )
+
+    #expect(unresolved == [denial])
+    #expect(
+        ClaudeTurnOutcome.status(
+            failed: false,
+            permissionDenials: unresolved
+        ) == .needsAnswer
     )
 }
 

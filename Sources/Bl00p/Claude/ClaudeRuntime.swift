@@ -4,6 +4,7 @@ actor ClaudeRuntime: AgentRuntime {
     private struct PendingApproval: Sendable {
         let requestID: String
         let toolInput: JSONValue
+        let actionKey: String
     }
 
     private struct PendingTurn {
@@ -25,6 +26,9 @@ actor ClaudeRuntime: AgentRuntime {
         var currentAttemptID: UUID?
         var pendingTurn: PendingTurn?
         var toolEntries: [String: TimelineEntry] = [:]
+        var toolActionKeys: [String: String] = [:]
+        var successfulToolActionKeys: Set<String> = []
+        var approvedToolActionKeys: Set<String> = []
         var assistantTexts: Set<String> = []
         var receivedResult = false
         var stagedAttachmentDirectory: URL?
@@ -190,6 +194,9 @@ actor ClaudeRuntime: AgentRuntime {
             profile: profile
         )
         session.toolEntries.removeAll()
+        session.toolActionKeys.removeAll()
+        session.successfulToolActionKeys.removeAll()
+        session.approvedToolActionKeys.removeAll()
         session.assistantTexts.removeAll()
         session.receivedResult = false
         session.pendingApprovals.removeAll()
@@ -239,6 +246,9 @@ actor ClaudeRuntime: AgentRuntime {
             }
 
             activeSession.pendingApprovals.removeValue(forKey: entryID)
+            if approved {
+                activeSession.approvedToolActionKeys.insert(pending.actionKey)
+            }
             activeSession.currentContinuation?.yield(
                 .approvalResolved(entryID, approved ? .approved : .declined)
             )
@@ -499,7 +509,11 @@ actor ClaudeRuntime: AgentRuntime {
             let entry = approval.timelineEntry()
             session.pendingApprovals[entry.id] = PendingApproval(
                 requestID: requestID,
-                toolInput: approval.toolInput
+                toolInput: approval.toolInput,
+                actionKey: ClaudePermissionDenials.actionKey(
+                    toolName: approval.toolName,
+                    toolInput: approval.toolInput
+                )
             )
             sessions[profileID] = session
             session.currentContinuation?.yield(.entry(entry))
@@ -628,6 +642,10 @@ actor ClaudeRuntime: AgentRuntime {
             isError: false
         )
         session.toolEntries[toolID] = entry
+        session.toolActionKeys[toolID] = ClaudePermissionDenials.actionKey(
+            toolName: name,
+            toolInput: input
+        )
         sessions[profileID] = session
         yield(.upsertEntry(entry), profileID: profileID)
     }
@@ -649,6 +667,10 @@ actor ClaudeRuntime: AgentRuntime {
                 entry.detail = result.trimmedForClaudeTimeline
             }
             session.toolEntries[toolID] = entry
+            if block["is_error"]?.boolValue != true,
+               let actionKey = session.toolActionKeys[toolID] {
+                session.successfulToolActionKeys.insert(actionKey)
+            }
             sessions[profileID] = session
             yield(.upsertEntry(entry), profileID: profileID)
         }
@@ -664,7 +686,12 @@ actor ClaudeRuntime: AgentRuntime {
             .compactMap(\.stringValue)
             .joined(separator: "\n")
         let failureDetail = result?.isEmpty == false ? result : errors
-        let permissionDenials = event["permission_denials"]?.arrayValue ?? []
+        let reportedPermissionDenials = event["permission_denials"]?.arrayValue ?? []
+        let permissionDenials = ClaudePermissionDenials.unresolved(
+            reportedPermissionDenials,
+            resolvedActionKeys: session.successfulToolActionKeys
+                .union(session.approvedToolActionKeys)
+        )
 
         if failed,
            session.shouldResume,
@@ -732,7 +759,7 @@ actor ClaudeRuntime: AgentRuntime {
                     .init(
                         kind: .question,
                         title: "Some actions were blocked",
-                        text: "Claude could not run every requested action. Review its response, then tell it how you want to proceed.",
+                        text: "Claude could not run one or more required actions. Retry and approve the bl00p prompt, or adjust the applicable Claude deny rule before continuing.",
                         detail: ClaudePermissionDenials
                             .readableDetail(for: permissionDenials)
                     )
@@ -990,6 +1017,42 @@ enum ClaudeTurnOutcome {
 }
 
 enum ClaudePermissionDenials {
+    static func unresolved(
+        _ denials: [JSONValue],
+        resolvedActionKeys: Set<String>
+    ) -> [JSONValue] {
+        var keys: [String] = []
+        var unique: [String: JSONValue] = [:]
+
+        for denial in denials {
+            let key = actionKey(
+                toolName: denial["tool_name"]?.stringValue ?? "unknown",
+                toolInput: denial["tool_input"] ?? .object([:])
+            )
+            guard !resolvedActionKeys.contains(key) else { continue }
+
+            if let previous = unique[key] {
+                unique[key] = preferredDenial(previous, denial)
+            } else {
+                keys.append(key)
+                unique[key] = denial
+            }
+        }
+
+        return keys.compactMap { unique[$0] }
+    }
+
+    static func actionKey(
+        toolName: String,
+        toolInput: JSONValue
+    ) -> String {
+        if toolName == "Bash",
+           let command = toolInput["command"]?.stringValue {
+            return "Bash:\(primaryShellAction(command))"
+        }
+        return "\(toolName):\(toolInput.compactDescription)"
+    }
+
     static func readableDetail(for denials: [JSONValue]) -> String {
         let lines = denials.compactMap { denial -> String? in
             let input = denial["tool_input"]
@@ -1025,6 +1088,105 @@ enum ClaudePermissionDenials {
                 try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8))
             }
         return readableDetail(for: denials)
+    }
+
+    private static func primaryShellAction(_ command: String) -> String {
+        let normalized = normalizedShellWhitespace(in: command)
+        var action = normalized
+
+        if let pipeIndex = firstUnquotedPipe(in: normalized) {
+            let suffixStart = normalized.index(after: pipeIndex)
+            let suffix = normalized[suffixStart...]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if ["tail -20", "tail -n 20"].contains(suffix) {
+                action = String(normalized[..<pipeIndex])
+            }
+        }
+
+        action = action.trimmingCharacters(in: .whitespacesAndNewlines)
+        if action.hasSuffix(" 2>&1") {
+            action.removeLast(" 2>&1".count)
+        }
+        if action.hasPrefix("xcrun swift ") {
+            return String(action.dropFirst("xcrun ".count))
+        }
+        return action
+    }
+
+    private static func normalizedShellWhitespace(
+        in command: String
+    ) -> String {
+        var result = ""
+        var quote: Character?
+        var isEscaped = false
+        var hasPendingWhitespace = false
+        var index = command.startIndex
+
+        while index < command.endIndex {
+            let character = command[index]
+            if quote == nil, !isEscaped, character.isWhitespace {
+                hasPendingWhitespace = !result.isEmpty
+                index = command.index(after: index)
+                continue
+            }
+            if hasPendingWhitespace {
+                result.append(" ")
+                hasPendingWhitespace = false
+            }
+            result.append(character)
+
+            if isEscaped {
+                isEscaped = false
+            } else if character == "\\", quote != "'" {
+                isEscaped = true
+            } else if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                }
+            } else if character == "'" || character == "\"" {
+                quote = character
+            }
+            index = command.index(after: index)
+        }
+        return result
+    }
+
+    private static func firstUnquotedPipe(
+        in command: String
+    ) -> String.Index? {
+        var quote: Character?
+        var isEscaped = false
+        var index = command.startIndex
+
+        while index < command.endIndex {
+            let character = command[index]
+            if isEscaped {
+                isEscaped = false
+            } else if character == "\\", quote != "'" {
+                isEscaped = true
+            } else if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                }
+            } else if character == "'" || character == "\"" {
+                quote = character
+            } else if character == "|" {
+                return index
+            }
+            index = command.index(after: index)
+        }
+        return nil
+    }
+
+    private static func preferredDenial(
+        _ lhs: JSONValue,
+        _ rhs: JSONValue
+    ) -> JSONValue {
+        let lhsCommand = lhs["tool_input"]?["command"]?.stringValue ?? ""
+        let rhsCommand = rhs["tool_input"]?["command"]?.stringValue ?? ""
+        guard !rhsCommand.isEmpty else { return lhs }
+        guard !lhsCommand.isEmpty else { return rhs }
+        return rhsCommand.count < lhsCommand.count ? rhs : lhs
     }
 }
 
@@ -1214,31 +1376,51 @@ enum ClaudeToolApprovalPolicy {
         "Bash(git rev-parse:*)",
         "Bash(git merge-base:*)",
         "Bash(git ls-files:*)",
-        "Bash(git grep:*)",
-        "Bash(swift --version:*)",
-        "Bash(swift test:*)",
-        "Bash(swift build:*)",
-        "Bash(env swift --version:*)",
-        "Bash(xcrun --find swift:*)",
-        "Bash(xcrun swift test:*)",
-        "Bash(xcrun swift build:*)",
-        "Bash(xcode-select -p:*)",
-        "Bash(xcodebuild test:*)",
-        "Bash(xcodebuild build:*)",
-        "Bash(npm test:*)",
-        "Bash(npm run test:*)",
-        "Bash(npm run lint:*)",
-        "Bash(npm run typecheck:*)",
-        "Bash(pnpm test:*)",
-        "Bash(pnpm lint:*)",
-        "Bash(pnpm typecheck:*)",
-        "Bash(yarn test:*)",
-        "Bash(yarn lint:*)",
-        "Bash(yarn typecheck:*)",
-        "Bash(cargo test:*)",
-        "Bash(go test:*)",
-        "Bash(pytest:*)"
-    ]
+        "Bash(git grep:*)"
+    ] + [
+        "swift --version",
+        "swift test",
+        "swift build",
+        "env swift --version",
+        "xcrun --find swift",
+        "xcrun swift test",
+        "xcrun swift build",
+        "xcode-select -p",
+        "xcodebuild test",
+        "xcodebuild build",
+        "npm test",
+        "npm run test",
+        "npm run lint",
+        "npm run typecheck",
+        "pnpm test",
+        "pnpm lint",
+        "pnpm typecheck",
+        "yarn test",
+        "yarn lint",
+        "yarn typecheck",
+        "cargo test",
+        "go test",
+        "pytest"
+    ].flatMap(exactAndArgumentBearingBashRules)
+        + [
+            // Claude checks each pipeline segment independently. Keep these
+            // exact so tail cannot read arbitrary paths.
+            "Bash(tail -20)",
+            "Bash(tail -n 20)"
+        ]
+
+    private static func exactAndArgumentBearingBashRules(
+        for command: String
+    ) -> [String] {
+        // Keep the exact form for bare commands and emit both current and
+        // legacy argument-prefix forms for Claude CLI matcher compatibility.
+        [
+            "Bash(\(command))",
+            "Bash(\(command) *)",
+            "Bash(\(command):*)"
+        ]
+    }
+
     private static let fileWriteTools = [
         "Edit",
         "Write",

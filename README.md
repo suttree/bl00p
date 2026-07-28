@@ -145,6 +145,15 @@ publishing commands, outside-workspace paths, and classified Reviewer writes
 remain blocked. Unclassified non-shell tools return to the explicit approval
 flow instead of being run automatically.
 
+For Builder and Documenter / PR Writer profiles, build and test permissions
+accept both bare and argument-bearing command forms for compatibility with
+Claude CLI permission matching. The permission identity also recognizes
+supported output filters in commands such as
+`swift build 2>&1 | tail -20`, without allowing `tail` to read arbitrary
+files. Completed or approved actions are removed from repeated permission
+denials, so a retry is not reported as blocked after it has already run
+successfully.
+
 Reviewer shell access is intentionally read-only: commands such as
 `swift test`, `npm run lint`, and other classified verification commands are
 denied rather than offered for approval. Reviewers confirm the reported test

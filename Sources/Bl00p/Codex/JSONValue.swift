@@ -112,7 +112,9 @@ enum JSONValue: Codable, Equatable, Sendable {
     var compactDescription: String {
         switch self {
         case .object, .array:
-            guard let data = try? JSONEncoder().encode(self),
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            guard let data = try? encoder.encode(self),
                   let value = String(data: data, encoding: .utf8) else { return "" }
             return value
         case .string(let value):
