@@ -49,6 +49,9 @@ struct ConversationView: View {
                         },
                         resolveApproval: { entryID, approved in
                             model.resolveApproval(entryID, approved: approved, for: profile.id)
+                        },
+                        resolveQuestion: { entryID, answer in
+                            model.resolveQuestion(entryID, answer: answer, for: profile.id)
                         }
                     )
                 }
@@ -59,6 +62,7 @@ struct ConversationView: View {
                     attachments: $attachments,
                     isEnabled: session.status != .launching
                         && session.status != .working
+                        && !session.hasPendingQuestion
                         && !isAwaitingPlanApproval,
                     send: {
                         let outgoing = draft
@@ -280,6 +284,7 @@ private struct TranscriptView: View {
     let canRetryFailedMessage: Bool
     let retry: (UUID) -> Void
     let resolveApproval: (UUID, Bool) -> Void
+    let resolveQuestion: (UUID, QuestionAnswer) -> Void
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -291,7 +296,8 @@ private struct TranscriptView: View {
                             profile: profile,
                             canRetryFailedMessage: canRetryFailedMessage,
                             retry: retry,
-                            resolveApproval: resolveApproval
+                            resolveApproval: resolveApproval,
+                            resolveQuestion: resolveQuestion
                         )
                         .id(entry.id)
                     }
@@ -330,6 +336,7 @@ private struct TimelineEntryView: View {
     let canRetryFailedMessage: Bool
     let retry: (UUID) -> Void
     let resolveApproval: (UUID, Bool) -> Void
+    let resolveQuestion: (UUID, QuestionAnswer) -> Void
 
     var body: some View {
         switch entry.kind {
@@ -348,7 +355,15 @@ private struct TimelineEntryView: View {
                 tint: .orange
             )
         case .question:
-            eventCard(icon: "questionmark.bubble.fill", tint: .bl00pPinkText)
+            if let question = entry.question {
+                InteractiveQuestionCard(
+                    entryID: entry.id,
+                    question: question,
+                    resolve: resolveQuestion
+                )
+            } else {
+                eventCard(icon: "questionmark.bubble.fill", tint: .bl00pPinkText)
+            }
         case .approval:
             approvalCard
         case .handoff:
@@ -524,6 +539,117 @@ private struct TimelineEntryView: View {
             RoundedRectangle(cornerRadius: 14)
                 .stroke(Color.bl00pPink.opacity(0.40), lineWidth: 1)
         }
+    }
+}
+
+private struct InteractiveQuestionCard: View {
+    let entryID: UUID
+    let question: InteractiveQuestion
+    let resolve: (UUID, QuestionAnswer) -> Void
+    @State private var draft = QuestionResponseDraft()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack {
+                Label(question.header, systemImage: "questionmark.bubble.fill")
+                    .font(.bl00p(.callout, weight: .bold))
+                    .foregroundStyle(Color.bl00pPinkText)
+                Spacer()
+                if question.resolutionState != .pending {
+                    Text(question.resolutionState == .answered ? "Answered" : "Cancelled")
+                        .font(.bl00p(.caption1, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Text(question.text)
+                .font(.bl00p(.callout, weight: .semibold))
+                .textSelection(.enabled)
+
+            if question.resolutionState == .pending {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(question.options) { option in
+                        optionButton(option)
+                    }
+                    if question.allowsOther {
+                        otherButton
+                    }
+                }
+
+                if draft.isOtherSelected {
+                    TextField("Enter another answer", text: $draft.otherText)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                Button("Continue") {
+                    resolve(entryID, draft.answer(for: question))
+                }
+                .buttonStyle(.borderedProminent)
+                .foregroundStyle(Color.bl00pAvatarInk)
+                .disabled(!draft.canContinue(for: question))
+            } else if let answer = question.answer {
+                Text(answer.displayValues(for: question).joined(separator: ", "))
+                    .font(.bl00p(.callout))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(15)
+        .background(Color.bl00pPinkSoft, in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(Color.bl00pPink.opacity(0.40), lineWidth: 1)
+        }
+    }
+
+    private func optionButton(_ option: QuestionOption) -> some View {
+        Button {
+            draft.toggleOption(option.id, for: question)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: selectionSymbol(
+                    selected: draft.selectedOptionIDs.contains(option.id)
+                ))
+                    .foregroundStyle(Color.bl00pPinkText)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(option.label)
+                        .font(.bl00p(.callout, weight: .semibold))
+                    if let description = option.description, !description.isEmpty {
+                        Text(description)
+                            .font(.bl00p(.caption1))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var otherButton: some View {
+        Button {
+            draft.toggleOther(for: question)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: selectionSymbol(selected: draft.isOtherSelected))
+                    .foregroundStyle(Color.bl00pPinkText)
+                    .frame(width: 18)
+                Text("Other")
+                    .font(.bl00p(.callout, weight: .semibold))
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func selectionSymbol(selected: Bool) -> String {
+        if question.allowsMultiple {
+            return selected ? "checkmark.square.fill" : "square"
+        }
+        return selected ? "largecircle.fill.circle" : "circle"
     }
 }
 

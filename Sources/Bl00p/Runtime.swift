@@ -5,6 +5,7 @@ enum AgentEvent: Sendable {
     case entry(TimelineEntry)
     case upsertEntry(TimelineEntry)
     case approvalResolved(UUID, ApprovalState)
+    case questionResolved(UUID, QuestionAnswer?, QuestionResolutionState)
     case sessionID(String)
 }
 
@@ -20,7 +21,22 @@ protocol AgentRuntime: Sendable {
         approved: Bool,
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent>
+    func resolveQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent>
     func stop(profile: BotProfile) async
+}
+
+extension AgentRuntime {
+    func resolveQuestion(
+        entryID: UUID,
+        answer: QuestionAnswer,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
 }
 
 struct DemoAgentRuntime: AgentRuntime {

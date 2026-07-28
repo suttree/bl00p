@@ -506,6 +506,122 @@ enum ApprovalState: String, Codable, Sendable {
     case declined
 }
 
+struct QuestionOption: Identifiable, Codable, Hashable, Sendable {
+    var id: String
+    var label: String
+    var description: String?
+}
+
+struct QuestionAnswer: Codable, Hashable, Sendable {
+    var selectedOptionIDs: [String]
+    var otherText: String?
+
+    init(selectedOptionIDs: [String] = [], otherText: String? = nil) {
+        self.selectedOptionIDs = selectedOptionIDs
+        self.otherText = otherText?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+    }
+
+    func isValid(for question: InteractiveQuestion) -> Bool {
+        let validIDs = Set(question.options.map(\.id))
+        let selections = Set(selectedOptionIDs)
+        guard selections.count == selectedOptionIDs.count,
+              selections.isSubset(of: validIDs) else {
+            return false
+        }
+        let hasOther = !(otherText ?? "").isEmpty
+        guard question.allowsOther || !hasOther else { return false }
+        guard !selections.isEmpty || hasOther else { return false }
+        return question.allowsMultiple || selections.count + (hasOther ? 1 : 0) == 1
+    }
+
+    func displayValues(for question: InteractiveQuestion) -> [String] {
+        let labels = selectedOptionIDs.compactMap { id in
+            question.options.first(where: { $0.id == id })?.label
+        }
+        guard let otherText, !otherText.isEmpty else { return labels }
+        return labels + [otherText]
+    }
+}
+
+enum QuestionResolutionState: String, Codable, Sendable {
+    case pending
+    case answered
+    case cancelled
+}
+
+struct InteractiveQuestion: Codable, Hashable, Sendable {
+    var id: String
+    var header: String
+    var text: String
+    var options: [QuestionOption]
+    var allowsMultiple: Bool
+    var allowsOther: Bool
+    var answer: QuestionAnswer?
+    var resolutionState: QuestionResolutionState
+
+    init(
+        id: String,
+        header: String,
+        text: String,
+        options: [QuestionOption],
+        allowsMultiple: Bool = false,
+        allowsOther: Bool = true,
+        answer: QuestionAnswer? = nil,
+        resolutionState: QuestionResolutionState = .pending
+    ) {
+        self.id = id
+        self.header = header
+        self.text = text
+        self.options = options
+        self.allowsMultiple = allowsMultiple
+        self.allowsOther = allowsOther
+        self.answer = answer
+        self.resolutionState = resolutionState
+    }
+}
+
+struct QuestionResponseDraft: Equatable, Sendable {
+    var selectedOptionIDs: Set<String> = []
+    var isOtherSelected = false
+    var otherText = ""
+
+    mutating func toggleOption(_ id: String, for question: InteractiveQuestion) {
+        guard question.options.contains(where: { $0.id == id }) else { return }
+        if question.allowsMultiple {
+            if !selectedOptionIDs.insert(id).inserted {
+                selectedOptionIDs.remove(id)
+            }
+        } else {
+            selectedOptionIDs = selectedOptionIDs == Set([id]) ? [] : [id]
+            isOtherSelected = false
+        }
+    }
+
+    mutating func toggleOther(for question: InteractiveQuestion) {
+        guard question.allowsOther else { return }
+        isOtherSelected.toggle()
+        if isOtherSelected, !question.allowsMultiple {
+            selectedOptionIDs.removeAll()
+        }
+    }
+
+    func answer(for question: InteractiveQuestion) -> QuestionAnswer {
+        let orderedIDs = question.options
+            .map(\.id)
+            .filter(selectedOptionIDs.contains)
+        return QuestionAnswer(
+            selectedOptionIDs: orderedIDs,
+            otherText: isOtherSelected ? otherText : nil
+        )
+    }
+
+    func canContinue(for question: InteractiveQuestion) -> Bool {
+        answer(for: question).isValid(for: question)
+    }
+}
+
 struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var kind: TimelineKind
@@ -516,6 +632,7 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
     var approvalState: ApprovalState?
     var attachments: [ImageAttachment]?
     var deliveryFailed: Bool?
+    var question: InteractiveQuestion?
 
     init(
         id: UUID = UUID(),
@@ -526,7 +643,8 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
         timestamp: Date = .now,
         approvalState: ApprovalState? = nil,
         attachments: [ImageAttachment]? = nil,
-        deliveryFailed: Bool? = nil
+        deliveryFailed: Bool? = nil,
+        question: InteractiveQuestion? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -537,6 +655,7 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
         self.approvalState = approvalState
         self.attachments = attachments
         self.deliveryFailed = deliveryFailed
+        self.question = question
     }
 }
 
@@ -548,6 +667,12 @@ struct AgentSessionState: Codable, Sendable {
     var codexTurnModeVersion: Int?
     var pendingHandoff: GitHandoffPackage? = nil
     var worktreeSeedID: UUID? = nil
+
+    var hasPendingQuestion: Bool {
+        entries.contains {
+            $0.question?.resolutionState == .pending
+        }
+    }
 }
 
 struct PersistedAppState: Codable, Sendable {

@@ -59,6 +59,10 @@ final class AppModel: ObservableObject {
                         session.entries.last?.text == "Claude stopped at a permission boundary"
                     session.entries = session.entries.map(Self.migrateLegacyPermissionEntry)
                     session.entries.removeAll(where: Self.isPrototypeStarterEntry)
+                    for index in session.entries.indices
+                    where session.entries[index].question?.resolutionState == .pending {
+                        session.entries[index].question?.resolutionState = .cancelled
+                    }
                     if session.status == .launching
                         || session.status == .working
                         || session.status == .needsApproval
@@ -311,7 +315,9 @@ final class AppModel: ObservableObject {
             return
         }
         let state = sessions[profileID] ?? AgentSessionState()
-        guard state.status != .launching, state.status != .working else {
+        guard state.status != .launching,
+              state.status != .working,
+              !state.hasPendingQuestion else {
             return
         }
         guard managerWorkflows[profileID]?.planApprovalEntryID == nil else {
@@ -484,6 +490,33 @@ final class AppModel: ObservableObject {
             let stream = await runtime.resolveApproval(
                 entryID: entryID,
                 approved: approved,
+                profile: runtimeProfile(for: profile)
+            )
+            consume(stream, for: profileID, generation: generation)
+        }
+    }
+
+    func resolveQuestion(
+        _ entryID: UUID,
+        answer: QuestionAnswer,
+        for profileID: UUID
+    ) {
+        guard let profile = profiles.first(where: { $0.id == profileID }),
+              let entry = sessions[profileID]?.entries.first(where: {
+                  $0.id == entryID
+              }),
+              let question = entry.question,
+              question.resolutionState == .pending,
+              answer.isValid(for: question) else {
+            return
+        }
+
+        let generation = runGenerations[profileID] ?? UUID()
+        runGenerations[profileID] = generation
+        Task {
+            let stream = await runtime.resolveQuestion(
+                entryID: entryID,
+                answer: answer,
                 profile: runtimeProfile(for: profile)
             )
             consume(stream, for: profileID, generation: generation)
@@ -1411,6 +1444,11 @@ final class AppModel: ObservableObject {
         case .approvalResolved(let entryID, let approvalState):
             if let index = state.entries.firstIndex(where: { $0.id == entryID }) {
                 state.entries[index].approvalState = approvalState
+            }
+        case .questionResolved(let entryID, let answer, let resolutionState):
+            if let index = state.entries.firstIndex(where: { $0.id == entryID }) {
+                state.entries[index].question?.answer = answer
+                state.entries[index].question?.resolutionState = resolutionState
             }
         case .sessionID(let sessionID):
             state.sessionID = sessionID
