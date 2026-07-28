@@ -1320,10 +1320,25 @@ final class AppModel: ObservableObject {
     }
 
     private func latestAssistantText(for profileID: UUID) -> String {
-        sessions[profileID]?.entries
-            .last(where: { $0.kind == .assistant && !$0.text.isEmpty })?
-            .text
-            ?? "No assistant summary was captured."
+        guard let entries = sessions[profileID]?.entries else {
+            return "No assistant summary was captured."
+        }
+        let boundary = entries.lastIndex(where: {
+            $0.kind == .user || $0.kind == .handoff
+        })
+        let turnEntries = boundary.map {
+            entries[entries.index(after: $0)...]
+        } ?? entries[...]
+        let messages = turnEntries.compactMap { entry -> String? in
+            guard entry.kind == .assistant else { return nil }
+            let text = entry.text.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            return text.isEmpty ? nil : text
+        }
+        return messages.isEmpty
+            ? "No assistant summary was captured."
+            : messages.joined(separator: "\n\n")
     }
 
     private func profileName(_ profileID: UUID) -> String {

@@ -965,27 +965,61 @@ enum ClaudePermissionDenials {
     }
 
     private static func primaryShellAction(_ command: String) -> String {
-        let firstPipelineSegment = command
-            .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
-            .first
-            .map(String.init) ?? command
-        let withoutRedirection = firstPipelineSegment
-            .replacingOccurrences(
-                of: #"\s+\d*>&\d+\s*"#,
-                with: " ",
-                options: .regularExpression
-            )
-        let beforeOutputRedirection = withoutRedirection
-            .split(separator: ">", maxSplits: 1, omittingEmptySubsequences: false)
-            .first
-            .map(String.init) ?? withoutRedirection
-        let normalized = beforeOutputRedirection
-            .split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
+        let action: Substring
+        if let operatorIndex = firstUnquotedOutputOperator(in: command) {
+            var actionEnd = operatorIndex
+            if command[operatorIndex] == ">" {
+                var descriptorStart = actionEnd
+                while descriptorStart > command.startIndex {
+                    let previous = command.index(before: descriptorStart)
+                    guard command[previous].isNumber else { break }
+                    descriptorStart = previous
+                }
+                if descriptorStart == command.startIndex
+                    || command[
+                        command.index(before: descriptorStart)
+                    ].isWhitespace {
+                    actionEnd = descriptorStart
+                }
+            }
+            action = command[..<actionEnd]
+        } else {
+            action = command[...]
+        }
+        let normalized = action.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
         if normalized.hasPrefix("xcrun swift ") {
             return String(normalized.dropFirst("xcrun ".count))
         }
         return normalized
+    }
+
+    private static func firstUnquotedOutputOperator(
+        in command: String
+    ) -> String.Index? {
+        var quote: Character?
+        var isEscaped = false
+        var index = command.startIndex
+
+        while index < command.endIndex {
+            let character = command[index]
+            if isEscaped {
+                isEscaped = false
+            } else if character == "\\", quote != "'" {
+                isEscaped = true
+            } else if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                }
+            } else if character == "'" || character == "\"" {
+                quote = character
+            } else if character == "|" || character == ">" {
+                return index
+            }
+            index = command.index(after: index)
+        }
+        return nil
     }
 
     private static func preferredDenial(

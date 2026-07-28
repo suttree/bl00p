@@ -914,8 +914,10 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     #expect(calls[1].message.contains("Manager brief:"))
     #expect(calls[2].message.contains("Source branch: \(ownership.branch)"))
     #expect(calls[3].message.contains("Review finding"))
+    #expect(calls[3].message.contains("Also verify pipeline permissions."))
     #expect(calls[4].message.contains("Re-check the updated"))
     #expect(calls[5].message.contains("create a draft pull request"))
+    #expect(!calls[5].message.contains("Review finding:"))
     #expect(calls[6].message.contains("https://github.com/suttree/bl00p/pull/99"))
     #expect(await runtime.approvalResolutionCount == 0)
     #expect(
@@ -1990,6 +1992,26 @@ func successfulRetryClearsStalePermissionDenials() throws {
 }
 
 @Test
+func quotedShellOperatorsDoNotMergeDistinctPermissionActions() {
+    let quotedAction = ClaudePermissionDenials.actionKey(
+        toolName: "Bash",
+        toolInput: .object([
+            "command": .string(#"printf 'build|result>value'"#)
+        ])
+    )
+    let escapedAction = ClaudePermissionDenials.actionKey(
+        toolName: "Bash",
+        toolInput: .object([
+            "command": .string(#"printf build\|result\>value"#)
+        ])
+    )
+
+    #expect(quotedAction == #"Bash:printf 'build|result>value'"#)
+    #expect(escapedAction == #"Bash:printf build\|result\>value"#)
+    #expect(quotedAction != "Bash:printf 'build")
+}
+
+@Test
 func explicitPermissionDenialRemainsUnresolvedWithoutASuccessfulRetry() throws {
     let denial = try JSONDecoder().decode(
         JSONValue.self,
@@ -2686,29 +2708,40 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
         let count = roleResponseCounts[profile.role, default: 0]
         roleResponseCounts[profile.role] = count + 1
 
-        let response: String
+        let responses: [String]
         switch profile.role {
         case .manager:
-            response = count == 0
-                ? "Implement the feature with persistence and tests."
-                : "Complete: [draft PR](https://github.com/suttree/bl00p/pull/99)"
+            responses = [
+                count == 0
+                    ? "Implement the feature with persistence and tests."
+                    : "Complete: [draft PR](https://github.com/suttree/bl00p/pull/99)"
+            ]
         case .builder:
-            response = count == 0
-                ? "Implementation committed and tests passed."
-                : "Review finding fixed, committed, and tests passed."
+            responses = [
+                count == 0
+                    ? "Implementation committed and tests passed."
+                    : "Review finding fixed, committed, and tests passed."
+            ]
         case .reviewer:
-            response = count == 0
-                ? "Review finding: add a regression test."
-                : "Review clean. Ready to publish."
+            responses = count == 0
+                ? [
+                    "Review finding: add a regression test.",
+                    "Also verify pipeline permissions."
+                ]
+                : ["Review clean. Ready to publish."]
         case .publisher:
-            response = "Documentation committed. Draft PR: https://github.com/suttree/bl00p/pull/99"
+            responses = [
+                "Documentation committed. Draft PR: https://github.com/suttree/bl00p/pull/99"
+            ]
         }
 
         return AsyncStream { continuation in
             continuation.yield(.status(.working))
-            continuation.yield(
-                .entry(.init(kind: .assistant, text: response))
-            )
+            for response in responses {
+                continuation.yield(
+                    .entry(.init(kind: .assistant, text: response))
+                )
+            }
             continuation.yield(.status(.completed))
             continuation.finish()
         }
