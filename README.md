@@ -14,8 +14,9 @@ The current prototype includes:
 - Structured messages, commands, findings, and approval cards
 - Optional Manager bots that coordinate a persistent Builder → Reviewer →
   Builder fixes → Reviewer re-check → Documenter / PR Writer workflow
-- Isolated managed Git worktrees for implementation bots, with handoff packages
-  that carry branch, task, working-tree, and test context to the next bot
+- Isolated managed Git worktrees for implementation bots, with structured
+  handoff packages that carry branch, task, working-tree, and test context to
+  the next bot
 - Real Codex sessions powered by `codex app-server`, with workspace-scoped writes and in-app approvals for commands, file changes, extra permissions, and connected-app mutations
 - Real, resumable Claude Code builder and PR-writer sessions with in-app tool approvals
 - Local JSON persistence
@@ -69,9 +70,11 @@ a bot with the **Manager** role, then assign one existing Builder, Reviewer, and
 Documenter / PR Writer in its settings. The Manager's next request starts a
 persisted workflow with this sequence:
 
-1. The Manager prepares the implementation brief.
-2. You approve the implementation plan before it is handed to the team.
-3. The Builder works in an isolated branch and commits a tested change locally.
+1. The Manager prepares an implementation plan from your request.
+2. You approve the exact implementation plan before it is handed to the team.
+3. The Builder receives both the original request and the approved plan in a
+   visible implementation brief and runtime handoff, then works in an isolated
+   branch and commits a tested change locally.
 4. The Reviewer performs a read-only review.
 5. The Builder addresses the findings and commits the fixes.
 6. The Reviewer verifies the updated implementation.
@@ -80,6 +83,12 @@ persisted workflow with this sequence:
 
 Questions, failures, and approval requests pause the workflow for the user.
 Leaving any team assignment unset keeps that Manager in standalone chat mode.
+
+The Manager→Builder handoff is deliberately plan-bound: bl00p records the
+approved plan entry and checks it against the persisted workflow before
+dispatching the Builder. If the plan is missing or inconsistent, the workflow
+pauses for correction instead of sending the original request as a substitute
+for the approved implementation details.
 
 ## Runtime boundary
 

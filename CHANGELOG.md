@@ -36,6 +36,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Hand the Builder the exact implementation plan approved by the user, while
+  preserving the original request as separate context and pausing on an
+  inconsistent or missing plan.
 - Keep the selected provider when adding a bot, including after switching between Claude and Codex.
 - Focus the message composer when the app opens or the user switches bots.
 - Keep loading saved profiles and sessions when a bot profile gains new fields, instead of silently discarding all persisted state on decode failure.
@@ -58,3 +61,5 @@ All notable changes to bl00p are documented in this file.
 - Cover the Codex approval mode toggle and backward-compatible decoding of bot profiles missing newer fields.
 - Cover Manager plan approval, visible team dispatch, restart persistence,
   read-only Codex configuration, and role-specific avatar colors.
+- Cover the approved-plan Builder handoff, including revised plans and missing
+  or inconsistent plan safeguards.
