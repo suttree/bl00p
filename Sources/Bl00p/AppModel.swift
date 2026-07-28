@@ -2,6 +2,44 @@ import AppKit
 import Foundation
 import SwiftUI
 
+private struct BuilderImplementationHandoff: Sendable {
+    let approvalEntryID: UUID
+    let originalRequest: String
+    let approvedPlan: String
+
+    func visibleEntry(sourceName: String) -> TimelineEntry {
+        TimelineEntry(
+            kind: .handoff,
+            title: "Implementation brief",
+            text: approvedPlan,
+            detail: """
+            Original request:
+            \(originalRequest)
+
+            From \(sourceName)
+            """
+        )
+    }
+
+    var runtimeMessage: String {
+        """
+        You are the Builder in a managed bl00p workflow.
+
+        Original request:
+        <original_request>
+        \(originalRequest)
+        </original_request>
+
+        Approved implementation plan:
+        <approved_implementation_plan>
+        \(approvedPlan)
+        </approved_implementation_plan>
+
+        Implement the approved plan in your isolated worktree. Keep the change focused, run the relevant tests, and create a local commit before finishing so the Reviewer can inspect an immutable HEAD. Do not push or open a pull request.
+        """
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var profiles: [BotProfile]
@@ -512,8 +550,45 @@ final class AppModel: ObservableObject {
         workflow.planApprovalEntryID = nil
         workflow.updatedAt = .now
 
-        if approved, let builderID = workflow.team.builderProfileID {
+        if approved {
+            let approvedEntry = state.entries[entryIndex]
+            guard let proposedPlan = workflow.implementationPlan,
+                  !approvedEntry.text.trimmingCharacters(
+                      in: .whitespacesAndNewlines
+                  ).isEmpty,
+                  proposedPlan == approvedEntry.text else {
+                state.status = .needsAnswer
+                workflow.approvedPlanEntryID = nil
+                sessions[managerID] = state
+                managerWorkflows[managerID] = workflow
+                save()
+                pauseWorkflow(
+                    managerID,
+                    reason: "The approved implementation plan is missing or inconsistent. Send feedback to the Manager to request a new plan."
+                )
+                return
+            }
+
+            guard let builderID = workflow.team.builderProfileID else {
+                state.status = .needsAnswer
+                sessions[managerID] = state
+                managerWorkflows[managerID] = workflow
+                save()
+                pauseWorkflow(
+                    managerID,
+                    reason: "The assigned Builder is no longer available."
+                )
+                return
+            }
+
+            let handoff = BuilderImplementationHandoff(
+                approvalEntryID: entryID,
+                originalRequest: workflow.request,
+                approvedPlan: approvedEntry.text
+            )
             state.status = .completed
+            workflow.implementationPlan = approvedEntry.text
+            workflow.approvedPlanEntryID = entryID
             workflow.stage = .building
             workflow.isPaused = false
             workflow.pauseReason = nil
@@ -521,17 +596,16 @@ final class AppModel: ObservableObject {
             managerWorkflows[managerID] = workflow
             save()
 
-            let plan = workflow.implementationPlan
-                ?? latestAssistantText(for: managerID)
             Task { [weak self] in
                 await self?.dispatchInitialBuild(
                     workflow: workflow,
-                    managerSummary: plan,
+                    handoff: handoff,
                     to: builderID
                 )
             }
         } else {
             state.status = .needsAnswer
+            workflow.approvedPlanEntryID = nil
             workflow.isPaused = true
             workflow.pauseReason =
                 "Plan declined. Send feedback to the Manager to request a revised plan."
@@ -1022,6 +1096,7 @@ final class AppModel: ObservableObject {
         let approvalID = UUID()
         workflow.implementationPlan = implementationPlan
         workflow.planApprovalEntryID = approvalID
+        workflow.approvedPlanEntryID = nil
         workflow.isPaused = true
         workflow.pauseReason =
             "Waiting for your approval of the implementation plan."
@@ -1059,9 +1134,29 @@ final class AppModel: ObservableObject {
 
     private func dispatchInitialBuild(
         workflow: ManagerWorkflow,
-        managerSummary: String,
+        handoff: BuilderImplementationHandoff,
         to builderID: UUID
     ) async {
+        guard let currentWorkflow = managerWorkflows[
+            workflow.managerProfileID
+        ],
+              currentWorkflow.stage == .building,
+              currentWorkflow.approvedPlanEntryID
+                == handoff.approvalEntryID,
+              currentWorkflow.implementationPlan == handoff.approvedPlan,
+              sessions[workflow.managerProfileID]?.entries.contains(where: {
+                  $0.id == handoff.approvalEntryID
+                      && $0.kind == .approval
+                      && $0.approvalState == .approved
+                      && $0.text == handoff.approvedPlan
+              }) == true else {
+            pauseWorkflow(
+                workflow.managerProfileID,
+                reason: "The approved implementation plan is missing or inconsistent. The Builder was not dispatched."
+            )
+            return
+        }
+
         guard await resetWorkflowRecipient(
             builderID,
             worktreeSeedID: workflow.id
@@ -1072,23 +1167,13 @@ final class AppModel: ObservableObject {
             )
             return
         }
-        dispatchWorkflowMessage(
-            from: workflow.managerProfileID,
-            to: builderID,
-            title: "Implementation brief",
-            visibleText: workflow.request,
-            runtimeMessage: """
-            You are the Builder in a managed bl00p workflow.
-
-            Original request:
-            \(workflow.request)
-
-            Manager brief:
-            \(managerSummary)
-
-            Implement the requested change in your isolated worktree. Keep the change focused, run the relevant tests, and create a local commit before finishing so the Reviewer can inspect an immutable HEAD. Do not push or open a pull request.
-            """
+        append(
+            handoff.visibleEntry(
+                sourceName: profileName(workflow.managerProfileID)
+            ),
+            to: builderID
         )
+        performSend(handoff.runtimeMessage, to: builderID)
     }
 
     private func dispatchBuilderHandoff(
