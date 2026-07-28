@@ -674,7 +674,38 @@ func chatTabsKeepIndependentDraftsHistoriesAndRuntimeIdentities() async throws {
 
 @MainActor
 @Test
-func managedWorkflowParticipantsStayBoundToTheSessionsChosenAtStart() throws {
+func draftPersistenceIsDebouncedInsteadOfWritingOnEveryKeystroke() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-draft-debounce-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let profile = BotProfile.defaults[1]
+    let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    store.save(
+        PersistedAppState(
+            profiles: [profile],
+            sessions: [
+                profile.id: AgentSessionState(
+                    id: profile.id,
+                    ownerProfileID: profile.id
+                )
+            ],
+            selectedBotID: profile.id
+        )
+    )
+    let model = AppModel(runtime: ImmediateRecordingRuntime(), store: store)
+
+    model.updateDraft("h", for: profile.id)
+    model.updateDraft("he", for: profile.id)
+    model.updateDraft("hello", for: profile.id)
+
+    #expect(store.load()?.sessions[profile.id]?.draft == "")
+    try await Task.sleep(for: .milliseconds(500))
+    #expect(store.load()?.sessions[profile.id]?.draft == "hello")
+}
+
+@MainActor
+@Test
+func managedWorkflowParticipantsStayBoundAndCannotBeDoubleClaimed() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("bl00p-workflow-tabs-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -739,6 +770,26 @@ func managedWorkflowParticipantsStayBoundToTheSessionsChosenAtStart() throws {
     #expect(workflow.participantSessionIDs[.builder] == chosenBuilderSessionID)
     #expect(model.workflow(for: managerID)?.participantSessionIDs[.builder]
         == chosenBuilderSessionID)
+
+    let secondManagerSessionID = model.newChat(for: managerID)
+    #expect(model.workflow(for: managerID) == nil)
+    model.send("Start another workflow", to: managerID)
+    #expect(model.managerWorkflows[secondManagerSessionID] == nil)
+    #expect(
+        model.sessions[secondManagerSessionID]?.entries.contains(where: {
+            $0.text == "Could not start managed workflow"
+                && $0.detail?.contains("already assigned") == true
+        }) == true
+    )
+
+    let closeError = await model.closeSession(
+        managerID,
+        confirmedDestructiveCleanup: true
+    )
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(closeError == nil)
+    #expect(model.sessions[managerID] == nil)
+    #expect(model.managerWorkflows[managerID] == nil)
 }
 
 @MainActor
@@ -774,6 +825,7 @@ func failedWorktreeCleanupRetainsTheChatAndShowsAnActionableError() async throws
         .appendingPathComponent("bl00p-close-failure-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: directory) }
     var profile = BotProfile.defaults[0]
+    let otherProfile = BotProfile.defaults[1]
     profile.workingDirectory = "/tmp/project"
     let ownership = GitWorktreeOwnership(
         ownerProfileID: profile.id,
@@ -786,12 +838,16 @@ func failedWorktreeCleanupRetainsTheChatAndShowsAnActionableError() async throws
     let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
     store.save(
         PersistedAppState(
-            profiles: [profile],
+            profiles: [profile, otherProfile],
             sessions: [
                 profile.id: AgentSessionState(
                     id: profile.id,
                     ownerProfileID: profile.id,
                     worktree: ownership
+                ),
+                otherProfile.id: AgentSessionState(
+                    id: otherProfile.id,
+                    ownerProfileID: otherProfile.id
                 )
             ],
             selectedBotID: profile.id
@@ -812,6 +868,105 @@ func failedWorktreeCleanupRetainsTheChatAndShowsAnActionableError() async throws
     #expect(model.sessions[profile.id] != nil)
     #expect(model.sessions[profile.id]?.entries.last?.text == "Could not close chat")
     #expect(model.sessionOrder[profile.id] == [profile.id])
+
+    model.delete(profile.id)
+    for _ in 0..<30 where model.profileDeletionError == nil {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(model.profileDeletionError == "Simulated cleanup failure.")
+    #expect(model.profiles.contains(where: { $0.id == profile.id }))
+}
+
+@MainActor
+@Test
+func unregisteredWorktreeCanBeClosedWhileLeavingItOnDisk() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-close-orphan-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let profile = BotProfile.defaults[0]
+    let otherProfile = BotProfile.defaults[1]
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: profile.id,
+        ownerSessionID: profile.id,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-detached",
+        branch: "bl00p/old-branch",
+        baseRevision: "abc123"
+    )
+    let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    store.save(
+        PersistedAppState(
+            profiles: [profile, otherProfile],
+            sessions: [
+                profile.id: AgentSessionState(
+                    id: profile.id,
+                    ownerProfileID: profile.id,
+                    worktree: ownership
+                ),
+                otherProfile.id: AgentSessionState(
+                    id: otherProfile.id,
+                    ownerProfileID: otherProfile.id
+                )
+            ],
+            selectedBotID: profile.id
+        )
+    )
+    let worktrees = UnremovableWorktreeManager(ownership: ownership)
+    let model = AppModel(
+        runtime: ImmediateRecordingRuntime(),
+        worktrees: worktrees,
+        store: store
+    )
+
+    let assessment = await model.closeAssessment(for: profile.id)
+    #expect(assessment.leavesWorktreeOnDisk)
+    #expect(assessment.worktreeWarning?.contains("different branch") == true)
+
+    model.delete(profile.id)
+    for _ in 0..<30 where model.profileDeletionError == nil {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(model.profileDeletionError?.contains("Close that chat first") == true)
+    #expect(model.profiles.contains(where: { $0.id == profile.id }))
+
+    let error = await model.closeSession(
+        profile.id,
+        confirmedDestructiveCleanup: true
+    )
+
+    #expect(error == nil)
+    #expect(model.sessions[profile.id] == nil)
+    #expect(await worktrees.removeCount == 0)
+}
+
+@MainActor
+@Test
+func lateRuntimeEventsCannotResurrectAClosedSession() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-late-closed-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let runtime = LateEventRuntime()
+    let model = AppModel(
+        runtime: runtime,
+        store: AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    )
+    let profile = try #require(model.profiles.first(where: { $0.role == .reviewer }))
+    let sessionID = try #require(model.selectedSessionID(for: profile.id))
+    model.send("Hold this response", to: profile.id)
+    for _ in 0..<30 where await !runtime.didStartResponse {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let error = await model.closeSession(
+        sessionID,
+        confirmedDestructiveCleanup: true
+    )
+    await runtime.emitLateEvent()
+    try await Task.sleep(for: .milliseconds(20))
+
+    #expect(error == nil)
+    #expect(model.sessions[sessionID] == nil)
+    #expect(model.sessionOrder[profile.id]?.contains(sessionID) == false)
 }
 
 @Test
@@ -1066,11 +1221,9 @@ func oneBuilderProfileGetsUniqueSessionWorktreesAndCleanupRetainsBranches() asyn
 
     try await manager.removeWorktree(first, force: false)
     #expect(!FileManager.default.fileExists(atPath: first.worktreePath))
-    #expect(
-        try gitOutput(
-            ["show-ref", "--verify", "--quiet", "refs/heads/\(first.branch)"],
-            in: repository
-        ).isEmpty
+    try runGit(
+        ["show-ref", "--verify", "--quiet", "refs/heads/\(first.branch)"],
+        in: repository
     )
 
     try Data("dirty\n".utf8).write(
@@ -1080,11 +1233,9 @@ func oneBuilderProfileGetsUniqueSessionWorktreesAndCleanupRetainsBranches() asyn
     #expect(try await manager.worktreeIsDirty(second))
     try await manager.removeWorktree(second, force: true)
     #expect(!FileManager.default.fileExists(atPath: second.worktreePath))
-    #expect(
-        try gitOutput(
-            ["show-ref", "--verify", "--quiet", "refs/heads/\(second.branch)"],
-            in: repository
-        ).isEmpty
+    try runGit(
+        ["show-ref", "--verify", "--quiet", "refs/heads/\(second.branch)"],
+        in: repository
     )
 
     let unsafe = GitWorktreeOwnership(
@@ -3586,6 +3737,76 @@ func implementationBotRunsInsideItsOwnedWorktree() async throws {
     #expect(await runtime.respondedDirectories == [ownership.worktreePath])
     #expect(model.profiles.first?.worktree == ownership)
     #expect(model.profiles.first?.workingDirectory == ownership.repositoryPath)
+}
+
+@MainActor
+@Test
+func nonInitialBuilderTabReusesItsOwnWorktreeAcrossProfileSettingChanges() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-reuse-tab-worktree-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    var profile = BotProfile.defaults[0]
+    profile.workingDirectory = "/tmp/project"
+    profile.worktree = nil
+    let sessionID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: profile.id,
+        ownerSessionID: sessionID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-session",
+        branch: "bl00p/session",
+        baseRevision: "abc123"
+    )
+    let package = GitHandoffPackage(
+        sourceProfileID: profile.id,
+        sourceName: profile.name,
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "def456",
+        taskContext: "Reuse the tab worktree",
+        testStatus: .notRun,
+        testSummary: "Not run",
+        workingTreeSummary: "Clean"
+    )
+    let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    store.save(
+        PersistedAppState(
+            profiles: [profile],
+            sessions: [
+                sessionID: AgentSessionState(
+                    id: sessionID,
+                    ownerProfileID: profile.id,
+                    worktree: ownership
+                )
+            ],
+            selectedBotID: profile.id,
+            sessionOrder: [profile.id: [sessionID]],
+            selectedSessionIDs: [profile.id: sessionID]
+        )
+    )
+    let worktrees = ReuseRecordingWorktreeManager(
+        package: package,
+        ownership: ownership
+    )
+    let model = AppModel(
+        runtime: HandoffRecordingRuntime(),
+        worktrees: worktrees,
+        store: store
+    )
+
+    var updated = try #require(model.profiles.first)
+    updated.workingDirectory = "/tmp/a-different-default"
+    model.update(updated)
+    #expect(model.sessions[sessionID]?.worktree == ownership)
+
+    model.send("Continue", to: profile.id)
+    for _ in 0..<30 where await worktrees.receivedWorktree == nil {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(await worktrees.receivedWorktree == ownership)
+    #expect(await worktrees.receivedWorkingDirectory == ownership.repositoryPath)
 }
 
 @Test
@@ -6375,6 +6596,35 @@ private actor StubWorktreeManager: GitWorktreeManaging {
     }
 }
 
+private actor ReuseRecordingWorktreeManager: GitWorktreeManaging {
+    let package: GitHandoffPackage
+    let ownership: GitWorktreeOwnership
+    private(set) var receivedWorktree: GitWorktreeOwnership?
+    private(set) var receivedWorkingDirectory: String?
+
+    init(package: GitHandoffPackage, ownership: GitWorktreeOwnership) {
+        self.package = package
+        self.ownership = ownership
+    }
+
+    func prepareWorktree(
+        for profile: BotProfile,
+        startingPoint: String?,
+        handoffID: UUID?
+    ) async throws -> GitWorktreeOwnership {
+        receivedWorktree = profile.worktree
+        receivedWorkingDirectory = profile.workingDirectory
+        return ownership
+    }
+
+    func makeHandoff(
+        from profile: BotProfile,
+        session: AgentSessionState
+    ) async throws -> GitHandoffPackage {
+        package
+    }
+}
+
 private actor FailingCleanupWorktreeManager: GitWorktreeManaging {
     let ownership: GitWorktreeOwnership
 
@@ -6406,6 +6656,43 @@ private actor FailingCleanupWorktreeManager: GitWorktreeManaging {
         force: Bool
     ) async throws {
         throw GitWorktreeError.commandFailed("Simulated cleanup failure.")
+    }
+}
+
+private actor UnremovableWorktreeManager: GitWorktreeManaging {
+    let ownership: GitWorktreeOwnership
+    private(set) var removeCount = 0
+
+    init(ownership: GitWorktreeOwnership) {
+        self.ownership = ownership
+    }
+
+    func prepareWorktree(
+        for profile: BotProfile,
+        startingPoint: String?,
+        handoffID: UUID?
+    ) async throws -> GitWorktreeOwnership {
+        ownership
+    }
+
+    func makeHandoff(
+        from profile: BotProfile,
+        session: AgentSessionState
+    ) async throws -> GitHandoffPackage {
+        throw GitWorktreeError.commandFailed("No handoff expected.")
+    }
+
+    func worktreeIsDirty(_ ownership: GitWorktreeOwnership) async throws -> Bool {
+        throw GitWorktreeError.conflictingWorktree(
+            "The worktree is on a different branch."
+        )
+    }
+
+    func removeWorktree(
+        _ ownership: GitWorktreeOwnership,
+        force: Bool
+    ) async throws {
+        removeCount += 1
     }
 }
 
@@ -6953,6 +7240,51 @@ private actor SessionRecordingRuntime: AgentRuntime {
     }
 
     func stop(profile: BotProfile) async {}
+}
+
+private actor LateEventRuntime: AgentRuntime {
+    private var continuation: AsyncStream<AgentEvent>.Continuation?
+    private(set) var didStartResponse = false
+
+    func start(
+        profile: BotProfile,
+        resumeThreadID: String?
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(.sessionID("late-\(profile.id.uuidString)"))
+            continuation.yield(.status(.needsAnswer))
+            continuation.finish()
+        }
+    }
+
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        let pair = AsyncStream.makeStream(of: AgentEvent.self)
+        continuation = pair.continuation
+        didStartResponse = true
+        pair.continuation.yield(.status(.working))
+        return pair.stream
+    }
+
+    func resolveApproval(
+        entryID: UUID,
+        approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func stop(profile: BotProfile) async {}
+
+    func emitLateEvent() {
+        continuation?.yield(.entry(.init(kind: .assistant, text: "Too late")))
+        continuation?.yield(.status(.completed))
+        continuation?.finish()
+        continuation = nil
+    }
 }
 
 private actor FailOnceRuntime: AgentRuntime {

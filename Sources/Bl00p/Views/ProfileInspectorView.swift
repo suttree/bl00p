@@ -3,6 +3,7 @@ import SwiftUI
 struct ProfileInspectorView: View {
     @Binding var profile: BotProfile
     let profiles: [BotProfile]
+    let currentWorktree: GitWorktreeOwnership?
     let chooseDirectory: () -> Void
 
     var body: some View {
@@ -73,7 +74,7 @@ struct ProfileInspectorView: View {
                         .help("Browse for a working directory")
                     }
 
-                    if let worktree = profile.worktree {
+                    if let worktree = currentWorktree {
                         VStack(alignment: .leading, spacing: 3) {
                             Label(worktree.branch, systemImage: "arrow.triangle.branch")
                                 .font(.bl00p(.caption1, weight: .semibold))

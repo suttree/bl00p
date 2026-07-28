@@ -100,6 +100,9 @@ struct ConversationView: View {
             .onChange(of: draft) { _, updated in
                 model.updateDraft(updated, for: sessionID)
             }
+            .onChange(of: sessionID) { previousSessionID, _ in
+                model.persistDraft(for: previousSessionID)
+            }
             .alert(
                 closeRequest?.assessment.requiresDestructiveConfirmation == true
                     ? "Close this chat and clean up its worktree?"
@@ -139,15 +142,11 @@ struct ConversationView: View {
 
     private func requestClose(_ sessionID: UUID) {
         Task {
-            do {
-                let assessment = try await model.closeAssessment(for: sessionID)
-                closeRequest = SessionCloseRequest(
-                    sessionID: sessionID,
-                    assessment: assessment
-                )
-            } catch {
-                closeError = error.localizedDescription
-            }
+            let assessment = await model.closeAssessment(for: sessionID)
+            closeRequest = SessionCloseRequest(
+                sessionID: sessionID,
+                assessment: assessment
+            )
         }
     }
 
@@ -180,6 +179,14 @@ private struct SessionCloseRequest: Identifiable {
         }
         if assessment.hasDirtyWorktree {
             warnings.append("The worktree has uncommitted changes and will be removed.")
+        }
+        if assessment.leavesWorktreeOnDisk {
+            warnings.append(
+                "The worktree cannot be safely removed automatically and will be left on disk."
+            )
+            if let detail = assessment.worktreeWarning {
+                warnings.append(detail)
+            }
         }
         if assessment.participatesInWorkflow {
             warnings.append("Its managed workflow will be paused.")
@@ -474,6 +481,7 @@ private struct TranscriptView: View {
                         .frame(height: 24)
                         .id(sessionID)
                 }
+                .scrollTargetLayout()
                 .padding(.horizontal, 32)
                 .padding(.top, 24)
                 .frame(maxWidth: 884)

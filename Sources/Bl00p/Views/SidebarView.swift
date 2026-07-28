@@ -92,6 +92,17 @@ struct SidebarView: View {
         } message: {
             Text("Choose the name shown in the sidebar and conversation.")
         }
+        .alert(
+            "Could not delete bot",
+            isPresented: Binding(
+                get: { model.profileDeletionError != nil },
+                set: { if !$0 { model.profileDeletionError = nil } }
+            )
+        ) {
+            Button("OK") {}
+        } message: {
+            Text(model.profileDeletionError ?? "")
+        }
     }
 
     private var brand: some View {

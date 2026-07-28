@@ -45,9 +45,12 @@ struct SessionCloseAssessment: Equatable, Sendable {
     var isActive: Bool
     var hasDirtyWorktree: Bool
     var participatesInWorkflow: Bool
+    var leavesWorktreeOnDisk: Bool = false
+    var worktreeWarning: String? = nil
 
     var requiresDestructiveConfirmation: Bool {
         isActive || hasDirtyWorktree || participatesInWorkflow
+            || leavesWorktreeOnDisk
     }
 }
 
@@ -61,6 +64,7 @@ final class AppModel: ObservableObject {
     @Published var selectedBotID: UUID?
     @Published var isInspectorVisible = false
     @Published var isAddingBot = false
+    @Published var profileDeletionError: String?
 
     private let runtime: any AgentRuntime
     private let worktrees: any GitWorktreeManaging
@@ -71,6 +75,7 @@ final class AppModel: ObservableObject {
     private var connectedProfileIDs: Set<UUID> = []
     private var inFlightUserEntryIDs: [UUID: UUID] = [:]
     private var planningTurnAssistantEntryIDs: [UUID: Set<UUID>] = [:]
+    private var draftSaveTasks: [UUID: Task<Void, Never>] = [:]
     private var notificationsArePrepared = false
     private var persistenceRevision: UInt64 = 0
     private var launchedProfileIDs: Set<UUID> = []
@@ -193,7 +198,31 @@ final class AppModel: ObservableObject {
             sessions = restoredSessions
             sessionOrder = restoredOrder
             selectedSessionIDs = restoredSelections
-            managerWorkflows = saved.managerWorkflows
+            managerWorkflows = Dictionary(
+                uniqueKeysWithValues: saved.managerWorkflows.map {
+                    managerID, workflow in
+                    var restored = workflow
+                    if restored.participantSessionIDs.isEmpty {
+                        restored.participantSessionIDs[.manager] = managerID
+                        if let profileID =
+                            restored.team.builderProfileID {
+                            restored.participantSessionIDs[.builder] =
+                                restoredSelections[profileID] ?? profileID
+                        }
+                        if let profileID =
+                            restored.team.reviewerProfileID {
+                            restored.participantSessionIDs[.reviewer] =
+                                restoredSelections[profileID] ?? profileID
+                        }
+                        if let profileID =
+                            restored.team.publisherProfileID {
+                            restored.participantSessionIDs[.publisher] =
+                                restoredSelections[profileID] ?? profileID
+                        }
+                    }
+                    return (managerID, restored)
+                }
+            )
             selectedBotID = saved.selectedBotID ?? saved.profiles.first?.id
             let recoveredPlanApproval =
                 reconcileRestoredWorkflowPlanApprovals()
@@ -420,10 +449,22 @@ final class AppModel: ObservableObject {
         session.draft = draft
         session.updatedAt = .now
         sessions[sessionID] = session
-        save()
+        draftSaveTasks[sessionID]?.cancel()
+        draftSaveTasks[sessionID] = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled, let self else { return }
+            draftSaveTasks[sessionID] = nil
+            save(immediately: true)
+        }
     }
 
-    func closeAssessment(for sessionID: UUID) async throws -> SessionCloseAssessment {
+    func persistDraft(for sessionID: UUID) {
+        draftSaveTasks[sessionID]?.cancel()
+        draftSaveTasks[sessionID] = nil
+        save(immediately: true)
+    }
+
+    func closeAssessment(for sessionID: UUID) async -> SessionCloseAssessment {
         guard let session = sessions[sessionID] else {
             return SessionCloseAssessment(
                 isActive: false,
@@ -432,10 +473,16 @@ final class AppModel: ObservableObject {
             )
         }
         let isActive = session.status == .working || session.status == .launching
-        let dirty = if let worktree = session.worktree {
-            try await worktrees.worktreeIsDirty(worktree)
-        } else {
-            false
+        var dirty = false
+        var leavesWorktreeOnDisk = false
+        var worktreeWarning: String?
+        if let worktree = session.worktree {
+            do {
+                dirty = try await worktrees.worktreeIsDirty(worktree)
+            } catch {
+                leavesWorktreeOnDisk = true
+                worktreeWarning = error.localizedDescription
+            }
         }
         let participates = managerWorkflows.contains { managerSessionID, workflow in
             workflow.stage != .completed
@@ -445,7 +492,9 @@ final class AppModel: ObservableObject {
         return SessionCloseAssessment(
             isActive: isActive,
             hasDirtyWorktree: dirty,
-            participatesInWorkflow: participates
+            participatesInWorkflow: participates,
+            leavesWorktreeOnDisk: leavesWorktreeOnDisk,
+            worktreeWarning: worktreeWarning
         )
     }
 
@@ -462,7 +511,7 @@ final class AppModel: ObservableObject {
         }
 
         do {
-            let assessment = try await closeAssessment(for: sessionID)
+            let assessment = await closeAssessment(for: sessionID)
             guard !assessment.requiresDestructiveConfirmation
                     || confirmedDestructiveCleanup else {
                 return "This chat needs confirmation before it can be closed."
@@ -471,11 +520,14 @@ final class AppModel: ObservableObject {
             runGenerations[sessionID] = UUID()
             connectedProfileIDs.remove(sessionID)
             inFlightUserEntryIDs.removeValue(forKey: sessionID)
+            draftSaveTasks[sessionID]?.cancel()
+            draftSaveTasks[sessionID] = nil
             await runtime.stop(
                 profile: runtimeProfile(for: profile, sessionID: sessionID)
             )
 
-            if let worktree = session.worktree {
+            if let worktree = session.worktree,
+               !assessment.leavesWorktreeOnDisk {
                 try await worktrees.removeWorktree(
                     worktree,
                     force: assessment.hasDirtyWorktree
@@ -484,15 +536,22 @@ final class AppModel: ObservableObject {
 
             for managerID in Array(managerWorkflows.keys) {
                 guard var workflow = managerWorkflows[managerID],
-                      workflow.stage != .completed,
                       managerID == sessionID
-                        || workflow.participantSessionIDs.values.contains(sessionID) else {
+                        || (workflow.stage != .completed
+                            && workflow.participantSessionIDs.values.contains(sessionID)) else {
                     continue
                 }
-                workflow.isPaused = true
-                workflow.pauseReason = "A participating chat session was closed."
-                workflow.updatedAt = .now
-                managerWorkflows[managerID] = workflow
+                if managerID == sessionID {
+                    managerWorkflows[managerID] = nil
+                } else {
+                    workflow.participantSessionIDs = workflow
+                        .participantSessionIDs
+                        .filter { $0.value != sessionID }
+                    workflow.isPaused = true
+                    workflow.pauseReason = "A participating chat session was closed."
+                    workflow.updatedAt = .now
+                    managerWorkflows[managerID] = workflow
+                }
             }
 
             sessions[sessionID] = nil
@@ -519,7 +578,12 @@ final class AppModel: ObservableObject {
 
     func workflow(for managerProfileID: UUID) -> ManagerWorkflow? {
         let sessionID = selectedSessionID(for: managerProfileID) ?? managerProfileID
-        return managerWorkflows[sessionID] ?? managerWorkflows[managerProfileID]
+        if let workflow = managerWorkflows[sessionID] {
+            return workflow
+        }
+        return sessionID == managerProfileID
+            ? managerWorkflows[managerProfileID]
+            : nil
     }
 
     func isManagerTeamReady(_ managerProfileID: UUID) -> Bool {
@@ -580,6 +644,7 @@ final class AppModel: ObservableObject {
 
     func delete(_ profileID: UUID) {
         guard profiles.count > 1 else { return }
+        profileDeletionError = nil
         let ownedSessionIDs = sessionOrder[profileID] ?? []
         let requiresCleanup = ownedSessionIDs.contains { sessionID in
             guard let session = sessions[sessionID] else { return false }
@@ -591,11 +656,18 @@ final class AppModel: ObservableObject {
             Task { [weak self] in
                 guard let self else { return }
                 for sessionID in ownedSessionIDs {
-                    guard await closeSession(
+                    let assessment = await closeAssessment(for: sessionID)
+                    if assessment.leavesWorktreeOnDisk {
+                        profileDeletionError =
+                            "This bot has a worktree that cannot be removed safely. Close that chat first and choose to leave its worktree on disk."
+                        return
+                    }
+                    if let error = await closeSession(
                         sessionID,
                         confirmedDestructiveCleanup: true,
                         ensureReplacement: false
-                    ) == nil else {
+                    ) {
+                        profileDeletionError = error
                         return
                     }
                 }
@@ -626,6 +698,8 @@ final class AppModel: ObservableObject {
             inFlightUserEntryIDs.removeValue(forKey: sessionID)
             planningTurnAssistantEntryIDs.removeValue(forKey: sessionID)
             runGenerations[sessionID] = UUID()
+            draftSaveTasks[sessionID]?.cancel()
+            draftSaveTasks[sessionID] = nil
             sessions[sessionID] = nil
             managerWorkflows[sessionID] = nil
         }
@@ -790,7 +864,7 @@ final class AppModel: ObservableObject {
               let chatID = selectedSessionID(for: profileID) else {
             return
         }
-        let state = sessions[chatID] ?? AgentSessionState()
+        guard let state = sessions[chatID] else { return }
         guard state.status != .launching, state.status != .working else {
             return
         }
@@ -828,7 +902,7 @@ final class AppModel: ObservableObject {
 
     func retry(_ entryID: UUID, for profileID: UUID) {
         guard let chatID = selectedSessionID(for: profileID) else { return }
-        let state = sessions[chatID] ?? AgentSessionState()
+        guard let state = sessions[chatID] else { return }
         guard state.status.allowsFailedMessageRetry,
               let entry = state.entries.first(where: { $0.id == entryID }),
               entry.kind == .user,
@@ -860,7 +934,8 @@ final class AppModel: ObservableObject {
             return
         }
 
-        let currentState = sessions[chatID] ?? AgentSessionState()
+        guard let currentState = sessions[chatID],
+              currentState.ownerProfileID == profileID else { return }
         guard currentState.status != .launching, currentState.status != .working else { return }
 
         let shouldLaunch = !connectedProfileIDs.contains(chatID)
@@ -898,6 +973,7 @@ final class AppModel: ObservableObject {
         if shouldLaunch {
             launchedProfileIDs.remove(profileID)
         }
+        resumeWorkflowsForExplicitSend(to: chatID)
 
         Task { [weak self] in
             guard let self else { return }
@@ -949,7 +1025,7 @@ final class AppModel: ObservableObject {
             }
 
             if pendingHandoff != nil {
-                var handoffConsumed = sessions[chatID] ?? AgentSessionState()
+                guard var handoffConsumed = sessions[chatID] else { return }
                 handoffConsumed.pendingHandoff = nil
                 sessions[chatID] = handoffConsumed
                 save()
@@ -1139,7 +1215,7 @@ final class AppModel: ObservableObject {
               sessions[sourceSessionID]?.status != .working,
               sessions[sourceSessionID]?.status != .launching else { return }
 
-        let sourceSession = sessions[sourceSessionID] ?? AgentSessionState()
+        guard let sourceSession = sessions[sourceSessionID] else { return }
         var sourceForHandoff = source
         sourceForHandoff.worktree = sourceSession.worktree
         Task { [weak self] in
@@ -1162,6 +1238,10 @@ final class AppModel: ObservableObject {
                 launchedProfileIDs.remove(targetProfileID)
                 runGenerations[targetSessionID] = UUID()
 
+                guard var targetSession = sessions[targetSessionID],
+                      var updatedSourceSession = sessions[sourceSessionID] else {
+                    return
+                }
                 if let targetIndex = profiles.firstIndex(
                     where: { $0.id == targetProfileID }
                 ) {
@@ -1174,7 +1254,6 @@ final class AppModel: ObservableObject {
                     }
                 }
 
-                var targetSession = sessions[targetSessionID] ?? AgentSessionState()
                 targetSession.status = .stopped
                 targetSession.sessionID = nil
                 targetSession.pendingHandoff = package
@@ -1188,8 +1267,6 @@ final class AppModel: ObservableObject {
                 )
                 sessions[targetSessionID] = targetSession
 
-                var updatedSourceSession =
-                    sessions[sourceSessionID] ?? AgentSessionState()
                 updatedSourceSession.entries.append(
                     .init(
                         kind: .system,
@@ -1242,8 +1319,13 @@ final class AppModel: ObservableObject {
 
         do {
             let startedAt = ContinuousClock.now
+            var worktreeProfile = profile
+            worktreeProfile.worktree = sessions[chatID]?.worktree
+            if let existingWorktree = worktreeProfile.worktree {
+                worktreeProfile.workingDirectory = existingWorktree.repositoryPath
+            }
             let ownership = try await worktrees.prepareWorktree(
-                for: profile,
+                for: worktreeProfile,
                 sessionID: chatID,
                 startingPoint: handoff?.branch,
                 handoffID: handoff?.id
@@ -1254,12 +1336,14 @@ final class AppModel: ObservableObject {
                 duration: startedAt.duration(to: .now),
                 profile: profile
             )
-            if var session = sessions[chatID] {
-                session.worktreeSeedID = nil
-                session.worktree = ownership
-                session.updatedAt = .now
-                sessions[chatID] = session
+            guard var session = sessions[chatID] else {
+                try? await worktrees.removeWorktree(ownership, force: false)
+                return nil
             }
+            session.worktreeSeedID = nil
+            session.worktree = ownership
+            session.updatedAt = .now
+            sessions[chatID] = session
             // Keep the original tab's mirrored value for decoding compatibility
             // with pre-tab state. New tabs never write ownership onto the bot.
             if chatID == profile.id,
@@ -1381,6 +1465,36 @@ final class AppModel: ObservableObject {
            let participantID = selectedSessionID(for: profileID) {
             participants[.publisher] = participantID
         }
+        guard participants.count == AgentRole.allCases.count else {
+            append(
+                .init(
+                    kind: .system,
+                    text: "Could not start managed workflow",
+                    detail: "Every assigned bot needs an available chat session."
+                ),
+                to: sessionID
+            )
+            return false
+        }
+        let claimedSessionIDs = Set(
+            managerWorkflows
+                .filter { workflowID, workflow in
+                    workflowID != sessionID && workflow.stage != .completed
+                }
+                .flatMap { $0.value.participantSessionIDs.values }
+        )
+        let conflicts = Set(participants.values).intersection(claimedSessionIDs)
+        guard conflicts.isEmpty else {
+            append(
+                .init(
+                    kind: .system,
+                    text: "Could not start managed workflow",
+                    detail: "One or more selected participant chats are already assigned to an active workflow."
+                ),
+                to: sessionID
+            )
+            return false
+        }
         managerWorkflows[sessionID] = ManagerWorkflow(
             managerProfileID: manager.id,
             team: team,
@@ -1441,6 +1555,11 @@ final class AppModel: ObservableObject {
         guard previousStatus != status else { return }
         let matchingManagerIDs = managerWorkflows.compactMap { managerID, workflow in
             workflow.stage != .completed
+                && (!workflow.isPaused
+                    || status == .launching
+                    || status == .working)
+                && (workflow.participantSessionIDs.isEmpty
+                    || workflow.participantSessionIDs.values.contains(profileID))
                 && expectedProfileID(for: workflow) == profileID
                 ? managerID
                 : nil
@@ -1505,6 +1624,22 @@ final class AppModel: ObservableObject {
         workflow.updatedAt = .now
         managerWorkflows[managerID] = workflow
         save(immediately: true)
+    }
+
+    private func resumeWorkflowsForExplicitSend(to sessionID: UUID) {
+        let managerIDs: [UUID] = managerWorkflows.compactMap { managerID, workflow in
+            guard workflow.isPaused,
+                  workflow.planApprovalEntryID == nil,
+                  expectedProfileID(for: workflow) == sessionID,
+                  workflow.participantSessionIDs.isEmpty
+                    || workflow.participantSessionIDs.values.contains(sessionID) else {
+                return nil
+            }
+            return managerID
+        }
+        for managerID in managerIDs {
+            resumeWorkflowIndicator(managerID)
+        }
     }
 
     private func transitionWorkflow(
@@ -2420,15 +2555,15 @@ final class AppModel: ObservableObject {
             }
         }
 
-        var state = sessions[sessionID] ?? AgentSessionState(
-            id: sessionID,
-            ownerProfileID: profileID
-        )
+        guard var state = sessions[sessionID] else { return false }
         state.status = .stopped
         state.sessionID = nil
         state.codexTurnModeVersion = nil
         state.pendingHandoff = handoff
         state.worktreeSeedID = worktreeSeedID
+        if worktreeSeedID != nil || handoff != nil {
+            state.worktree = nil
+        }
         if let handoff {
             let sourceName = profileName(
                 sourceProfileID ?? handoff.sourceProfileID
@@ -2453,9 +2588,7 @@ final class AppModel: ObservableObject {
         to targetProfileID: UUID,
         title: String
     ) {
-        var state = sessions[targetProfileID] ?? AgentSessionState(
-            id: targetProfileID
-        )
+        guard var state = sessions[targetProfileID] else { return }
         state.pendingHandoff = package
         state.entries.append(
             .init(
@@ -2752,7 +2885,7 @@ final class AppModel: ObservableObject {
         to profileID: UUID,
         immediately: Bool = false
     ) {
-        var state = sessions[profileID] ?? AgentSessionState()
+        guard var state = sessions[profileID] else { return }
         state.entries.append(entry)
         state.updatedAt = .now
         sessions[profileID] = state
