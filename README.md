@@ -11,7 +11,7 @@ The current prototype includes:
 - Automatic light and dark appearances that follow the macOS system setting
 - Signed automatic updates through GitHub Releases, with install and relaunch
 - Consistent, legible typography across conversations, settings, and bot creation
-- Structured messages, commands, findings, and approval cards
+- Structured messages, commands, findings, approval cards, and interactive question cards
 - Optional Manager bots that coordinate a persistent Builder → Reviewer →
   Builder fixes → Reviewer re-check → Documenter / PR Writer workflow
 - Isolated managed Git worktrees for implementation bots, with handoff packages
@@ -81,6 +81,14 @@ persisted workflow with this sequence:
 Questions, failures, and approval requests pause the workflow for the user.
 Leaving any team assignment unset keeps that Manager in standalone chat mode.
 
+When Claude or Codex needs a decision during a turn, bl00p shows the prompt as
+an approval-style question card in the conversation. Choose an option, enter a
+custom answer when offered, and select **Continue**; multi-select prompts can
+accept more than one option. **Decline** returns a cancellation to the active
+runtime. Prompts are presented one at a time, the composer stays locked while
+an answer is being submitted, and the conversation resumes after the provider
+accepts the response.
+
 ## Runtime boundary
 
 `AgentRuntime` is intentionally provider-neutral. Codex profiles use the
@@ -97,6 +105,10 @@ Builder and Documenter roles, common test commands, and read-only Linear tools.
 Manager and Reviewer roles cannot edit files. Actions outside that allowlist
 pause in the conversation, where the user can approve or decline the exact
 tool call before Claude continues.
+
+Interactive question handling is documented in
+[docs/INTERACTIVE-QUESTIONS.md](docs/INTERACTIVE-QUESTIONS.md), including the
+provider adapter contract and response lifecycle.
 
 ## Roadmap
 
