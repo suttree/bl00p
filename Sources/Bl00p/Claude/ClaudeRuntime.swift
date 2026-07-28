@@ -965,37 +965,67 @@ enum ClaudePermissionDenials {
     }
 
     private static func primaryShellAction(_ command: String) -> String {
-        let action: Substring
-        if let operatorIndex = firstUnquotedOutputOperator(in: command) {
-            var actionEnd = operatorIndex
-            if command[operatorIndex] == ">" {
-                var descriptorStart = actionEnd
-                while descriptorStart > command.startIndex {
-                    let previous = command.index(before: descriptorStart)
-                    guard command[previous].isNumber else { break }
-                    descriptorStart = previous
-                }
-                if descriptorStart == command.startIndex
-                    || command[
-                        command.index(before: descriptorStart)
-                    ].isWhitespace {
-                    actionEnd = descriptorStart
-                }
+        let normalized = normalizedShellWhitespace(in: command)
+        var action = normalized
+
+        if let pipeIndex = firstUnquotedPipe(in: normalized) {
+            let suffixStart = normalized.index(after: pipeIndex)
+            let suffix = normalized[suffixStart...]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if ["tail -20", "tail -n 20"].contains(suffix) {
+                action = String(normalized[..<pipeIndex])
             }
-            action = command[..<actionEnd]
-        } else {
-            action = command[...]
         }
-        let normalized = action.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-        if normalized.hasPrefix("xcrun swift ") {
-            return String(normalized.dropFirst("xcrun ".count))
+
+        action = action.trimmingCharacters(in: .whitespacesAndNewlines)
+        if action.hasSuffix(" 2>&1") {
+            action.removeLast(" 2>&1".count)
         }
-        return normalized
+        if action.hasPrefix("xcrun swift ") {
+            return String(action.dropFirst("xcrun ".count))
+        }
+        return action
     }
 
-    private static func firstUnquotedOutputOperator(
+    private static func normalizedShellWhitespace(
+        in command: String
+    ) -> String {
+        var result = ""
+        var quote: Character?
+        var isEscaped = false
+        var hasPendingWhitespace = false
+        var index = command.startIndex
+
+        while index < command.endIndex {
+            let character = command[index]
+            if quote == nil, !isEscaped, character.isWhitespace {
+                hasPendingWhitespace = !result.isEmpty
+                index = command.index(after: index)
+                continue
+            }
+            if hasPendingWhitespace {
+                result.append(" ")
+                hasPendingWhitespace = false
+            }
+            result.append(character)
+
+            if isEscaped {
+                isEscaped = false
+            } else if character == "\\", quote != "'" {
+                isEscaped = true
+            } else if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                }
+            } else if character == "'" || character == "\"" {
+                quote = character
+            }
+            index = command.index(after: index)
+        }
+        return result
+    }
+
+    private static func firstUnquotedPipe(
         in command: String
     ) -> String.Index? {
         var quote: Character?
@@ -1014,7 +1044,7 @@ enum ClaudePermissionDenials {
                 }
             } else if character == "'" || character == "\"" {
                 quote = character
-            } else if character == "|" || character == ">" {
+            } else if character == "|" {
                 return index
             }
             index = command.index(after: index)

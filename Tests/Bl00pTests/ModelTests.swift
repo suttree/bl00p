@@ -1315,6 +1315,39 @@ func jsonValueAcceptsFoundationJSONObjects() throws {
 }
 
 @Test
+func jsonValueCompactDescriptionSortsObjectKeys() {
+    let first = JSONValue.object([
+        "zeta": .number(2),
+        "alpha": .object([
+            "two": .bool(true),
+            "one": .string("first")
+        ])
+    ])
+    let second = JSONValue.object([
+        "alpha": .object([
+            "one": .string("first"),
+            "two": .bool(true)
+        ]),
+        "zeta": .number(2)
+    ])
+
+    #expect(first.compactDescription == second.compactDescription)
+    #expect(
+        first.compactDescription
+            == #"{"alpha":{"one":"first","two":true},"zeta":2}"#
+    )
+    #expect(
+        ClaudePermissionDenials.actionKey(
+            toolName: "Edit",
+            toolInput: first
+        ) == ClaudePermissionDenials.actionKey(
+            toolName: "Edit",
+            toolInput: second
+        )
+    )
+}
+
+@Test
 func locatesBundledCodexBeforeBrokenShellShims() throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("bl00p-codex-locator-\(UUID().uuidString)")
@@ -1375,14 +1408,18 @@ func claudeBuilderInvocationIsResumableAndConservative() throws {
     #expect(invocation.arguments.contains("Write"))
     #expect(invocation.arguments.contains("Bash(swift build)"))
     #expect(invocation.arguments.contains("Bash(swift build *)"))
+    #expect(invocation.arguments.contains("Bash(swift build:*)"))
     #expect(invocation.arguments.contains("Bash(swift test)"))
     #expect(invocation.arguments.contains("Bash(swift test *)"))
+    #expect(invocation.arguments.contains("Bash(swift test:*)"))
     #expect(invocation.arguments.contains("Bash(xcrun swift build)"))
     #expect(invocation.arguments.contains("Bash(xcrun swift build *)"))
+    #expect(invocation.arguments.contains("Bash(xcrun swift build:*)"))
     #expect(invocation.arguments.contains("Bash(xcrun swift test)"))
     #expect(invocation.arguments.contains("Bash(xcrun swift test *)"))
-    #expect(invocation.arguments.contains("Bash(tail)"))
-    #expect(invocation.arguments.contains("Bash(tail *)"))
+    #expect(invocation.arguments.contains("Bash(xcrun swift test:*)"))
+    #expect(invocation.arguments.contains("Bash(tail -20)"))
+    #expect(!invocation.arguments.contains("Bash(tail *)"))
     #expect(invocation.arguments.contains("--input-format"))
     #expect(invocation.arguments.contains("--permission-prompt-tool"))
     #expect(invocation.arguments.contains("stdio"))
@@ -1392,8 +1429,6 @@ func claudeBuilderInvocationIsResumableAndConservative() throws {
     #expect(invocation.arguments[permissionModeIndex + 1] == "default")
     #expect(!invocation.arguments.contains("dontAsk"))
     let toolRules = invocation.arguments.filter { $0.hasPrefix("Bash(") }
-    #expect(!toolRules.contains("Bash(swift build:*)"))
-    #expect(!toolRules.contains("Bash(swift test:*)"))
     #expect(!toolRules.contains(where: { $0.contains("git push") }))
     #expect(!toolRules.contains(where: { $0.contains("git reset") }))
     #expect(
@@ -1420,8 +1455,10 @@ func claudeReviewerInvocationStaysReadOnly() throws {
     #expect(invocation.arguments.contains("Bash(git diff:*)"))
     #expect(invocation.arguments.contains("Bash(swift build)"))
     #expect(invocation.arguments.contains("Bash(swift build *)"))
+    #expect(invocation.arguments.contains("Bash(swift build:*)"))
     #expect(invocation.arguments.contains("Bash(xcrun swift test)"))
     #expect(invocation.arguments.contains("Bash(xcrun swift test *)"))
+    #expect(invocation.arguments.contains("Bash(xcrun swift test:*)"))
 }
 
 @Test
@@ -1446,6 +1483,7 @@ func claudePublisherInvocationUsesExplicitBuildAndTestRules() throws {
     ] {
         #expect(invocation.arguments.contains("Bash(\(command))"))
         #expect(invocation.arguments.contains("Bash(\(command) *)"))
+        #expect(invocation.arguments.contains("Bash(\(command):*)"))
     }
 }
 
@@ -1470,47 +1508,6 @@ func claudeInvocationKeepsProjectDeniesAndInteractiveApprovalsEnabled() throws {
     #expect(invocation.arguments.contains("--permission-prompt-tool"))
     #expect(invocation.arguments.contains("--permission-mode"))
     #expect(!invocation.arguments.contains("--dangerously-skip-permissions"))
-}
-
-@Test
-func claudeBuildRulesCoverBareFlagsRedirectionAndPipelines() throws {
-    let invocation = try ClaudeInvocation(
-        sessionID: "64bfaf39-9db2-45b9-9f10-03a13ea2e772",
-        resume: false,
-        profile: BotProfile.defaults[1],
-        prompt: "Build and test"
-    )
-    let fixtures: [(command: String, requiredRules: [String])] = [
-        (
-            "swift build",
-            ["Bash(swift build)"]
-        ),
-        (
-            "swift build --configuration release",
-            ["Bash(swift build *)"]
-        ),
-        (
-            "swift build 2>&1",
-            ["Bash(swift build *)"]
-        ),
-        (
-            "swift build 2>&1 | tail -20",
-            ["Bash(swift build *)", "Bash(tail *)"]
-        ),
-        (
-            "xcrun swift test --filter ModelTests",
-            ["Bash(xcrun swift test *)"]
-        )
-    ]
-
-    for fixture in fixtures {
-        for rule in fixture.requiredRules {
-            #expect(
-                invocation.arguments.contains(rule),
-                "Missing \(rule) for \(fixture.command)"
-            )
-        }
-    }
 }
 
 @Test
@@ -1725,6 +1722,17 @@ func unmatchedClaudeCommandReachesTheApprovalCardFlow() async throws {
     assert "--permission-mode" in sys.argv
     mode_index = sys.argv.index("--permission-mode")
     assert sys.argv[mode_index + 1] == "default"
+    expected_rules = [
+        "Bash(swift build)",
+        "Bash(swift build *)",
+        "Bash(swift build:*)",
+        "Bash(xcrun swift test)",
+        "Bash(xcrun swift test *)",
+        "Bash(xcrun swift test:*)",
+        "Bash(tail -20)"
+    ]
+    assert all(rule in sys.argv for rule in expected_rules)
+    assert "Bash(tail *)" not in sys.argv
 
     for line in sys.stdin:
         message = json.loads(line)
@@ -1989,6 +1997,60 @@ func successfulRetryClearsStalePermissionDenials() throws {
             permissionDenials: unresolved
         ) == .completed
     )
+}
+
+@Test
+func successfulCommandDoesNotMaskBlockedPipelineOrRedirection() throws {
+    let blockedPipeline = JSONValue.object([
+        "tool_name": .string("Bash"),
+        "tool_input": .object([
+            "command": .string("swift build | upload-artifacts")
+        ])
+    ])
+    let blockedRedirection = JSONValue.object([
+        "tool_name": .string("Bash"),
+        "tool_input": .object([
+            "command": .string("swift build > /protected/build.log")
+        ])
+    ])
+    let successfulBuild = ClaudePermissionDenials.actionKey(
+        toolName: "Bash",
+        toolInput: .object([
+            "command": .string("swift build")
+        ])
+    )
+
+    let unresolved = ClaudePermissionDenials.unresolved(
+        [blockedPipeline, blockedRedirection],
+        resolvedActionKeys: [successfulBuild]
+    )
+
+    #expect(unresolved == [blockedPipeline, blockedRedirection])
+}
+
+@Test
+func permissionActionKeysNormalizeShellWhitespaceAndXcrun() {
+    let direct = ClaudePermissionDenials.actionKey(
+        toolName: "Bash",
+        toolInput: .object([
+            "command": .string("swift build")
+        ])
+    )
+    let wrapped = ClaudePermissionDenials.actionKey(
+        toolName: "Bash",
+        toolInput: .object([
+            "command": .string("  xcrun  swift \n build  ")
+        ])
+    )
+    let quotedWhitespace = ClaudePermissionDenials.actionKey(
+        toolName: "Bash",
+        toolInput: .object([
+            "command": .string(#"printf 'two  spaces'"#)
+        ])
+    )
+
+    #expect(wrapped == direct)
+    #expect(quotedWhitespace == #"Bash:printf 'two  spaces'"#)
 }
 
 @Test

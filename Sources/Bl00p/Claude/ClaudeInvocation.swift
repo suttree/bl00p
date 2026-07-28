@@ -177,12 +177,16 @@ struct ClaudeInvocation: Sendable {
                 "yarn test",
                 "cargo test",
                 "go test",
-                "pytest",
-                // Claude checks each pipeline segment independently.
-                "tail"
+                "pytest"
             ]
                 .flatMap(Self.exactAndArgumentBearingBashRules)
         )
+        // Claude checks each pipeline segment independently. Keep the output
+        // filter exact so this does not allow tail to read arbitrary paths.
+        tools.append(contentsOf: [
+            "Bash(tail -20)",
+            "Bash(tail -n 20)"
+        ])
 
         if profile.role == .builder || profile.role == .publisher {
             tools.append(contentsOf: ["Edit", "Write", "NotebookEdit"])
@@ -193,12 +197,13 @@ struct ClaudeInvocation: Sendable {
     private static func exactAndArgumentBearingBashRules(
         for command: String
     ) -> [String] {
-        // Claude's documented prefix form uses a space before the trailing
-        // wildcard. Keep the exact form too because it does not match a bare
-        // command.
+        // Keep the exact form for bare commands and emit both current and
+        // legacy argument-prefix forms for compatibility across Claude CLI
+        // matcher versions.
         [
             "Bash(\(command))",
-            "Bash(\(command) *)"
+            "Bash(\(command) *)",
+            "Bash(\(command):*)"
         ]
     }
 }
