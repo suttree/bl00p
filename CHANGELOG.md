@@ -46,6 +46,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Hand the Builder the exact implementation plan approved by the user, while
+  preserving the original request as separate context and pausing on an
+  inconsistent or missing plan.
 - Bound managed review revisions to two rounds, then pause with the remaining
   findings for user direction instead of looping indefinitely.
 - Preserve multi-entry reviewer findings while parsing the structured review
@@ -99,5 +102,7 @@ All notable changes to bl00p are documented in this file.
   bot profiles missing newer fields.
 - Cover Manager plan approval, visible team dispatch, restart persistence,
   read-only Codex configuration, and role-specific avatar colors.
+- Cover the approved-plan Builder handoff, including revised plans and missing
+  or inconsistent plan safeguards.
 - Cover idempotent plan-approval restoration, stale or duplicate approval-card
   cleanup, and relaunch behavior for unrelated runtime approvals.

@@ -505,6 +505,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     var request: String
     var implementationPlan: String?
     var planApprovalEntryID: UUID?
+    var approvedPlanEntryID: UUID?
     var stage: ManagerWorkflowStage
     var branch: String?
     var pullRequestURL: String?
@@ -526,6 +527,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         request: String,
         implementationPlan: String? = nil,
         planApprovalEntryID: UUID? = nil,
+        approvedPlanEntryID: UUID? = nil,
         stage: ManagerWorkflowStage = .planning,
         branch: String? = nil,
         pullRequestURL: String? = nil,
@@ -546,6 +548,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         self.request = request
         self.implementationPlan = implementationPlan
         self.planApprovalEntryID = planApprovalEntryID
+        self.approvedPlanEntryID = approvedPlanEntryID
         self.stage = stage
         self.branch = branch
         self.pullRequestURL = pullRequestURL

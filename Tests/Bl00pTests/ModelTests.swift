@@ -949,7 +949,9 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
             selectedBotID: managerID
         )
     )
-    let runtime = OrchestrationRecordingRuntime()
+    let runtime = OrchestrationRecordingRuntime(
+        managerPlanningResponses: [orchestrationImplementationPlan]
+    )
     let model = AppModel(
         runtime: runtime,
         worktrees: StubWorktreeManager(
@@ -959,7 +961,8 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
         store: store
     )
 
-    model.send("Add optional orchestration", to: managerID)
+    let originalRequest = "Add optional orchestration"
+    model.send(originalRequest, to: managerID)
 
     for _ in 0..<100
         where model.session(for: managerID).status != .needsApproval {
@@ -972,7 +975,7 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
             $0.kind == .approval && $0.approvalState == .pending
         })
     )
-    let planText = "Implement the feature with persistence and tests."
+    let planText = orchestrationImplementationPlan
     let managerEntries = model.session(for: managerID).entries
     let displayedPlanEntries = managerEntries.filter {
         $0.text == planText
@@ -1028,7 +1031,20 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
 
     let workflow = try #require(model.workflow(for: managerID))
     let calls = await runtime.calls
+    let builderBrief = try #require(
+        model.session(for: builderID).entries.first(where: {
+            $0.title == "Implementation brief"
+        })
+    )
+    let runtimePlan = try #require(
+        taggedField(
+            "approved_implementation_plan",
+            in: calls[1].message
+        )
+    )
     #expect(workflow.stage == .completed)
+    #expect(workflow.implementationPlan == orchestrationImplementationPlan)
+    #expect(workflow.approvedPlanEntryID == approvalEntry.id)
     #expect(workflow.branch == ownership.branch)
     #expect(
         workflow.reviewSummary?.contains(
@@ -1050,8 +1066,17 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
                 .publisher
             ]
     )
-    #expect(calls[1].message.contains("Manager brief:"))
-    #expect(calls[1].message.contains(planText))
+    #expect(builderBrief.text == orchestrationImplementationPlan)
+    #expect(
+        builderBrief.detail?.contains(
+            "Original request:\n\(originalRequest)"
+        ) == true
+    )
+    #expect(runtimePlan == orchestrationImplementationPlan)
+    #expect(
+        taggedField("original_request", in: calls[1].message)
+            == originalRequest
+    )
     #expect(calls[2].message.contains("Source branch: \(ownership.branch)"))
     #expect(calls[2].message.contains("Test state: Not run"))
     #expect(calls[3].message.contains("Review finding"))
@@ -1078,6 +1103,23 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
                 && $0.detail?.contains(revisedPackage.headRevision) == true
         })
     )
+
+    let restoredModel = AppModel(runtime: runtime, store: store)
+    let restoredWorkflow = try #require(
+        restoredModel.workflow(for: managerID)
+    )
+    let restoredApproval = try #require(
+        restoredModel.session(for: managerID).entries.first(where: {
+            $0.id == approvalEntry.id
+        })
+    )
+    #expect(
+        restoredWorkflow.implementationPlan
+            == orchestrationImplementationPlan
+    )
+    #expect(restoredWorkflow.approvedPlanEntryID == approvalEntry.id)
+    #expect(restoredApproval.text == orchestrationImplementationPlan)
+    #expect(restoredApproval.approvalState == .approved)
 }
 
 @MainActor
@@ -1987,7 +2029,16 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
             selectedBotID: manager.id
         )
     )
-    let runtime = OrchestrationRecordingRuntime()
+    let initialPlan = orchestrationImplementationPlan
+    let revisedPlan = """
+    ## Revised plan
+
+    1. Preserve every line.
+    2. Follow [the contract](https://example.com/handoff).
+    """
+    let runtime = OrchestrationRecordingRuntime(
+        managerPlanningResponses: [initialPlan, revisedPlan]
+    )
     let model = AppModel(runtime: runtime, store: store)
 
     model.send("Plan this change", to: manager.id)
@@ -2002,7 +2053,6 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
         })
     )
     await model.flushPersistence()
-    let initialPlan = "Implement the feature with persistence and tests."
     #expect(
         model.session(for: manager.id).entries.filter {
             $0.text == initialPlan
@@ -2069,8 +2119,6 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
         try await Task.sleep(for: .milliseconds(10))
     }
 
-    let revisedPlan =
-        "Revised plan: implement the feature with restoration coverage."
     let revisedApproval = try #require(
         resolvedRestoredModel.session(for: manager.id).entries.last(where: {
             $0.kind == .approval && $0.approvalState == .pending
@@ -2106,6 +2154,114 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
             $0.id == revisedApproval.id
         })?.approvalState == .pending
     )
+
+    revisedRestoredModel.resolveApproval(
+        revisedApproval.id,
+        approved: true,
+        for: manager.id
+    )
+    for _ in 0..<100
+        where await runtime.calls.filter({ $0.role == .builder }).isEmpty {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let builderBrief = try #require(
+        revisedRestoredModel.session(for: builder.id).entries.first(where: {
+            $0.title == "Implementation brief"
+        })
+    )
+    let builderCall = try #require(
+        await runtime.calls.first(where: { $0.role == .builder })
+    )
+    #expect(builderBrief.text == revisedPlan)
+    #expect(
+        taggedField(
+            "approved_implementation_plan",
+            in: builderCall.message
+        ) == revisedPlan
+    )
+    #expect(!builderCall.message.contains(initialPlan))
+}
+
+@MainActor
+@Test
+func inconsistentApprovedManagerPlanPausesBeforeBuilderDispatch() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-manager-plan-inconsistent-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let fixture = managedWorkflowFixture()
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    try store.saveFixture(
+        PersistedAppState(
+            profiles: fixture.profiles,
+            sessions: Dictionary(
+                uniqueKeysWithValues: fixture.profiles.map {
+                    ($0.id, AgentSessionState())
+                }
+            ),
+            selectedBotID: fixture.manager.id
+        )
+    )
+    let runtime = OrchestrationRecordingRuntime(
+        managerPlanningResponses: [orchestrationImplementationPlan]
+    )
+    let model = AppModel(runtime: runtime, store: store)
+
+    model.send("Implement the requested feature", to: fixture.manager.id)
+    for _ in 0..<100
+        where model.session(for: fixture.manager.id).status
+            != .needsApproval {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let approval = try #require(
+        model.session(for: fixture.manager.id).entries.last(where: {
+            $0.kind == .approval && $0.approvalState == .pending
+        })
+    )
+    var inconsistentWorkflow = try #require(
+        model.workflow(for: fixture.manager.id)
+    )
+    inconsistentWorkflow.implementationPlan = "A different plan"
+    model.managerWorkflows[fixture.manager.id] = inconsistentWorkflow
+
+    model.resolveApproval(
+        approval.id,
+        approved: true,
+        for: fixture.manager.id
+    )
+
+    let paused = try #require(model.workflow(for: fixture.manager.id))
+    let resolvedApproval = try #require(
+        model.session(for: fixture.manager.id).entries.first(where: {
+            $0.id == approval.id
+        })
+    )
+    #expect(paused.stage == .planning)
+    #expect(paused.isPaused)
+    #expect(paused.planApprovalEntryID == nil)
+    #expect(paused.approvedPlanEntryID == nil)
+    #expect(
+        paused.pauseReason?.contains(
+            "approved implementation plan is missing or inconsistent"
+        ) == true
+    )
+    #expect(resolvedApproval.approvalState == .approved)
+    #expect(
+        model.session(for: fixture.manager.id).status == .needsAnswer
+    )
+    #expect(
+        model.session(for: fixture.builder.id).entries.contains(where: {
+            $0.title == "Implementation brief"
+        }) == false
+    )
+    #expect(await runtime.calls.map(\.role) == [.manager])
 }
 
 @MainActor
@@ -5737,6 +5893,29 @@ private func runManagedWorkflow(
             != .completed {
         try await Task.sleep(for: .milliseconds(10))
     }
+}
+
+private let orchestrationImplementationPlan = """
+## Implementation plan
+
+1. Persist the approved plan unchanged.
+2. Cover the [Builder handoff](https://example.com/builder-handoff).
+
+Verification:
+- Run the Swift test suite.
+"""
+
+private func taggedField(_ name: String, in message: String) -> String? {
+    let opening = "<\(name)>\n"
+    let closing = "\n</\(name)>"
+    guard let openingRange = message.range(of: opening),
+          let closingRange = message.range(
+              of: closing,
+              range: openingRange.upperBound..<message.endIndex
+          ) else {
+        return nil
+    }
+    return String(message[openingRange.upperBound..<closingRange.lowerBound])
 }
 
 private actor OrchestrationRecordingRuntime: AgentRuntime {

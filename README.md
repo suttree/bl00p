@@ -15,8 +15,9 @@ The current prototype includes:
 - Optional Manager bots that coordinate a persistent Builder → Reviewer →
   conditional Builder fixes and Reviewer re-check → Documenter / PR Writer
   workflow
-- Isolated managed Git worktrees for implementation bots, with handoff packages
-  that carry branch, task, working-tree, and test context to the next bot
+- Isolated managed Git worktrees for implementation bots, with structured
+  handoff packages that carry branch, task, working-tree, and test context to
+  the next bot
 - Real Codex sessions powered by `codex app-server`, with workspace-scoped writes and in-app approvals for commands, file changes, extra permissions, and connected-app mutations
 - Real, resumable Claude Code builder and PR-writer sessions with in-app tool approvals
 - Local JSON persistence
