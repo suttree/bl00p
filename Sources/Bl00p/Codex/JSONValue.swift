@@ -1,4 +1,3 @@
-import CoreFoundation
 import Foundation
 
 enum JSONValue: Codable, Equatable, Sendable {
@@ -20,7 +19,11 @@ enum JSONValue: Codable, Equatable, Sendable {
         case let value as String:
             self = .string(value)
         case let value as NSNumber:
-            if CFGetTypeID(value) == CFBooleanGetTypeID() {
+            // `JSONSerialization` boxes a JSON boolean as an `NSNumber`
+            // whose objCType is "c" (the same encoding CoreFoundation's
+            // CFBoolean bridging produces on Darwin), which is how it is
+            // distinguished from a numeric 0/1.
+            if String(cString: value.objCType) == "c" {
                 self = .bool(value.boolValue)
             } else {
                 self = .number(value.doubleValue)

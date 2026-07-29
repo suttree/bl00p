@@ -1,118 +1,122 @@
+import Foundation
+
+#if os(macOS)
 import AppKit
 import SwiftUI
+#else
+import SwiftOpenUI
+#endif
 
-@main
-struct Bl00pApp: App {
-    @NSApplicationDelegateAdaptor(ApplicationDelegate.self)
-    private var appDelegate
-    @StateObject private var model: AppModel
-    private let updateController: UpdateController
+// The platform entry points live in `Platform/MacEntry.swift` and `main.swift`;
+// each is excluded from the other platform's target in Package.swift. Only the
+// shared window content lives here.
 
-    init() {
-        let model = AppModel()
-        _model = StateObject(wrappedValue: model)
-        updateController = UpdateController()
-        appDelegate.model = model
-    }
-
-    var body: some Scene {
-        WindowGroup {
-            RootView(model: model)
-                .frame(minWidth: 980, minHeight: 640)
-        }
-        .defaultSize(width: 1240, height: 780)
-        .windowToolbarStyle(.unified(showsTitle: false))
-        .commands {
-            CommandGroup(after: .appInfo) {
-                CheckForUpdatesView(updater: updateController.updater)
-            }
-
-            CommandGroup(after: .sidebar) {
-                Button("Show Bot Settings") {
-                    model.isInspectorVisible.toggle()
-                }
-                .keyboardShortcut(",", modifiers: [.command, .shift])
-            }
-        }
-    }
-}
-
-@MainActor
-private final class ApplicationDelegate: NSObject, NSApplicationDelegate {
-    weak var model: AppModel?
-    private var didReplyToTermination = false
-
-    func applicationShouldTerminate(
-        _ sender: NSApplication
-    ) -> NSApplication.TerminateReply {
-        guard let model else { return .terminateNow }
-        didReplyToTermination = false
-        Task {
-            await model.flushPersistence()
-            finishTermination(sender)
-        }
-        Task {
-            try? await Task.sleep(for: .seconds(3))
-            finishTermination(sender)
-        }
-        return .terminateLater
-    }
-
-    private func finishTermination(_ sender: NSApplication) {
-        guard !didReplyToTermination else { return }
-        didReplyToTermination = true
-        sender.reply(toApplicationShouldTerminate: true)
-    }
-}
-
-private struct RootView: View {
+struct RootView: View {
     @ObservedObject var model: AppModel
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
+        #if os(macOS)
+        splitView
+            .navigationSplitViewStyle(.balanced)
+            .font(.bl00p(.body))
+            .tint(.bl00pPink)
+            .sheet(isPresented: $model.isAddingBot) {
+                AddBotSheet { profile in
+                    model.add(profile)
+                }
+            }
+            .task {
+                model.prepareNotifications()
+            }
+            .onChange(of: model.selectedBotID) { _, newValue in
+                if let newValue {
+                    model.markViewed(newValue)
+                }
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: NSApplication.didBecomeActiveNotification
+                )
+            ) { _ in
+                if let selectedBotID = model.selectedBotID {
+                    model.markViewed(selectedBotID)
+                }
+            }
+        #else
+        // `navigationSplitViewStyle`, `tint`, and `onReceive` have no
+        // SwiftOpenUI equivalent. The first two are cosmetic; `onReceive`
+        // tracked macOS app activation, which the GTK4 backend does not report.
+        splitView
+            .font(.bl00p(.body))
+            .sheet(isPresented: isAddingBotBinding) {
+                AddBotSheet { profile in
+                    model.add(profile)
+                }
+            }
+            .task {
+                model.prepareNotifications()
+            }
+            .onChange(of: model.selectedBotID) { _, newValue in
+                if let newValue {
+                    model.markViewed(newValue)
+                }
+            }
+        #endif
+    }
+
+    #if !os(macOS)
+    // SwiftOpenUI's `ObservedObject` has no projectedValue, so `$model` does
+    // not exist; this constructs the one binding this view needs manually.
+    private var isAddingBotBinding: Binding<Bool> {
+        Binding(
+            get: { model.isAddingBot },
+            set: { model.isAddingBot = $0 }
+        )
+    }
+    #endif
+
+    private var splitView: some View {
         NavigationSplitView {
             SidebarView(model: model, windowColorScheme: colorScheme)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 300)
         } detail: {
-            HStack(spacing: 0) {
-                ConversationView(model: model)
+            detail
+        }
+    }
 
-                if model.isInspectorVisible, let selectedID = model.selectedBotID {
-                    Divider()
-                    ProfileInspectorView(
-                        profile: model.binding(for: selectedID),
-                        profiles: model.profiles
-                    )
-                    .frame(width: 330)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-                }
-            }
-            .animation(.easeInOut(duration: 0.18), value: model.isInspectorVisible)
-        }
-        .navigationSplitViewStyle(.balanced)
-        .font(.bl00p(.body))
-        .tint(.bl00pPink)
-        .sheet(isPresented: $model.isAddingBot) {
-            AddBotSheet { profile in
-                model.add(profile)
+    private var detail: some View {
+        #if os(macOS)
+        return HStack(spacing: 0) {
+            ConversationView(model: model)
+
+            if model.isInspectorVisible, let selectedID = model.selectedBotID {
+                Divider()
+                ProfileInspectorView(
+                    profile: model.binding(for: selectedID),
+                    profiles: model.profiles
+                )
+                .frame(width: 330)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
-        .task {
-            model.prepareNotifications()
-        }
-        .onChange(of: model.selectedBotID) { _, newValue in
-            if let newValue {
-                model.markViewed(newValue)
+        .animation(.easeInOut(duration: 0.18), value: model.isInspectorVisible)
+        #else
+        // SwiftOpenUI has no `transition`; the inspector appears without the
+        // slide-in. The width animation is kept.
+        return HStack(spacing: 0) {
+            ConversationView(model: model)
+
+            if model.isInspectorVisible, let selectedID = model.selectedBotID {
+                Divider()
+                ProfileInspectorView(
+                    profile: model.binding(for: selectedID),
+                    profiles: model.profiles
+                )
+                .frame(width: 330)
             }
         }
-        .onReceive(
-            NotificationCenter.default.publisher(
-                for: NSApplication.didBecomeActiveNotification
-            )
-        ) { _ in
-            if let selectedBotID = model.selectedBotID {
-                model.markViewed(selectedBotID)
-            }
-        }
+        .animation(.easeInOut(duration: 0.18), value: model.isInspectorVisible)
+        #endif
     }
 }

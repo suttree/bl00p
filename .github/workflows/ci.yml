@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  test-and-package:
+  test-and-package-macos:
     runs-on: macos-15
 
     steps:
@@ -31,6 +31,36 @@ jobs:
       - name: Upload installable app
         uses: actions/upload-artifact@v7
         with:
-          name: bl00p-${{ github.sha }}
+          name: bl00p-macos-${{ github.sha }}
           path: .build/install/bl00p-0.0.0-macos-arm64.zip
+          if-no-files-found: error
+
+  test-and-package-linux:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Swift toolchain
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
+
+      - name: Install GTK4 development headers
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev
+
+      - name: Run tests
+        run: swift test
+
+      - name: Build installable .deb
+        env:
+          APP_VERSION: 0.0.0
+        run: sh scripts/build-installable-deb.sh
+
+      - name: Upload installable .deb
+        uses: actions/upload-artifact@v7
+        with:
+          name: bl00p-linux-${{ github.sha }}
+          path: .build/deb/bl00p_0.0.0_amd64.deb
           if-no-files-found: error

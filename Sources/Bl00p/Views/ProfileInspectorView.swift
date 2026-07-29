@@ -1,4 +1,10 @@
+import Foundation
+
+#if os(macOS)
 import SwiftUI
+#else
+import SwiftOpenUI
+#endif
 
 struct ProfileInspectorView: View {
     @Binding var profile: BotProfile
@@ -24,7 +30,7 @@ struct ProfileInspectorView: View {
                 }
 
                 LabeledContent("Name") {
-                    TextField("Bot name", text: $profile.name)
+                    TextField("Bot name", text: nameBinding)
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 180)
                 }
@@ -40,7 +46,7 @@ struct ProfileInspectorView: View {
                 }
 
                 LabeledContent("Role") {
-                    Picker("Role", selection: $profile.role) {
+                    Picker("Role", selection: roleBinding) {
                         ForEach(AgentRole.allCases) { role in
                             Text(role.displayName).tag(role)
                         }
@@ -92,13 +98,13 @@ struct ProfileInspectorView: View {
                             .tracking(1.1)
                             .foregroundStyle(.secondary)
 
-                        Picker("Approval mode", selection: $profile.approvalMode) {
+                        Picker("Approval mode", selection: approvalModeBinding) {
                             ForEach(ApprovalMode.allCases) { mode in
                                 Text(mode.displayName).tag(mode)
                             }
                         }
-                        .labelsHidden()
                         .pickerStyle(.segmented)
+                        .labelsHidden()
                         .disabled(!profile.canSelectApprovalMode)
 
                         Text(approvalModeDescription)
@@ -114,13 +120,13 @@ struct ProfileInspectorView: View {
                         .tracking(1.1)
                         .foregroundStyle(.secondary)
 
-                    TextEditor(text: $profile.instructions)
+                    TextEditor(text: instructionsBinding)
                         .font(.bl00p(.body))
                         .scrollContentBackground(.hidden)
                         .frame(minHeight: 220)
                         .padding(8)
                         .background(
-                            Color(nsColor: .controlBackgroundColor),
+                            Color.bl00pControlBackground,
                             in: RoundedRectangle(cornerRadius: 10)
                         )
                         .overlay {
@@ -140,7 +146,7 @@ struct ProfileInspectorView: View {
             }
             .padding(18)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.bl00pWindowBackground)
     }
 
     private var modelSelection: Binding<String> {
@@ -148,6 +154,26 @@ struct ProfileInspectorView: View {
             get: { profile.modelID ?? "" },
             set: { profile.modelID = $0.isEmpty ? nil : $0 }
         )
+    }
+
+    // SwiftOpenUI's `Binding` has no dynamic-member-lookup subscript to
+    // derive `Binding<Field>` from `Binding<BotProfile>` the way SwiftUI's
+    // `$profile.field` sugar does, so each field binding is constructed
+    // explicitly. Portable on both platforms, not just a Linux workaround.
+    private var nameBinding: Binding<String> {
+        Binding(get: { profile.name }, set: { profile.name = $0 })
+    }
+
+    private var roleBinding: Binding<AgentRole> {
+        Binding(get: { profile.role }, set: { profile.role = $0 })
+    }
+
+    private var approvalModeBinding: Binding<ApprovalMode> {
+        Binding(get: { profile.approvalMode }, set: { profile.approvalMode = $0 })
+    }
+
+    private var instructionsBinding: Binding<String> {
+        Binding(get: { profile.instructions }, set: { profile.instructions = $0 })
     }
 
     private var approvalModeDescription: String {

@@ -28,6 +28,8 @@ All notable changes to bl00p are documented in this file.
 - Add interactive structured question cards for Claude `AskUserQuestion` and
   Codex `requestUserInput`, with option descriptions, single-select and
   multi-select controls, and submitted or cancelled states.
+- Add a Linux build backed by SwiftOpenUI and GTK4, including Debian
+  packaging, desktop notifications, directory selection, and Linux CI.
 
 ### Changed
 
@@ -132,6 +134,7 @@ All notable changes to bl00p are documented in this file.
   role-specific avatar colors.
 - Cover the approved-plan Builder handoff, including revised plans and missing
   or inconsistent plan safeguards.
+- Run the application and model test suite on Ubuntu in CI alongside macOS.
 - Cover idempotent plan-approval restoration, stale or duplicate approval-card
   cleanup, and relaunch behavior for unrelated runtime approvals.
 - Cover structured Claude and Codex questions, response encoding, multiple and

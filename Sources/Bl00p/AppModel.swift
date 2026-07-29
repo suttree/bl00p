@@ -1,7 +1,11 @@
-import AppKit
 import Foundation
+
+#if os(macOS)
+import AppKit
 import SwiftUI
-import os
+#else
+import SwiftOpenUI
+#endif
 
 private struct BuilderImplementationHandoff: Sendable {
     let approvalEntryID: UUID
@@ -54,7 +58,17 @@ struct SessionCloseAssessment: Equatable, Sendable {
     }
 }
 
+// SwiftOpenUI's `View`/`App` protocols are not @MainActor-isolated the way
+// real SwiftUI's are (its own ObservableObject storage is internally
+// thread-safe via NSLock instead), so requiring every Linux view closure
+// that touches AppModel to also prove @MainActor isolation would mean
+// annotating nearly every view struct in the app. The Linux build (a
+// single-threaded GTK4 event loop) keeps AppModel's synchronization
+// characteristics unisolated instead; macOS keeps the compile-time guarantee
+// it has always had.
+#if os(macOS)
 @MainActor
+#endif
 final class AppModel: ObservableObject {
     @Published var profiles: [BotProfile]
     @Published var sessions: [UUID: AgentSessionState]
@@ -892,15 +906,10 @@ final class AppModel: ObservableObject {
 
     func chooseRepository(for sessionID: UUID) {
         guard repositoryCanBeChanged(for: sessionID) else { return }
-        let panel = NSOpenPanel()
-        panel.title = "Choose a repository"
-        panel.message = "bl00p will use this repository for the selected chat."
-        panel.prompt = "Choose"
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-
-        if panel.runModal() == .OK, let path = panel.url?.path {
+        if let path = DirectoryChooser.chooseDirectory(
+            title: "Choose a repository",
+            message: "bl00p will use this repository for the selected chat."
+        ) {
             _ = setRepositoryPath(path, for: sessionID)
         }
     }
@@ -3667,7 +3676,7 @@ final class AppModel: ObservableObject {
                 state.hasUnreadCompletion =
                     selectedBotID != ownerProfileID
                         || selectedSessionID(for: ownerProfileID) != profileID
-                        || !NSApplication.shared.isActive
+                        || !AppWindowActivity.isActive
             }
         case .entry(let entry):
             state.entries.append(entry)
@@ -3866,7 +3875,7 @@ final class AppModel: ObservableObject {
 final class AppStateStore: Sendable {
     let fileURL: URL?
     private let persistence: AppStatePersistenceQueue
-    private let logger = Logger(subsystem: "dev.bl00p.app", category: "persistence")
+    private let logger = Bl00pLogger(subsystem: "dev.bl00p.app", category: "persistence")
 
     init(
         fileURL: URL? = nil,
