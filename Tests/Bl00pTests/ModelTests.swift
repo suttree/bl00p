@@ -837,6 +837,47 @@ func chatTabsKeepIndependentDraftsHistoriesAndRuntimeIdentities() async throws {
 
 @MainActor
 @Test
+func positionalTabSelectionTracksCurrentSessionOrder() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-positional-tab-selection-\(UUID().uuidString)"
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let model = AppModel(
+        runtime: ImmediateRecordingRuntime(),
+        store: AppStateStore(
+            fileURL: directory.appendingPathComponent("state.json")
+        )
+    )
+    let profile = try #require(model.profiles.first)
+    let firstID = try #require(model.selectedSessionID(for: profile.id))
+    let secondID = model.newChat(for: profile.id)
+    let thirdID = model.newChat(for: profile.id)
+
+    #expect(!model.selectTab(at: 0, viewing: profile.id))
+    #expect(!model.selectTab(at: 4, viewing: profile.id))
+    #expect(model.selectedSessionID(for: profile.id) == thirdID)
+
+    #expect(model.selectTab(at: 2, viewing: profile.id))
+    #expect(model.selectedSessionID(for: profile.id) == secondID)
+
+    let closeError = await model.closeSession(
+        firstID,
+        confirmedDestructiveCleanup: true
+    )
+    #expect(closeError == nil)
+    #expect(model.tabSessions(for: profile.id).map(\.id) == [secondID, thirdID])
+    #expect(model.selectTab(at: 1, viewing: profile.id))
+    #expect(model.selectedSessionID(for: profile.id) == secondID)
+    #expect(!model.selectTab(at: 3, viewing: profile.id))
+
+    let fourthID = model.newChat(for: profile.id)
+    #expect(model.selectTab(at: 3, viewing: profile.id))
+    #expect(model.selectedSessionID(for: profile.id) == fourthID)
+}
+
+@MainActor
+@Test
 func newChatsRequireARepositoryAndLockItAfterStarting() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("bl00p-chat-repository-\(UUID().uuidString)")
@@ -1184,10 +1225,7 @@ func managedWorkflowTabsStayManagerScopedWhenSwitchingAgents() throws {
             == standaloneBuilderSessionID
     )
 
-    model.selectTab(
-        fixture.manager.id,
-        viewing: fixture.builder.id
-    )
+    #expect(model.selectTab(at: 1, viewing: fixture.builder.id))
 
     #expect(
         model.selectedTabSessionID(for: fixture.builder.id)

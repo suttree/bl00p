@@ -594,6 +594,14 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
+    func selectTab(at position: Int, viewing profileID: UUID) -> Bool {
+        let sessions = tabSessions(for: profileID)
+        guard position > 0, position <= sessions.count else { return false }
+        selectTab(sessions[position - 1].id, viewing: profileID)
+        return true
+    }
+
+    @discardableResult
     func newTab(viewing profileID: UUID) -> UUID {
         let tabOwnerID = tabOwnerProfileID(for: profileID)
         let sessionID = newChat(for: tabOwnerID)

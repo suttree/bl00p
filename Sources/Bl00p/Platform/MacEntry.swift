@@ -32,6 +32,24 @@ struct Bl00pApp: App {
             }
 
             CommandGroup(after: .sidebar) {
+                ForEach(1...9, id: \.self) { position in
+                    Button("Select Chat \(position)") {
+                        guard let profileID = model.selectedProfile?.id else {
+                            return
+                        }
+                        model.selectTab(at: position, viewing: profileID)
+                    }
+                    .keyboardShortcut(
+                        KeyEquivalent(Character(String(position))),
+                        modifiers: [.command]
+                    )
+                    .disabled(
+                        model.selectedProfile.map {
+                            model.tabSessions(for: $0.id).count < position
+                        } ?? true
+                    )
+                }
+
                 Button("Show Bot Settings") {
                     model.isInspectorVisible.toggle()
                 }
