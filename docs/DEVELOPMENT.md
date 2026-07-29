@@ -12,12 +12,16 @@ The macOS commands in `Platform/MacEntry.swift` must derive their positions
 from the currently visible tab strip and call `selectTab(at:viewing:)`. That
 operation resolves the ordered sessions through `tabSessions(for:)` before
 delegating to the existing tab-selection path, which preserves Manager-owned
-tabs when a workflow participant is visible. Adding or closing a tab must
-recompute both labels and shortcut availability from the current order.
+tabs when a workflow participant is visible. The tab strip itself is rendered
+only for the Manager; participant views resolve their conversation from the
+Manager's selected tab. Adding or closing a tab must recompute both labels and
+shortcut availability from the current order.
 
 Model coverage should include available and unavailable positions,
 reindexing after tab changes, and Manager-scoped selection while viewing a
-workflow participant. A focused macOS verification run is:
+workflow participant. Managed-workflow coverage should also verify that
+selecting a Manager tab updates every participant conversation. A focused
+macOS verification run is:
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \

@@ -1141,7 +1141,7 @@ func managedWorkflowsCreateDedicatedSessionsAndCanRunConcurrently() async throws
 
 @MainActor
 @Test
-func managedWorkflowTabsStayManagerScopedWhenSwitchingAgents() throws {
+func managedWorkflowConversationsFollowManagerTabSelection() throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(
             "bl00p-manager-scoped-tabs-\(UUID().uuidString)"
@@ -1225,15 +1225,25 @@ func managedWorkflowTabsStayManagerScopedWhenSwitchingAgents() throws {
             == standaloneBuilderSessionID
     )
 
-    #expect(model.selectTab(at: 1, viewing: fixture.builder.id))
+    #expect(model.selectTab(at: 1, viewing: fixture.manager.id))
 
-    #expect(
-        model.selectedTabSessionID(for: fixture.builder.id)
-            == fixture.manager.id
-    )
+    for profile in fixture.profiles {
+        #expect(
+            model.selectedTabSessionID(for: profile.id)
+                == fixture.manager.id
+        )
+    }
     #expect(
         model.conversationSessionID(for: fixture.builder.id)
             == firstBuilderSessionID
+    )
+    #expect(
+        model.conversationSessionID(for: fixture.reviewer.id)
+            == firstWorkflow.participantSessionIDs[.reviewer]
+    )
+    #expect(
+        model.conversationSessionID(for: fixture.publisher.id)
+            == firstWorkflow.participantSessionIDs[.publisher]
     )
     #expect(
         model.selectedSessionID(for: fixture.builder.id)
@@ -1242,13 +1252,15 @@ func managedWorkflowTabsStayManagerScopedWhenSwitchingAgents() throws {
 
     let emptyManagerSessionID = model.newChat(for: fixture.manager.id)
 
-    #expect(
-        model.selectedTabSessionID(for: fixture.builder.id)
-            == emptyManagerSessionID
-    )
-    #expect(
-        model.conversationSessionID(for: fixture.builder.id) == nil
-    )
+    for profile in fixture.profiles {
+        #expect(
+            model.selectedTabSessionID(for: profile.id)
+                == emptyManagerSessionID
+        )
+    }
+    #expect(model.conversationSessionID(for: fixture.builder.id) == nil)
+    #expect(model.conversationSessionID(for: fixture.reviewer.id) == nil)
+    #expect(model.conversationSessionID(for: fixture.publisher.id) == nil)
     #expect(
         model.selectedSessionID(for: fixture.builder.id)
             == standaloneBuilderSessionID

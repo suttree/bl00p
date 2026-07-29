@@ -125,9 +125,10 @@ shortcut. Adding or closing a tab immediately reindexes the labels and
 shortcuts; the original chat title remains available as hover and accessibility
 context.
 
-Manager workflow participants share the Manager's ordered tab strip, so the
-same positional shortcuts continue to select the corresponding Manager chat
-when viewing a Builder, Reviewer, or Documenter / PR Writer profile.
+The tab strip is shown only for the Manager. Selecting a Manager chat switches
+the Builder, Reviewer, and Documenter / PR Writer to their corresponding
+workflow conversations. The same positional shortcuts continue to select the
+corresponding Manager chat while a workflow participant is visible.
 
 ## Claude Code authentication
 

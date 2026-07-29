@@ -18,9 +18,7 @@ struct ConversationView: View {
     var body: some View {
         if let profile = model.selectedProfile,
            let sessionID = model.conversationSessionID(for: profile.id),
-           let session = model.sessions[sessionID],
-           let selectedTabSessionID =
-                model.selectedTabSessionID(for: profile.id) {
+           let session = model.sessions[sessionID] {
             let isAwaitingPlanApproval =
                 model.workflow(for: profile.id)?.planApprovalEntryID != nil
             let isAwaitingStructuredAnswer = session.entries.contains {
@@ -53,17 +51,21 @@ struct ConversationView: View {
 
                 Divider()
 
-                ConversationTabBar(
-                    sessions: model.tabSessions(for: profile.id),
-                    selectedSessionID: selectedTabSessionID,
-                    select: {
-                        model.selectTab($0, viewing: profile.id)
-                    },
-                    create: { model.newTab(viewing: profile.id) },
-                    close: { requestClose($0) }
-                )
+                if profile.role == .manager,
+                   let selectedTabSessionID =
+                    model.selectedTabSessionID(for: profile.id) {
+                    ConversationTabBar(
+                        sessions: model.tabSessions(for: profile.id),
+                        selectedSessionID: selectedTabSessionID,
+                        select: {
+                            model.selectTab($0, viewing: profile.id)
+                        },
+                        create: { model.newTab(viewing: profile.id) },
+                        close: { requestClose($0) }
+                    )
 
-                Divider()
+                    Divider()
+                }
 
                 if profile.role == .manager {
                     ManagerWorkflowBanner(
@@ -155,35 +157,13 @@ struct ConversationView: View {
                 close: close
             ))
         } else if let profile = model.selectedProfile,
-                  model.tabOwnerProfileID(for: profile.id) != profile.id,
-                  let selectedTabSessionID =
-                    model.selectedTabSessionID(for: profile.id) {
-            VStack(spacing: 0) {
-                ConversationTabBar(
-                    sessions: model.tabSessions(for: profile.id),
-                    selectedSessionID: selectedTabSessionID,
-                    select: {
-                        model.selectTab($0, viewing: profile.id)
-                    },
-                    create: { model.newTab(viewing: profile.id) },
-                    close: { requestClose($0) }
-                )
-
-                Divider()
-
-                Bl00pUnavailableView(
-                    title: "Not Part of This Chat",
-                    systemImage: "person.crop.circle.badge.questionmark",
-                    description:
-                        "\(profile.name) does not have a conversation in the selected Manager session."
-                )
-            }
-            .background(Color.bl00pTextBackground)
-            .modifier(SessionCloseDialogs(
-                request: $closeRequest,
-                error: $closeError,
-                close: close
-            ))
+                  model.tabOwnerProfileID(for: profile.id) != profile.id {
+            Bl00pUnavailableView(
+                title: "Not Part of This Chat",
+                systemImage: "person.crop.circle.badge.questionmark",
+                description:
+                    "\(profile.name) does not have a conversation in the selected Manager session."
+            )
         } else {
             Bl00pUnavailableView(
                 title: "No Bot Selected",
