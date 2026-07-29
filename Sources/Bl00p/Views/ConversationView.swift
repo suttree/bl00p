@@ -25,6 +25,11 @@ struct ConversationView: View {
                     handoff: { targetID in
                         model.handoff(from: profile.id, to: targetID)
                     },
+                    chooseRepository: {
+                        model.chooseRepository(for: sessionID)
+                    },
+                    repositoryCanBeChanged:
+                        model.repositoryCanBeChanged(for: sessionID),
                     showSettings: { model.isInspectorVisible.toggle() }
                 )
 
@@ -454,6 +459,8 @@ private struct ConversationHeader: View {
     let handoffTargets: [BotProfile]
     let stop: () -> Void
     let handoff: (UUID) -> Void
+    let chooseRepository: () -> Void
+    let repositoryCanBeChanged: Bool
     let showSettings: () -> Void
 
     private var isRunning: Bool {
@@ -484,6 +491,23 @@ private struct ConversationHeader: View {
             }
 
             Spacer()
+
+            if session.repositoryPath.isEmpty {
+                Button("Choose Repository…", action: chooseRepository)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.bl00pPink)
+            } else {
+                Button(action: chooseRepository) {
+                    Image(systemName: "folder")
+                }
+                .buttonStyle(.bordered)
+                .disabled(!repositoryCanBeChanged)
+                .help(
+                    repositoryCanBeChanged
+                        ? "Choose a different repository for this chat"
+                        : "Repository is locked after this chat starts. Create a new chat to use another repository."
+                )
+            }
 
             if profile.role == .builder,
                session.worktree != nil,
@@ -528,10 +552,10 @@ private struct ConversationHeader: View {
         if let worktree = session.worktree {
             return "\(worktree.branch) · \(worktree.worktreePath)"
         }
-        if profile.workingDirectory.isEmpty {
-            return "Working directory not set"
+        if session.repositoryPath.isEmpty {
+            return "No repository selected for this chat"
         }
-        return profile.workingDirectory
+        return session.repositoryPath
     }
 }
 
