@@ -1,5 +1,4 @@
 import Foundation
-import OSLog
 
 enum PerformanceMetricName: String, Sendable {
     case workflowStage = "workflow_stage"
@@ -13,7 +12,7 @@ enum PerformanceMetricName: String, Sendable {
 }
 
 enum PerformanceMetrics {
-    private static let logger = Logger(
+    private static let logger = Bl00pLogger(
         subsystem: "com.suttree.bl00p",
         category: "performance"
     )
@@ -33,7 +32,7 @@ enum PerformanceMetrics {
         let temperature = coldStart.map { $0 ? "cold" : "warm" } ?? "none"
 
         logger.info(
-            "metric=\(name.rawValue, privacy: .public) duration_ms=\(milliseconds, privacy: .public) provider=\(provider, privacy: .public) model=\(model, privacy: .public) role=\(role, privacy: .public) stage=\(stageName, privacy: .public) start=\(temperature, privacy: .public)"
+            "metric=\(name.rawValue) duration_ms=\(milliseconds) provider=\(provider) model=\(model) role=\(role) stage=\(stageName) start=\(temperature)"
         )
     }
 
