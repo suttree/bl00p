@@ -110,34 +110,11 @@ struct ConversationView: View {
             .onChange(of: sessionID) { previousSessionID, _ in
                 model.persistDraft(for: previousSessionID)
             }
-            .alert(
-                closeRequest?.assessment.requiresDestructiveConfirmation == true
-                    ? "Close this chat and clean up its worktree?"
-                    : "Close this chat?",
-                isPresented: Binding(
-                    get: { closeRequest != nil },
-                    set: { if !$0 { closeRequest = nil } }
-                ),
-                presenting: closeRequest
-            ) { request in
-                Button("Cancel", role: .cancel) {}
-                Button("Close Chat", role: .destructive) {
-                    close(request)
-                }
-            } message: { request in
-                Text(request.message)
-            }
-            .alert(
-                "Could not close chat",
-                isPresented: Binding(
-                    get: { closeError != nil },
-                    set: { if !$0 { closeError = nil } }
-                )
-            ) {
-                Button("OK") {}
-            } message: {
-                Text(closeError ?? "")
-            }
+            .modifier(SessionCloseDialogs(
+                request: $closeRequest,
+                error: $closeError,
+                close: close
+            ))
         } else {
             Bl00pUnavailableView(
                 title: "No Bot Selected",
@@ -201,6 +178,97 @@ private struct SessionCloseRequest: Identifiable {
     }
 }
 
+private struct SessionCloseDialogs: ViewModifier {
+    @Binding var request: SessionCloseRequest?
+    @Binding var error: String?
+    let close: (SessionCloseRequest) -> Void
+
+    func body(content: Content) -> some View {
+        #if os(macOS)
+        content
+            .alert(
+                request?.assessment.requiresDestructiveConfirmation == true
+                    ? "Close this chat and clean up its worktree?"
+                    : "Close this chat?",
+                isPresented: Binding(
+                    get: { request != nil },
+                    set: { if !$0 { request = nil } }
+                ),
+                presenting: request
+            ) { request in
+                Button("Cancel", role: .cancel) {}
+                Button("Close Chat", role: .destructive) {
+                    close(request)
+                }
+            } message: { request in
+                Text(request.message)
+            }
+            .alert(
+                "Could not close chat",
+                isPresented: Binding(
+                    get: { error != nil },
+                    set: { if !$0 { error = nil } }
+                )
+            ) {
+                Button("OK") {}
+            } message: {
+                Text(error ?? "")
+            }
+        #else
+        content
+            .sheet(
+                isPresented: Binding(
+                    get: { request != nil },
+                    set: { if !$0 { request = nil } }
+                )
+            ) {
+                if let request {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text(
+                            request.assessment.requiresDestructiveConfirmation
+                                ? "Close this chat and clean up its worktree?"
+                                : "Close this chat?"
+                        )
+                        .font(.bl00p(.headline, weight: .semibold))
+                        Text(request.message)
+                        HStack {
+                            Spacer()
+                            Button("Cancel") {
+                                self.request = nil
+                            }
+                            Button("Close Chat") {
+                                close(request)
+                            }
+                        }
+                    }
+                    .padding(20)
+                    .frame(width: 420)
+                }
+            }
+            .sheet(
+                isPresented: Binding(
+                    get: { error != nil },
+                    set: { if !$0 { error = nil } }
+                )
+            ) {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Could not close chat")
+                        .font(.bl00p(.headline, weight: .semibold))
+                    Text(error ?? "")
+                    HStack {
+                        Spacer()
+                        Button("OK") {
+                            error = nil
+                        }
+                    }
+                }
+                .padding(20)
+                .frame(width: 420)
+            }
+        #endif
+    }
+}
+
 private struct ConversationTabBar: View {
     let sessions: [AgentSessionState]
     let selectedSessionID: UUID
@@ -209,65 +277,75 @@ private struct ConversationTabBar: View {
     let close: (UUID) -> Void
 
     var body: some View {
+        #if os(macOS)
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(sessions, id: \.id) { session in
-                    HStack(spacing: 7) {
-                        if session.status == .working || session.status == .launching {
-                            ProgressView()
-                                .controlSize(.mini)
-                        } else if session.status.needsAttention
-                                    || session.hasUnreadCompletion {
-                            Circle()
-                                .fill(Color.bl00pPink)
-                                .frame(width: 7, height: 7)
-                        }
-
-                        Button(session.title) {
-                            select(session.id)
-                        }
-                        .buttonStyle(.plain)
-                        .lineLimit(1)
-
-                        Button {
-                            close(session.id)
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 9, weight: .bold))
-                        }
-                        .buttonStyle(.plain)
-                        .help("Close chat")
-                    }
-                    .font(.bl00p(.caption1, weight: .semibold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(
-                        session.id == selectedSessionID
-                            ? Color.bl00pPinkSoft
-                            : Color(nsColor: .controlBackgroundColor),
-                        in: RoundedRectangle(cornerRadius: 8)
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(
-                                session.id == selectedSessionID
-                                    ? Color.bl00pPink.opacity(0.55)
-                                    : Color(nsColor: .separatorColor),
-                                lineWidth: 1
-                            )
-                    }
-                }
-
-                Button(action: create) {
-                    Label("New chat", systemImage: "plus")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
+            tabs
         }
-        .background(.bar)
+        #else
+        ScrollView(.horizontal) {
+            tabs
+        }
+        #endif
+    }
+
+    private var tabs: some View {
+        HStack(spacing: 6) {
+            ForEach(sessions, id: \.id) { session in
+                HStack(spacing: 7) {
+                    if session.status == .working || session.status == .launching {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else if session.status.needsAttention
+                                || session.hasUnreadCompletion {
+                        Circle()
+                            .fill(Color.bl00pPink)
+                            .frame(width: 7, height: 7)
+                    }
+
+                    Button(session.title) {
+                        select(session.id)
+                    }
+                    .buttonStyle(.plain)
+                    .lineLimit(1)
+
+                    Button {
+                        close(session.id)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Close chat")
+                }
+                .font(.bl00p(.caption1, weight: .semibold))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(
+                    session.id == selectedSessionID
+                        ? Color.bl00pPinkSoft
+                        : Color.bl00pControlBackground,
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(
+                            session.id == selectedSessionID
+                                ? Color.bl00pPink.opacity(0.55)
+                                : Color.bl00pSeparator,
+                            lineWidth: 1
+                        )
+                }
+            }
+
+            Button(action: create) {
+                Label("New chat", systemImage: "plus")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color.bl00pControlBackground)
     }
 }
 
@@ -326,7 +404,9 @@ private struct ManagerWorkflowBanner: View {
                 Button("Resume", action: resume)
                     .buttonStyle(.borderedProminent)
                     .tint(.bl00pPink)
+                    #if os(macOS)
                     .accessibilityHint("Continues the restored managed workflow")
+                    #endif
             }
         }
         .padding(.horizontal, 18)
@@ -394,9 +474,11 @@ private struct WorkflowStageIndicator: View {
             }
         }
         .fixedSize(horizontal: true, vertical: false)
+        #if os(macOS)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Managed workflow progress")
         .accessibilityValue(accessibilityValue)
+        #endif
     }
 
     @ViewBuilder
@@ -426,7 +508,7 @@ private struct WorkflowStageIndicator: View {
                 }
         } else {
             Circle()
-                .fill(Color(nsColor: .controlBackgroundColor))
+                .fill(Color.bl00pControlBackground)
                 .frame(width: 14, height: 14)
                 .overlay {
                     Circle()
@@ -584,7 +666,9 @@ private struct TranscriptView: View {
                 .frame(maxWidth: .infinity)
                 #endif
             }
+            #if os(macOS)
             .scrollPosition(id: $scrollPosition)
+            #endif
             .task(id: sessionID) {
                 try? await Task.sleep(for: .milliseconds(60))
                 proxy.scrollTo(
@@ -1206,9 +1290,13 @@ private struct TimelineTimestamp: View {
             .font(.bl00p(.caption2))
             .foregroundStyle(.tertiary)
             .help(TimelineTimestampFormatter.fullString(for: date))
+            #if os(macOS)
             .accessibilityLabel(
                 Text(TimelineTimestampFormatter.fullString(for: date))
             )
+            #else
+            .accessibilityLabel(TimelineTimestampFormatter.fullString(for: date))
+            #endif
     }
 }
 

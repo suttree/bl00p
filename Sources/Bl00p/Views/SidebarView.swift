@@ -48,7 +48,10 @@ struct SidebarView: View {
         .modifier(RenameAlert(
             renameTargetID: $renameTargetID,
             renameDraft: $renameDraft,
-            deletionError: $model.profileDeletionError,
+            deletionError: Binding(
+                get: { model.profileDeletionError },
+                set: { model.profileDeletionError = $0 }
+            ),
             rename: { id, name in model.rename(id, to: name) }
         ))
     }

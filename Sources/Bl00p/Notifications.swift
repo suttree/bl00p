@@ -201,11 +201,12 @@ final class AppNotificationController: AgentNotificationDelivering, @unchecked S
             "--replace-id=\(abs(replacementID.hashValue % 100_000) + 1)",
             at: 3
         )
+        let processArguments = arguments
 
         queue.async {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = arguments
+            process.arguments = processArguments
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
 

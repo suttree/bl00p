@@ -186,6 +186,7 @@ extension Color {
     static let bl00pInk = Color(nsColor: .labelColor)
     static let bl00pMuted = Color(nsColor: .secondaryLabelColor)
     static let bl00pControlBackground = Color(nsColor: .controlBackgroundColor)
+    static let bl00pSeparator = Color(nsColor: .separatorColor)
     static let bl00pWindowBackground = Color(nsColor: .windowBackgroundColor)
     static let bl00pTextBackground = Color(nsColor: .textBackgroundColor)
     #else
@@ -201,6 +202,7 @@ extension Color {
     static let bl00pControlBackground = Bl00pAppearance.current == .dark
         ? Color(red: 0.16, green: 0.16, blue: 0.17)
         : Color(red: 0.95, green: 0.95, blue: 0.96)
+    static let bl00pSeparator = Color.secondary.opacity(0.25)
     static let bl00pWindowBackground = Bl00pAppearance.current == .dark
         ? Color(red: 0.11, green: 0.11, blue: 0.12)
         : Color.white
