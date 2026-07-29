@@ -1,5 +1,33 @@
 # Development notes
 
+## Positional conversation tabs
+
+`ConversationTabBar` renders tabs from the session order supplied by
+`AppModel`. The visible label is positional: positions one through nine use
+`⌘1` through `⌘9`, while later positions show only their ordinal. Session
+titles remain persisted and are used for hover and accessibility context; they
+must not be used as the visible tab label.
+
+The macOS commands in `Platform/MacEntry.swift` must derive their positions
+from the currently visible tab strip and call `selectTab(at:viewing:)`. That
+operation resolves the ordered sessions through `tabSessions(for:)` before
+delegating to the existing tab-selection path, which preserves Manager-owned
+tabs when a workflow participant is visible. Adding or closing a tab must
+recompute both labels and shortcut availability from the current order.
+
+Model coverage should include available and unavailable positions,
+reindexing after tab changes, and Manager-scoped selection while viewing a
+workflow participant. A focused macOS verification run is:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-module-cache" \
+SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/swiftpm-module-cache" \
+XDG_CACHE_HOME="$PWD/.build/cache" \
+xcrun swift test --disable-sandbox \
+  --filter positionalTabSelectionTracksCurrentSessionOrder
+```
+
 ## Sidebar rename focus
 
 The sidebar rename action uses a native alert. Its name input is backed by a

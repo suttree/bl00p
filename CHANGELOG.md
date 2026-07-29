@@ -6,6 +6,8 @@ All notable changes to bl00p are documented in this file.
 
 ### Added
 
+- Add positional conversation-tab labels and `⌘1`–`⌘9` shortcuts on macOS,
+  with shortcuts and labels reindexing as tabs are added or closed.
 - Add repository selection to individual chats, including a **Choose
   Repository…** action in the conversation header for new chats.
 - Add signed automatic update checks, installation, and relaunch through

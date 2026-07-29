@@ -359,7 +359,10 @@ private struct ConversationTabBar: View {
 
     private var tabs: some View {
         HStack(spacing: 6) {
-            ForEach(sessions, id: \.id) { session in
+            ForEach(Array(sessions.enumerated()), id: \.element.id) {
+                offset, session in
+                let position = offset + 1
+
                 HStack(spacing: 7) {
                     if session.status == .working || session.status == .launching {
                         ProgressView()
@@ -371,11 +374,13 @@ private struct ConversationTabBar: View {
                             .frame(width: 7, height: 7)
                     }
 
-                    Button(session.title) {
+                    Button(position <= 9 ? "⌘\(position)" : "\(position)") {
                         select(session.id)
                     }
                     .buttonStyle(.plain)
                     .lineLimit(1)
+                    .help(session.title)
+                    .accessibilityLabel("Chat \(position): \(session.title)")
 
                     Button {
                         close(session.id)
