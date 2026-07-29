@@ -34,6 +34,17 @@ the Manager session, participant sessions, or legacy profile data. Once a
 workflow repository is known, its participant sessions are normalized to that
 base repository.
 
+Do not use a profile's selected chat to locate a workflow participant. Resolve
+the Manager, Builder, Reviewer, and Documenter / PR Writer sessions from
+`participantSessionIDs` on the workflow. This is required for concurrent
+workflows: the same configured team profiles may have multiple dedicated
+participant sessions active at once.
+
+Repository changes are allowed only for an unstarted standalone chat. A chat
+is considered locked once it has a runtime thread, an owned worktree, a pending
+handoff, or workflow membership. Closing a chat may clean up its own worktree,
+but must not unlock or change another chat's repository.
+
 ## Approval state
 
 While a Manager workflow is in the `planning` stage, the persisted workflow
@@ -70,7 +81,10 @@ approval text must not fabricate a plan.
 
 The model tests covering these invariants include:
 
+- `legacyProfileSessionsMigrateIntoSelectedTabsWithTheirWorktree`
+- `chatTabsKeepIndependentDraftsHistoriesAndRuntimeIdentities`
 - `newChatsRequireARepositoryAndLockItAfterStarting`
+- `builderWorktreesUseEachChatsRepository`
 - `managedWorkflowsCreateDedicatedSessionsAndCanRunConcurrently`
 - `workflowRejectsAHandoffFromAnotherRepository`
 - `relaunchRecoversACompletedManagerPlanAndDispatchesBuilderOnce`

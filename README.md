@@ -99,6 +99,10 @@ repositories. Once a chat has started a runtime thread, created a worktree, or
 joined a managed workflow, its repository is locked; create another chat to
 work elsewhere.
 
+When upgrading, existing chats retain their effective repository. bl00p
+migrates the former profile-level repository only when the chat does not
+already have repository information from its worktree or pending handoff.
+
 Each workflow snapshots its Manager chat's repository and creates dedicated
 Builder, Reviewer, and Documenter chats without changing those bots' selected
 standalone chats. The Builder receives an isolated worktree based on that
