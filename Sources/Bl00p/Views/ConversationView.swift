@@ -16,9 +16,11 @@ struct ConversationView: View {
     @State private var scrollPositions: [UUID: UUID] = [:]
 
     var body: some View {
-        if let profile = model.selectedProfile {
-            let session = model.session(for: profile.id)
-            let sessionID = model.selectedSessionID(for: profile.id) ?? session.id
+        if let profile = model.selectedProfile,
+           let sessionID = model.conversationSessionID(for: profile.id),
+           let session = model.sessions[sessionID],
+           let selectedTabSessionID =
+                model.selectedTabSessionID(for: profile.id) {
             let isAwaitingPlanApproval =
                 model.workflow(for: profile.id)?.planApprovalEntryID != nil
             let isAwaitingStructuredAnswer = session.entries.contains {
@@ -31,9 +33,15 @@ struct ConversationView: View {
                     profile: profile,
                     session: session,
                     handoffTargets: model.profiles.filter { $0.id != profile.id },
-                    stop: { model.stop(profile.id) },
+                    stop: {
+                        model.stop(profile.id, sessionID: sessionID)
+                    },
                     handoff: { targetID in
-                        model.handoff(from: profile.id, to: targetID)
+                        model.handoff(
+                            from: profile.id,
+                            to: targetID,
+                            sourceSessionID: sessionID
+                        )
                     },
                     chooseRepository: {
                         model.chooseRepository(for: sessionID)
@@ -46,10 +54,12 @@ struct ConversationView: View {
                 Divider()
 
                 ConversationTabBar(
-                    sessions: model.sessions(for: profile.id),
-                    selectedSessionID: sessionID,
-                    select: { model.selectSession($0, for: profile.id) },
-                    create: { model.newChat(for: profile.id) },
+                    sessions: model.tabSessions(for: profile.id),
+                    selectedSessionID: selectedTabSessionID,
+                    select: {
+                        model.selectTab($0, viewing: profile.id)
+                    },
+                    create: { model.newTab(viewing: profile.id) },
                     close: { requestClose($0) }
                 )
 
@@ -80,16 +90,26 @@ struct ConversationView: View {
                         canRetryFailedMessage:
                             session.status.allowsFailedMessageRetry,
                         retry: { entryID in
-                            model.retry(entryID, for: profile.id)
+                            model.retry(
+                                entryID,
+                                for: profile.id,
+                                sessionID: sessionID
+                            )
                         },
                         resolveApproval: { entryID, approved in
-                            model.resolveApproval(entryID, approved: approved, for: profile.id)
+                            model.resolveApproval(
+                                entryID,
+                                approved: approved,
+                                for: profile.id,
+                                sessionID: sessionID
+                            )
                         },
                         resolveQuestion: { entryID, selections in
                             model.resolveQuestion(
                                 entryID,
                                 selections: selections,
-                                for: profile.id
+                                for: profile.id,
+                                sessionID: sessionID
                             )
                         }
                     )
@@ -111,7 +131,8 @@ struct ConversationView: View {
                         model.send(
                             outgoing,
                             attachments: outgoingAttachments,
-                            to: profile.id
+                            to: profile.id,
+                            sessionID: sessionID
                         )
                     }
                 )
@@ -120,6 +141,7 @@ struct ConversationView: View {
             .task(id: sessionID) {
                 draft = model.sessions[sessionID]?.draft ?? ""
                 attachments = []
+                model.markViewed(profile.id, sessionID: sessionID)
             }
             .onChange(of: draft) { _, updated in
                 model.updateDraft(updated, for: sessionID)
@@ -127,6 +149,36 @@ struct ConversationView: View {
             .onChange(of: sessionID) { previousSessionID, _ in
                 model.persistDraft(for: previousSessionID)
             }
+            .modifier(SessionCloseDialogs(
+                request: $closeRequest,
+                error: $closeError,
+                close: close
+            ))
+        } else if let profile = model.selectedProfile,
+                  model.tabOwnerProfileID(for: profile.id) != profile.id,
+                  let selectedTabSessionID =
+                    model.selectedTabSessionID(for: profile.id) {
+            VStack(spacing: 0) {
+                ConversationTabBar(
+                    sessions: model.tabSessions(for: profile.id),
+                    selectedSessionID: selectedTabSessionID,
+                    select: {
+                        model.selectTab($0, viewing: profile.id)
+                    },
+                    create: { model.newTab(viewing: profile.id) },
+                    close: { requestClose($0) }
+                )
+
+                Divider()
+
+                Bl00pUnavailableView(
+                    title: "Not Part of This Chat",
+                    systemImage: "person.crop.circle.badge.questionmark",
+                    description:
+                        "\(profile.name) does not have a conversation in the selected Manager session."
+                )
+            }
+            .background(Color.bl00pTextBackground)
             .modifier(SessionCloseDialogs(
                 request: $closeRequest,
                 error: $closeError,

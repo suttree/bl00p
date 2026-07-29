@@ -530,6 +530,80 @@ final class AppModel: ObservableObject {
         (sessionOrder[profileID] ?? []).compactMap { sessions[$0] }
     }
 
+    /// The profile whose chats define the visible tab strip.
+    ///
+    /// Managed workflow participants have private runtime sessions, but those
+    /// sessions are views into a Manager chat rather than independent user
+    /// tabs. Keeping tab ownership here prevents switching sidebar agents from
+    /// replacing the current workflow with that agent's standalone history.
+    func tabOwnerProfileID(for profileID: UUID) -> UUID {
+        guard profiles.first(where: { $0.id == profileID })?.role != .manager
+        else {
+            return profileID
+        }
+
+        return profiles.first(where: { candidate in
+            guard candidate.role == .manager,
+                  let team = candidate.managerTeam else {
+                return false
+            }
+            return team.builderProfileID == profileID
+                || team.reviewerProfileID == profileID
+                || team.publisherProfileID == profileID
+        })?.id ?? profileID
+    }
+
+    func tabSessions(for profileID: UUID) -> [AgentSessionState] {
+        sessions(for: tabOwnerProfileID(for: profileID))
+    }
+
+    func selectedTabSessionID(for profileID: UUID) -> UUID? {
+        selectedSessionID(for: tabOwnerProfileID(for: profileID))
+    }
+
+    /// Resolves the runtime chat displayed for an agent inside the selected
+    /// Manager tab. A participant session remains isolated per workflow even
+    /// though the tab itself is owned by the Manager.
+    func conversationSessionID(for profileID: UUID) -> UUID? {
+        let tabOwnerID = tabOwnerProfileID(for: profileID)
+        guard let managerSessionID = selectedSessionID(for: tabOwnerID)
+        else {
+            return nil
+        }
+        guard tabOwnerID != profileID else {
+            return managerSessionID
+        }
+        guard let role = profiles.first(where: { $0.id == profileID })?.role,
+              let participantID =
+                managerWorkflows[managerSessionID]?
+                    .participantSessionIDs[role],
+              sessions[participantID]?.ownerProfileID == profileID else {
+            return nil
+        }
+        return participantID
+    }
+
+    func selectTab(_ sessionID: UUID, viewing profileID: UUID) {
+        selectSession(
+            sessionID,
+            for: tabOwnerProfileID(for: profileID)
+        )
+        if let visibleSessionID = conversationSessionID(for: profileID) {
+            markSessionViewed(visibleSessionID)
+        }
+    }
+
+    @discardableResult
+    func newTab(viewing profileID: UUID) -> UUID {
+        let tabOwnerID = tabOwnerProfileID(for: profileID)
+        let sessionID = newChat(for: tabOwnerID)
+        // A fresh Manager tab has no participant sessions until its workflow
+        // starts, so keep the new conversation focused on the Manager.
+        selectedBotID = tabOwnerID
+        save()
+        return sessionID
+    }
+
     func selectedSessionID(for profileID: UUID) -> UUID? {
         if let selected = selectedSessionIDs[profileID],
            sessions[selected]?.ownerProfileID == profileID {
@@ -978,9 +1052,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func stop(_ profileID: UUID) {
+    func stop(_ profileID: UUID, sessionID explicitSessionID: UUID? = nil) {
         guard let profile = profiles.first(where: { $0.id == profileID }),
-              let chatID = selectedSessionID(for: profileID) else { return }
+              let chatID =
+                explicitSessionID ?? selectedSessionID(for: profileID),
+              sessions[chatID]?.ownerProfileID == profileID else {
+            return
+        }
         connectedProfileIDs.remove(chatID)
         launchedProfileIDs.remove(profileID)
         planningTurnAssistantEntryIDs.removeValue(forKey: chatID)
@@ -1000,12 +1078,15 @@ final class AppModel: ObservableObject {
     func send(
         _ text: String,
         attachments: [ImageAttachment] = [],
-        to profileID: UUID
+        to profileID: UUID,
+        sessionID explicitSessionID: UUID? = nil
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty,
               let profile = profiles.first(where: { $0.id == profileID }),
-              let chatID = selectedSessionID(for: profileID) else {
+              let chatID =
+                explicitSessionID ?? selectedSessionID(for: profileID),
+              sessions[chatID]?.ownerProfileID == profileID else {
             return
         }
         guard let state = sessions[chatID] else { return }
@@ -1064,8 +1145,16 @@ final class AppModel: ObservableObject {
         )
     }
 
-    func retry(_ entryID: UUID, for profileID: UUID) {
-        guard let chatID = selectedSessionID(for: profileID) else { return }
+    func retry(
+        _ entryID: UUID,
+        for profileID: UUID,
+        sessionID explicitSessionID: UUID? = nil
+    ) {
+        guard let chatID =
+                explicitSessionID ?? selectedSessionID(for: profileID),
+              sessions[chatID]?.ownerProfileID == profileID else {
+            return
+        }
         guard let state = sessions[chatID] else { return }
         guard state.status.allowsFailedMessageRetry,
               let entry = state.entries.first(where: { $0.id == entryID }),
@@ -1245,8 +1334,17 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func resolveApproval(_ entryID: UUID, approved: Bool, for profileID: UUID) {
-        guard let chatID = selectedSessionID(for: profileID) else { return }
+    func resolveApproval(
+        _ entryID: UUID,
+        approved: Bool,
+        for profileID: UUID,
+        sessionID explicitSessionID: UUID? = nil
+    ) {
+        guard let chatID =
+                explicitSessionID ?? selectedSessionID(for: profileID),
+              sessions[chatID]?.ownerProfileID == profileID else {
+            return
+        }
         if managerWorkflows[chatID]?.stage == .planning,
            managerWorkflows[chatID]?.planApprovalEntryID == entryID {
             resolveWorkflowPlanApproval(
@@ -1274,10 +1372,13 @@ final class AppModel: ObservableObject {
     func resolveQuestion(
         _ entryID: UUID,
         selections: [QuestionSelection],
-        for profileID: UUID
+        for profileID: UUID,
+        sessionID explicitSessionID: UUID? = nil
     ) {
-        guard let chatID = selectedSessionID(for: profileID),
+        guard let chatID =
+                explicitSessionID ?? selectedSessionID(for: profileID),
               let state = sessions[chatID],
+              state.ownerProfileID == profileID,
               state.entries.contains(where: {
                   $0.id == entryID
                       && $0.kind == .question
@@ -1475,8 +1576,12 @@ final class AppModel: ObservableObject {
         )
     }
 
-    func markViewed(_ profileID: UUID) {
-        guard let chatID = selectedSessionID(for: profileID) else { return }
+    func markViewed(_ profileID: UUID, sessionID explicitSessionID: UUID? = nil) {
+        guard let chatID =
+                explicitSessionID ?? conversationSessionID(for: profileID)
+        else {
+            return
+        }
         markSessionViewed(chatID)
     }
 
@@ -1489,12 +1594,32 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func handoff(from sourceProfileID: UUID, to targetProfileID: UUID) {
+    func handoff(
+        from sourceProfileID: UUID,
+        to targetProfileID: UUID,
+        sourceSessionID explicitSourceSessionID: UUID? = nil
+    ) {
+        let sourceSessionID =
+            explicitSourceSessionID ?? selectedSessionID(for: sourceProfileID)
+        let workflow = sourceSessionID.flatMap { sourceSessionID in
+            managerWorkflows.values.first(where: {
+                $0.participantSessionIDs.values.contains(sourceSessionID)
+            })
+        }
+        let targetRole = profiles.first(where: {
+            $0.id == targetProfileID
+        })?.role
+        let targetSessionID =
+            targetRole.flatMap { workflow?.participantSessionIDs[$0] }
+                ?? selectedSessionID(for: targetProfileID)
+
         guard sourceProfileID != targetProfileID,
               let source = profiles.first(where: { $0.id == sourceProfileID }),
               let target = profiles.first(where: { $0.id == targetProfileID }),
-              let sourceSessionID = selectedSessionID(for: sourceProfileID),
-              let targetSessionID = selectedSessionID(for: targetProfileID),
+              let sourceSessionID,
+              let targetSessionID,
+              sessions[sourceSessionID]?.ownerProfileID == sourceProfileID,
+              sessions[targetSessionID]?.ownerProfileID == targetProfileID,
               source.role == .builder,
               sessions[sourceSessionID]?.worktree != nil,
               sessions[sourceSessionID]?.status != .working,
