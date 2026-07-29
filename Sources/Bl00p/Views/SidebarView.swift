@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SidebarView: View {
@@ -78,7 +79,7 @@ struct SidebarView: View {
                 }
             )
         ) {
-            TextField("Bot name", text: $renameDraft)
+            RenameTextField(text: $renameDraft)
             Button("Cancel", role: .cancel) {
                 renameTargetID = nil
             }
@@ -116,6 +117,92 @@ struct SidebarView: View {
         .padding(.horizontal, 14)
         .padding(.top, 14)
         .padding(.bottom, 10)
+    }
+}
+
+private struct RenameTextField: NSViewRepresentable {
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    func makeNSView(context: Context) -> RenameTextFieldControl {
+        let field = RenameTextFieldControl(string: text)
+        field.placeholderString = "Bot name"
+        field.delegate = context.coordinator
+        return field
+    }
+
+    func updateNSView(_ nsView: RenameTextFieldControl, context: Context) {
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        private let text: Binding<String>
+
+        init(text: Binding<String>) {
+            self.text = text
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            text.wrappedValue = field.stringValue
+        }
+    }
+}
+
+private final class RenameTextFieldControl: NSTextField {
+    private var keyWindowObserver: NSObjectProtocol?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        removeKeyWindowObserver()
+
+        guard let window else { return }
+        keyWindowObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.focusWhenPresented()
+            }
+        }
+        focusWhenPresented()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            removeKeyWindowObserver()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    private func focusWhenPresented() {
+        guard let window else { return }
+
+        let editor = currentEditor()
+        guard window.firstResponder !== self, window.firstResponder !== editor else {
+            return
+        }
+        guard window.makeFirstResponder(self) else { return }
+
+        // Native alert presentation may select the whole field. Put the caret
+        // at the end without replacing text the user entered while it appeared.
+        currentEditor()?.selectedRange = NSRange(
+            location: stringValue.utf16.count,
+            length: 0
+        )
+    }
+
+    private func removeKeyWindowObserver() {
+        if let keyWindowObserver {
+            NotificationCenter.default.removeObserver(keyWindowObserver)
+            self.keyWindowObserver = nil
+        }
     }
 }
 
