@@ -23,6 +23,8 @@ All notable changes to bl00p are documented in this file.
 - Add bot renaming from the sidebar.
 - Add managed Manager workflows with an explicit user approval gate between
   planning and the Builder handoff.
+- Add a Linux build backed by SwiftOpenUI and GTK4, including Debian
+  packaging, desktop notifications, directory selection, and Linux CI.
 
 ### Changed
 
@@ -117,5 +119,6 @@ All notable changes to bl00p are documented in this file.
   role-specific avatar colors.
 - Cover the approved-plan Builder handoff, including revised plans and missing
   or inconsistent plan safeguards.
+- Run the application and model test suite on Ubuntu in CI alongside macOS.
 - Cover idempotent plan-approval restoration, stale or duplicate approval-card
   cleanup, and relaunch behavior for unrelated runtime approvals.

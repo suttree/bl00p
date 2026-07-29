@@ -66,9 +66,9 @@ final class UpdateController: ObservableObject {
     static let currentVersion = "0.1.0"
 
     private static let releasesAPI = URL(
-        string: "https://api.github.com/repos/FesterCluck/bl00p/releases/latest"
+        string: "https://api.github.com/repos/suttree/bl00p/releases/latest"
     )!
-    private static let releasesPage = "https://github.com/FesterCluck/bl00p/releases/latest"
+    private static let releasesPage = "https://github.com/suttree/bl00p/releases/latest"
 
     @Published private(set) var isChecking = false
     @Published private(set) var statusMessage: String?

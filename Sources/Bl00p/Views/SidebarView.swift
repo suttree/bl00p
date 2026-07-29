@@ -40,7 +40,7 @@ struct SidebarView: View {
         }
         .background(
             LinearGradient(
-                colors: Bl00pTheme.sidebarColors(for: windowColorScheme),
+                colors: sidebarColors,
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -51,6 +51,15 @@ struct SidebarView: View {
             deletionError: $model.profileDeletionError,
             rename: { id, name in model.rename(id, to: name) }
         ))
+    }
+
+    private var sidebarColors: [Color] {
+        #if os(macOS)
+        Bl00pTheme.sidebarColors(for: windowColorScheme)
+            .map(Color.init(nsColor:))
+        #else
+        Bl00pTheme.sidebarColors(for: windowColorScheme)
+        #endif
     }
 
     #if !os(macOS)
@@ -384,6 +393,14 @@ private struct BotRow: View {
         }
     }
 
+    private var sidebarTop: Color {
+        #if os(macOS)
+        Color(nsColor: Bl00pTheme.sidebarTop(for: windowColorScheme))
+        #else
+        Bl00pTheme.sidebarTop(for: windowColorScheme)
+        #endif
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             BotAvatar(
@@ -400,7 +417,7 @@ private struct BotRow: View {
                             .overlay(
                                 Circle()
                                     .stroke(
-                                        Bl00pTheme.sidebarTop(for: windowColorScheme),
+                                        sidebarTop,
                                         lineWidth: 2
                                     )
                             )

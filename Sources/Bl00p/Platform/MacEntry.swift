@@ -1,17 +1,22 @@
 #if os(macOS)
 
+import AppKit
 import SwiftUI
 
 /// macOS entry point. Excluded from the Linux target in Package.swift, which
 /// uses `main.swift` and an explicit backend launch instead.
 @main
 struct Bl00pApp: App {
+    @NSApplicationDelegateAdaptor(ApplicationDelegate.self)
+    private var appDelegate
     @StateObject private var model: AppModel
     private let updateController: UpdateController
 
     init() {
-        _model = StateObject(wrappedValue: AppModel())
+        let model = AppModel()
+        _model = StateObject(wrappedValue: model)
         updateController = UpdateController()
+        appDelegate.model = model
     }
 
     var body: some Scene {
@@ -33,6 +38,34 @@ struct Bl00pApp: App {
                 .keyboardShortcut(",", modifiers: [.command, .shift])
             }
         }
+    }
+}
+
+@MainActor
+private final class ApplicationDelegate: NSObject, NSApplicationDelegate {
+    weak var model: AppModel?
+    private var didReplyToTermination = false
+
+    func applicationShouldTerminate(
+        _ sender: NSApplication
+    ) -> NSApplication.TerminateReply {
+        guard let model else { return .terminateNow }
+        didReplyToTermination = false
+        Task {
+            await model.flushPersistence()
+            finishTermination(sender)
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            finishTermination(sender)
+        }
+        return .terminateLater
+    }
+
+    private func finishTermination(_ sender: NSApplication) {
+        guard !didReplyToTermination else { return }
+        didReplyToTermination = true
+        sender.reply(toApplicationShouldTerminate: true)
     }
 }
 

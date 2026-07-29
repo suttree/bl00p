@@ -1159,6 +1159,13 @@ private struct MarkdownMessageView: View {
                             style: .continuous
                         )
                     )
+                    .overlay {
+                        RoundedRectangle(
+                            cornerRadius: 10,
+                            style: .continuous
+                        )
+                        .stroke(.quaternary, lineWidth: 1)
+                    }
                     #else
                     Text(code)
                         .font(.bl00p(.body, design: .monospaced))
@@ -1172,14 +1179,14 @@ private struct MarkdownMessageView: View {
                                 style: .continuous
                             )
                         )
+                        .overlay {
+                            RoundedRectangle(
+                                cornerRadius: 10,
+                                style: .continuous
+                            )
+                            .stroke(.quaternary, lineWidth: 1)
+                        }
                     #endif
-                    .overlay {
-                        RoundedRectangle(
-                            cornerRadius: 10,
-                            style: .continuous
-                        )
-                        .stroke(.quaternary, lineWidth: 1)
-                    }
                 }
             }
         }
