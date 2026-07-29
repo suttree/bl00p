@@ -29,10 +29,6 @@ struct SidebarView: View {
                             model.showSettings(for: profile.id)
                         }
 
-                        Button("Set Working Directory…") {
-                            model.chooseWorkingDirectory(for: profile.id)
-                        }
-
                         Divider()
 
                         Button("Duplicate Bot") {

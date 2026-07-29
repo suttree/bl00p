@@ -563,6 +563,7 @@ struct ManagerWorkflowDispatch: Identifiable, Codable, Hashable, Sendable {
 struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var managerProfileID: UUID
+    var repositoryPath: String
     var team: ManagerTeamConfiguration
     var request: String
     var implementationPlan: String?
@@ -590,6 +591,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     init(
         id: UUID = UUID(),
         managerProfileID: UUID,
+        repositoryPath: String = "",
         team: ManagerTeamConfiguration,
         request: String,
         implementationPlan: String? = nil,
@@ -616,6 +618,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     ) {
         self.id = id
         self.managerProfileID = managerProfileID
+        self.repositoryPath = repositoryPath
         self.team = team
         self.request = request
         self.implementationPlan = implementationPlan
@@ -642,7 +645,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, managerProfileID, team, request, implementationPlan
+        case id, managerProfileID, repositoryPath, team, request, implementationPlan
         case planApprovalEntryID, approvedPlanEntryID, pendingDispatch
         case deliveredDispatchID, deliveredDispatch
         case resumeAvailableAfterRestart
@@ -656,6 +659,10 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
         managerProfileID = try container.decode(UUID.self, forKey: .managerProfileID)
+        repositoryPath = try container.decodeIfPresent(
+            String.self,
+            forKey: .repositoryPath
+        ) ?? ""
         team = try container.decode(ManagerTeamConfiguration.self, forKey: .team)
         request = try container.decode(String.self, forKey: .request)
         implementationPlan = try container.decodeIfPresent(String.self, forKey: .implementationPlan)
@@ -790,6 +797,7 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
 struct AgentSessionState: Codable, Sendable {
     var id: UUID = UUID()
     var ownerProfileID: UUID?
+    var repositoryPath = ""
     var title = "New chat"
     var createdAt: Date = .now
     var updatedAt: Date = .now
@@ -799,19 +807,22 @@ struct AgentSessionState: Codable, Sendable {
     var sessionID: String?
     var codexTurnModeVersion: Int?
     var pendingHandoff: GitHandoffPackage? = nil
+    var handoffWorktreePath: String? = nil
     var worktreeSeedID: UUID? = nil
     var worktree: GitWorktreeOwnership?
     var draft = ""
 
     enum CodingKeys: String, CodingKey {
-        case id, ownerProfileID, title, createdAt, updatedAt, status, entries
+        case id, ownerProfileID, repositoryPath, title, createdAt, updatedAt
+        case status, entries
         case hasUnreadCompletion, sessionID, codexTurnModeVersion
-        case pendingHandoff, worktreeSeedID, worktree, draft
+        case pendingHandoff, handoffWorktreePath, worktreeSeedID, worktree, draft
     }
 
     init(
         id: UUID = UUID(),
         ownerProfileID: UUID? = nil,
+        repositoryPath: String = "",
         title: String = "New chat",
         createdAt: Date = .now,
         updatedAt: Date = .now,
@@ -821,12 +832,14 @@ struct AgentSessionState: Codable, Sendable {
         sessionID: String? = nil,
         codexTurnModeVersion: Int? = nil,
         pendingHandoff: GitHandoffPackage? = nil,
+        handoffWorktreePath: String? = nil,
         worktreeSeedID: UUID? = nil,
         worktree: GitWorktreeOwnership? = nil,
         draft: String = ""
     ) {
         self.id = id
         self.ownerProfileID = ownerProfileID
+        self.repositoryPath = repositoryPath
         self.title = title
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -836,6 +849,7 @@ struct AgentSessionState: Codable, Sendable {
         self.sessionID = sessionID
         self.codexTurnModeVersion = codexTurnModeVersion
         self.pendingHandoff = pendingHandoff
+        self.handoffWorktreePath = handoffWorktreePath
         self.worktreeSeedID = worktreeSeedID
         self.worktree = worktree
         self.draft = draft
@@ -845,6 +859,10 @@ struct AgentSessionState: Codable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         ownerProfileID = try container.decodeIfPresent(UUID.self, forKey: .ownerProfileID)
+        repositoryPath = try container.decodeIfPresent(
+            String.self,
+            forKey: .repositoryPath
+        ) ?? ""
         title = try container.decodeIfPresent(String.self, forKey: .title) ?? "New chat"
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .now
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
@@ -854,6 +872,10 @@ struct AgentSessionState: Codable, Sendable {
         sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID)
         codexTurnModeVersion = try container.decodeIfPresent(Int.self, forKey: .codexTurnModeVersion)
         pendingHandoff = try container.decodeIfPresent(GitHandoffPackage.self, forKey: .pendingHandoff)
+        handoffWorktreePath = try container.decodeIfPresent(
+            String.self,
+            forKey: .handoffWorktreePath
+        ) ?? pendingHandoff?.worktreePath
         worktreeSeedID = try container.decodeIfPresent(UUID.self, forKey: .worktreeSeedID)
         worktree = try container.decodeIfPresent(GitWorktreeOwnership.self, forKey: .worktree)
         draft = try container.decodeIfPresent(String.self, forKey: .draft) ?? ""

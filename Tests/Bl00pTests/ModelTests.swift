@@ -211,6 +211,10 @@ func completedAgentPostsNotificationAndUpdatesDockBadge() async throws {
         isAppWindowActive: { false }
     )
     let backgroundProfile = try #require(model.profiles.dropFirst().first)
+    let backgroundSessionID = try #require(
+        model.selectedSessionID(for: backgroundProfile.id)
+    )
+    #expect(model.setRepositoryPath("/tmp", for: backgroundSessionID))
 
     model.prepareNotifications()
     model.send("Finish this task", to: backgroundProfile.id)
@@ -246,6 +250,10 @@ func activeWindowSuppressesNotificationButKeepsDockBadge() async throws {
         isAppWindowActive: { true }
     )
     let backgroundProfile = try #require(model.profiles.dropFirst().first)
+    let backgroundSessionID = try #require(
+        model.selectedSessionID(for: backgroundProfile.id)
+    )
+    #expect(model.setRepositoryPath("/tmp", for: backgroundSessionID))
 
     model.prepareNotifications()
     model.send("Finish this task", to: backgroundProfile.id)
@@ -611,6 +619,7 @@ func persistedStateRoundTrips() throws {
         profiles: [profile],
         sessions: [
             profile.id: AgentSessionState(
+                repositoryPath: "/tmp/project",
                 status: .completed,
                 entries: [
                     TimelineEntry(kind: .assistant, text: "Done")
@@ -624,6 +633,7 @@ func persistedStateRoundTrips() throws {
         managerWorkflows: [
             profile.id: ManagerWorkflow(
                 managerProfileID: profile.id,
+                repositoryPath: "/tmp/project",
                 team: ManagerTeamConfiguration(),
                 request: "Persist the retry cap",
                 revisionRounds: 2
@@ -640,7 +650,11 @@ func persistedStateRoundTrips() throws {
     #expect(decoded.sessions[profile.id]?.entries.first?.text == "Done")
     #expect(decoded.profiles.first?.worktree?.branch == handoff.branch)
     #expect(decoded.sessions[profile.id]?.pendingHandoff == handoff)
+    #expect(decoded.sessions[profile.id]?.repositoryPath == "/tmp/project")
     #expect(decoded.managerWorkflows[profile.id]?.revisionRounds == 2)
+    #expect(
+        decoded.managerWorkflows[profile.id]?.repositoryPath == "/tmp/project"
+    )
 }
 
 @MainActor
@@ -676,6 +690,7 @@ func legacyProfileSessionsMigrateIntoSelectedTabsWithTheirWorktree() throws {
     #expect(migrated.id == profile.id)
     #expect(migrated.ownerProfileID == profile.id)
     #expect(migrated.title == "Preserve this conversation")
+    #expect(migrated.repositoryPath == "/tmp/project")
     #expect(migrated.worktree?.ownerSessionID == profile.id)
     #expect(model.sessionOrder[profile.id] == [profile.id])
     #expect(model.selectedSessionIDs[profile.id] == profile.id)
@@ -688,16 +703,21 @@ func chatTabsKeepIndependentDraftsHistoriesAndRuntimeIdentities() async throws {
         .appendingPathComponent("bl00p-tab-isolation-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: directory) }
     let runtime = SessionRecordingRuntime()
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
     let model = AppModel(
         runtime: runtime,
-        store: AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+        store: store
     )
-    let profile = try #require(model.profiles.first)
+    let profile = try #require(model.profiles.dropFirst().first)
     let firstID = try #require(model.selectedSessionID(for: profile.id))
+    #expect(model.setRepositoryPath("/tmp/repository-a", for: firstID))
     model.updateDraft("first draft", for: firstID)
     model.send("First task", to: profile.id)
 
     let secondID = model.newChat(for: profile.id)
+    #expect(model.setRepositoryPath("/tmp/repository-b", for: secondID))
     model.updateDraft("second draft", for: secondID)
     model.send("Second task", to: profile.id)
 
@@ -707,6 +727,8 @@ func chatTabsKeepIndependentDraftsHistoriesAndRuntimeIdentities() async throws {
 
     #expect(firstID != secondID)
     #expect(Set(await runtime.respondedSessionIDs) == Set([firstID, secondID]))
+    #expect(await runtime.respondedDirectories[firstID] == "/tmp/repository-a")
+    #expect(await runtime.respondedDirectories[secondID] == "/tmp/repository-b")
     #expect(model.sessions[firstID]?.draft == "first draft")
     #expect(model.sessions[secondID]?.draft == "second draft")
     #expect(model.sessions[firstID]?.entries.contains(where: { $0.text.contains("First task") }) == true)
@@ -714,6 +736,111 @@ func chatTabsKeepIndependentDraftsHistoriesAndRuntimeIdentities() async throws {
     #expect(model.sessions[secondID]?.entries.contains(where: { $0.text.contains("Second task") }) == true)
     #expect(model.sessions[firstID]?.title == "First task")
     #expect(model.sessions[secondID]?.title == "Second task")
+
+    await model.flushPersistence()
+    let restored = AppModel(runtime: SessionRecordingRuntime(), store: store)
+    #expect(restored.sessions[firstID]?.repositoryPath == "/tmp/repository-a")
+    #expect(restored.sessions[secondID]?.repositoryPath == "/tmp/repository-b")
+}
+
+@MainActor
+@Test
+func newChatsRequireARepositoryAndLockItAfterStarting() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-chat-repository-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let runtime = HandoffRecordingRuntime()
+    let model = AppModel(
+        runtime: runtime,
+        store: AppStateStore(
+            fileURL: directory.appendingPathComponent("state.json")
+        )
+    )
+    let profile = try #require(model.profiles.dropFirst().first)
+    let sessionID = try #require(model.selectedSessionID(for: profile.id))
+
+    #expect(model.sessions[sessionID]?.repositoryPath == "")
+    model.send("Cannot start yet", to: profile.id)
+    #expect(await runtime.messages.isEmpty)
+    #expect(
+        model.sessions[sessionID]?.entries.last?.text
+            == "Choose a repository before starting this chat"
+    )
+
+    #expect(model.setRepositoryPath("/tmp/repository-a", for: sessionID))
+    model.send("Start now", to: profile.id)
+    for _ in 0..<30 where await runtime.messages.isEmpty {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(await runtime.respondedDirectories == ["/tmp/repository-a"])
+    #expect(!model.repositoryCanBeChanged(for: sessionID))
+    #expect(!model.setRepositoryPath("/tmp/repository-b", for: sessionID))
+    #expect(model.sessions[sessionID]?.repositoryPath == "/tmp/repository-a")
+
+    let newSessionID = model.newChat(for: profile.id)
+    #expect(model.sessions[newSessionID]?.repositoryPath == "")
+    #expect(model.repositoryCanBeChanged(for: newSessionID))
+}
+
+@MainActor
+@Test
+func builderWorktreesUseEachChatsRepository() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-builder-chat-repositories-\(UUID().uuidString)"
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+    var builder = BotProfile.defaults[0]
+    builder.workingDirectory = ""
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [builder],
+            sessions: [
+                builder.id: AgentSessionState(
+                    id: builder.id,
+                    ownerProfileID: builder.id
+                )
+            ],
+            selectedBotID: builder.id
+        )
+    )
+    let runtime = HandoffRecordingRuntime()
+    let worktrees = RepositoryRecordingWorktreeManager()
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: worktrees,
+        store: store
+    )
+    let firstID = try #require(model.selectedSessionID(for: builder.id))
+    #expect(model.setRepositoryPath("/tmp/repository-a", for: firstID))
+    model.send("First build", to: builder.id)
+    for _ in 0..<30 where await runtime.messages.count < 1 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let secondID = model.newChat(for: builder.id)
+    #expect(model.setRepositoryPath("/tmp/repository-b", for: secondID))
+    model.send("Second build", to: builder.id)
+    for _ in 0..<30 where await runtime.messages.count < 2 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(
+        await worktrees.repositories
+            == ["/tmp/repository-a", "/tmp/repository-b"]
+    )
+    #expect(
+        model.sessions[firstID]?.worktree?.repositoryPath
+            == "/tmp/repository-a"
+    )
+    #expect(
+        model.sessions[secondID]?.worktree?.repositoryPath
+            == "/tmp/repository-b"
+    )
 }
 
 @MainActor
@@ -749,7 +876,7 @@ func draftPersistenceIsDebouncedInsteadOfWritingOnEveryKeystroke() async throws 
 
 @MainActor
 @Test
-func managedWorkflowParticipantsStayBoundAndCannotBeDoubleClaimed() async throws {
+func managedWorkflowsCreateDedicatedSessionsAndCanRunConcurrently() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("bl00p-workflow-tabs-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -804,26 +931,69 @@ func managedWorkflowParticipantsStayBoundAndCannotBeDoubleClaimed() async throws
         )
     )
     let model = AppModel(runtime: ImmediateRecordingRuntime(), store: store)
-    let chosenBuilderSessionID = try #require(model.selectedSessionID(for: builderID))
+    let standaloneBuilderSessionID = try #require(
+        model.selectedSessionID(for: builderID)
+    )
+    let standaloneReviewerSessionID = try #require(
+        model.selectedSessionID(for: reviewerID)
+    )
+    let standalonePublisherSessionID = try #require(
+        model.selectedSessionID(for: publisherID)
+    )
+    #expect(model.setRepositoryPath("/tmp/repository-a", for: managerID))
     model.send("Plan this change", to: managerID)
-    let workflow = try #require(model.workflow(for: managerID))
-    let otherBuilderSessionID = model.newChat(for: builderID)
+    let firstWorkflow = try #require(model.workflow(for: managerID))
+    let firstBuilderSessionID = try #require(
+        firstWorkflow.participantSessionIDs[.builder]
+    )
 
-    #expect(otherBuilderSessionID != chosenBuilderSessionID)
-    #expect(workflow.participantSessionIDs[.manager] == managerID)
-    #expect(workflow.participantSessionIDs[.builder] == chosenBuilderSessionID)
-    #expect(model.workflow(for: managerID)?.participantSessionIDs[.builder]
-        == chosenBuilderSessionID)
+    #expect(firstBuilderSessionID != standaloneBuilderSessionID)
+    #expect(firstWorkflow.repositoryPath == "/tmp/repository-a")
+    #expect(firstWorkflow.participantSessionIDs[.manager] == managerID)
+    #expect(
+        model.sessions[firstBuilderSessionID]?.repositoryPath
+            == "/tmp/repository-a"
+    )
+    #expect(
+        model.selectedSessionID(for: builderID) == standaloneBuilderSessionID
+    )
+    #expect(
+        model.selectedSessionID(for: reviewerID) == standaloneReviewerSessionID
+    )
+    #expect(
+        model.selectedSessionID(for: publisherID)
+            == standalonePublisherSessionID
+    )
+    for role in [AgentRole.builder, .reviewer, .publisher] {
+        let participantID = try #require(
+            firstWorkflow.participantSessionIDs[role]
+        )
+        #expect(
+            model.sessions[participantID]?.repositoryPath
+                == "/tmp/repository-a"
+        )
+    }
 
     let secondManagerSessionID = model.newChat(for: managerID)
     #expect(model.workflow(for: managerID) == nil)
-    model.send("Start another workflow", to: managerID)
-    #expect(model.managerWorkflows[secondManagerSessionID] == nil)
     #expect(
-        model.sessions[secondManagerSessionID]?.entries.contains(where: {
-            $0.text == "Could not start managed workflow"
-                && $0.detail?.contains("already assigned") == true
-        }) == true
+        model.setRepositoryPath(
+            "/tmp/repository-b",
+            for: secondManagerSessionID
+        )
+    )
+    model.send("Start another workflow", to: managerID)
+    let secondWorkflow = try #require(
+        model.managerWorkflows[secondManagerSessionID]
+    )
+    let secondBuilderSessionID = try #require(
+        secondWorkflow.participantSessionIDs[.builder]
+    )
+    #expect(secondWorkflow.repositoryPath == "/tmp/repository-b")
+    #expect(secondBuilderSessionID != firstBuilderSessionID)
+    #expect(
+        model.sessions[secondBuilderSessionID]?.repositoryPath
+            == "/tmp/repository-b"
     )
 
     let closeError = await model.closeSession(
@@ -834,6 +1004,48 @@ func managedWorkflowParticipantsStayBoundAndCannotBeDoubleClaimed() async throws
     #expect(closeError == nil)
     #expect(model.sessions[managerID] == nil)
     #expect(model.managerWorkflows[managerID] == nil)
+}
+
+@MainActor
+@Test
+func managerCannotStartAWorkflowWithoutARepository() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-manager-repository-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let fixture = managedWorkflowFixture()
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: fixture.profiles.map {
+                var profile = $0
+                profile.workingDirectory = ""
+                return profile
+            },
+            sessions: Dictionary(
+                uniqueKeysWithValues: fixture.profiles.map {
+                    (
+                        $0.id,
+                        AgentSessionState(
+                            id: $0.id,
+                            ownerProfileID: $0.id
+                        )
+                    )
+                }
+            ),
+            selectedBotID: fixture.manager.id
+        )
+    )
+    let model = AppModel(runtime: ImmediateRecordingRuntime(), store: store)
+
+    model.send("Plan this change", to: fixture.manager.id)
+
+    #expect(model.workflow(for: fixture.manager.id) == nil)
+    #expect(
+        model.session(for: fixture.manager.id).entries.last?.text
+            == "Choose a repository before starting this workflow"
+    )
 }
 
 @MainActor
@@ -1359,8 +1571,8 @@ func handoffPackageIsDeliveredWithTheRecipientsNextMessage() async throws {
 
     #expect(model.selectedBotID == target.id)
     #expect(model.session(for: target.id).entries.last?.kind == .handoff)
-    #expect(model.profiles.first(where: { $0.id == target.id })?.workingDirectory
-        == package.worktreePath)
+    #expect(model.session(for: target.id).repositoryPath
+        == package.repositoryPath)
 
     model.send("Review this implementation", to: target.id)
     for _ in 0..<30 where await runtime.messages.isEmpty {
@@ -1371,6 +1583,7 @@ func handoffPackageIsDeliveredWithTheRecipientsNextMessage() async throws {
     #expect(delivered.contains("Source branch: \(package.branch)"))
     #expect(delivered.contains("Test state: Passed"))
     #expect(delivered.contains("Next instruction:\nReview this implementation"))
+    #expect(await runtime.respondedDirectories == [package.worktreePath])
     #expect(model.session(for: target.id).pendingHandoff == nil)
 }
 
@@ -1577,8 +1790,17 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
 
     let workflow = try #require(model.workflow(for: managerID))
     let calls = await runtime.calls
+    let builderSessionID = try #require(
+        workflow.participantSessionIDs[.builder]
+    )
+    let reviewerSessionID = try #require(
+        workflow.participantSessionIDs[.reviewer]
+    )
+    let publisherSessionID = try #require(
+        workflow.participantSessionIDs[.publisher]
+    )
     let builderBrief = try #require(
-        model.session(for: builderID).entries.first(where: {
+        model.sessions[builderSessionID]?.entries.first(where: {
             $0.title == "Implementation brief"
         })
     )
@@ -1637,22 +1859,18 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
     #expect(workflow.verificationSummary?.contains("Review clean") == true)
     #expect(workflow.publisherSummary?.contains("Documentation committed") == true)
     #expect(await runtime.approvalResolutionCount == 0)
+    #expect(calls[0].workingDirectory == ownership.repositoryPath)
+    #expect(calls[1].workingDirectory == ownership.worktreePath)
+    #expect(calls[2].workingDirectory == ownership.worktreePath)
+    #expect(calls[5].workingDirectory == ownership.worktreePath)
     #expect(
-        model.profiles.first(where: { $0.id == reviewerID })?
-            .workingDirectory == ownership.worktreePath
-    )
-    #expect(
-        model.profiles.first(where: { $0.id == publisherID })?
-            .workingDirectory == ownership.worktreePath
-    )
-    #expect(
-        model.session(for: publisherID).entries.contains(where: {
+        model.sessions[publisherSessionID]?.entries.contains(where: {
             $0.title == "Workflow handoff from Reviewer"
                 && $0.detail?.contains(revisedPackage.headRevision) == true
-        })
+        }) == true
     )
     let reviewerHandoff = try #require(
-        model.session(for: reviewerID).entries.first(where: {
+        model.sessions[reviewerSessionID]?.entries.first(where: {
             $0.kind == .handoff
                 && $0.title?.hasPrefix("Workflow handoff") == true
         })
@@ -1713,6 +1931,9 @@ func managerPlanInASecondaryChatBecomesAnApprovalCard() async throws {
     )
     let model = AppModel(runtime: runtime, store: store)
     let managerChatID = model.newChat(for: fixture.manager.id)
+    #expect(
+        model.setRepositoryPath("/tmp/project", for: managerChatID)
+    )
 
     model.send("Plan this change", to: fixture.manager.id)
     for _ in 0..<100
@@ -2395,10 +2616,10 @@ func persistedLegacyVerifyingWorkflowStillDecodesAndRecovers() async throws {
     )
     #expect(restored.isPaused)
     #expect(model.session(for: publisher.id).sessionID == nil)
-    #expect(
-        model.profiles.first(where: { $0.id == publisher.id })?
-            .workingDirectory == package.worktreePath
-    )
+    #expect(model.session(for: publisher.id).repositoryPath
+        == package.repositoryPath)
+    #expect(model.session(for: publisher.id).pendingHandoff?.worktreePath
+        == package.worktreePath)
     #expect(
         model.session(for: publisher.id).entries.filter {
             $0.kind == .handoff
@@ -2816,6 +3037,98 @@ func laterStageDispatchRecoveryRestoresReviewerAndPublisherCheckouts() async thr
 }
 
 @MainActor
+@Test
+func workflowRejectsAHandoffFromAnotherRepository() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-repository-mismatch-\(UUID().uuidString)"
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let fixture = managedWorkflowFixture()
+    let managerSessionID = UUID()
+    let publisherSessionID = UUID()
+    let package = GitHandoffPackage(
+        sourceProfileID: fixture.builder.id,
+        sourceName: fixture.builder.name,
+        repositoryPath: "/tmp/repository-b",
+        worktreePath: "/tmp/.bl00p-worktrees/repository-b",
+        branch: "bl00p/wrong-repository",
+        baseRevision: "abc123",
+        headRevision: "def456",
+        taskContext: "Wrong repository",
+        testStatus: .passed,
+        testSummary: "Passed",
+        workingTreeSummary: "Clean"
+    )
+    let dispatch = ManagerWorkflowDispatch(
+        kind: .publishing,
+        sourceProfileID: fixture.reviewer.id,
+        targetProfileID: fixture.publisher.id,
+        summary: "Publish",
+        handoff: package
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: fixture.manager.id,
+        repositoryPath: "/tmp/repository-a",
+        team: fixture.team,
+        request: "Keep repository context isolated",
+        pendingDispatch: dispatch,
+        stage: .publishing,
+        isPaused: true,
+        participantSessionIDs: [
+            .manager: managerSessionID,
+            .publisher: publisherSessionID
+        ]
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: fixture.profiles,
+            sessions: [
+                managerSessionID: AgentSessionState(
+                    id: managerSessionID,
+                    ownerProfileID: fixture.manager.id,
+                    repositoryPath: "/tmp/repository-a"
+                ),
+                publisherSessionID: AgentSessionState(
+                    id: publisherSessionID,
+                    ownerProfileID: fixture.publisher.id,
+                    repositoryPath: "/tmp/repository-a"
+                )
+            ],
+            selectedBotID: fixture.manager.id,
+            managerWorkflows: [managerSessionID: workflow],
+            sessionOrder: [
+                fixture.manager.id: [managerSessionID],
+                fixture.publisher.id: [publisherSessionID]
+            ],
+            selectedSessionIDs: [
+                fixture.manager.id: managerSessionID,
+                fixture.publisher.id: publisherSessionID
+            ]
+        )
+    )
+    let runtime = SuspendedWorkflowRuntime()
+    let model = AppModel(runtime: runtime, store: store)
+    model.recoverPendingWorkflowDispatches()
+    for _ in 0..<30
+        where model.managerWorkflows[managerSessionID]?.pauseReason?
+            .contains("different repository") != true {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(
+        model.managerWorkflows[managerSessionID]?.pauseReason?
+            .contains("different repository") == true
+    )
+    #expect(await runtime.calls.isEmpty)
+    #expect(model.sessions[publisherSessionID]?.repositoryPath
+        == "/tmp/repository-a")
+}
+
+@MainActor
 private func assertRecoveredWorkflowDispatch(
     kind: ManagerWorkflowDispatchKind,
     expectedRole: AgentRole
@@ -2944,10 +3257,8 @@ private func assertRecoveredWorkflowDispatch(
     let call = try #require(await runtime.calls.first)
     #expect(call.role == expectedRole)
     #expect(call.workingDirectory == package.worktreePath)
-    #expect(
-        model.profiles.first(where: { $0.id == targetID })?
-            .workingDirectory == package.worktreePath
-    )
+    #expect(model.session(for: targetID).repositoryPath
+        == package.repositoryPath)
     #expect(model.workflow(for: managerID)?.pendingDispatch == nil)
     #expect(model.workflow(for: managerID)?.deliveredDispatchID == dispatchID)
     #expect(
@@ -3152,7 +3463,15 @@ func pendingDispatchPayloadsSurviveRestartBeforeRuntimeResponse() async throws {
         )
 
         let blockedRuntime = BlockingWorkflowRuntime()
-        let model = AppModel(runtime: blockedRuntime, store: store)
+        let worktrees = StubWorktreeManager(
+            packages: [],
+            preparedOwnership: ownership
+        )
+        let model = AppModel(
+            runtime: blockedRuntime,
+            worktrees: worktrees,
+            store: store
+        )
         for _ in 0..<100 where await blockedRuntime.responseStarted == false {
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -3163,7 +3482,11 @@ func pendingDispatchPayloadsSurviveRestartBeforeRuntimeResponse() async throws {
         )
 
         let restoredRuntime = SuspendedWorkflowRuntime()
-        let restoredModel = AppModel(runtime: restoredRuntime, store: store)
+        let restoredModel = AppModel(
+            runtime: restoredRuntime,
+            worktrees: worktrees,
+            store: store
+        )
         #expect(
             restoredModel.workflow(for: managerID)?
                 .resumeAvailableAfterRestart == true
@@ -3229,7 +3552,36 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
     let runtime = OrchestrationRecordingRuntime(
         managerPlanningResponses: [initialPlan, revisedPlan]
     )
-    let model = AppModel(runtime: runtime, store: store)
+    let workflowOwnership = GitWorktreeOwnership(
+        ownerProfileID: builder.id,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/declined-plan",
+        branch: "bl00p/declined-plan",
+        baseRevision: "abc123"
+    )
+    let unfinishedPackage = GitHandoffPackage(
+        sourceProfileID: builder.id,
+        sourceName: builder.name,
+        repositoryPath: workflowOwnership.repositoryPath,
+        worktreePath: workflowOwnership.worktreePath,
+        branch: workflowOwnership.branch,
+        baseRevision: workflowOwnership.baseRevision,
+        headRevision: workflowOwnership.baseRevision,
+        taskContext: "Plan this change",
+        testStatus: .notRun,
+        testSummary: "Not run",
+        workingTreeSummary: "Clean"
+    )
+    let workflowWorktrees = StubWorktreeManager(
+        packages: [unfinishedPackage],
+        preparedOwnership: workflowOwnership
+    )
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: workflowWorktrees,
+        store: store
+    )
+    #expect(model.setRepositoryPath("/tmp/project", for: manager.id))
 
     model.send("Plan this change", to: manager.id)
     for _ in 0..<100
@@ -3250,6 +3602,7 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
     )
     let restoredModel = AppModel(
         runtime: runtime,
+        worktrees: workflowWorktrees,
         store: AppStateStore(fileURL: store.fileURL)
     )
     #expect(restoredModel.session(for: manager.id).status == .needsApproval)
@@ -3285,6 +3638,7 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
 
     let resolvedRestoredModel = AppModel(
         runtime: runtime,
+        worktrees: workflowWorktrees,
         store: AppStateStore(fileURL: store.fileURL)
     )
     let restoredDeclinedEntry = try #require(
@@ -3332,6 +3686,7 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
 
     let revisedRestoredModel = AppModel(
         runtime: runtime,
+        worktrees: workflowWorktrees,
         store: AppStateStore(fileURL: store.fileURL)
     )
     #expect(revisedRestoredModel.session(for: manager.id).status == .needsApproval)
@@ -3356,7 +3711,10 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
     }
 
     let builderBrief = try #require(
-        revisedRestoredModel.session(for: builder.id).entries.first(where: {
+        revisedRestoredModel.sessions[
+            revisedRestoredModel.workflow(for: manager.id)?
+                .participantSessionIDs[.builder] ?? builder.id
+        ]?.entries.first(where: {
             $0.title == "Implementation brief"
         })
     )
@@ -3509,6 +3867,7 @@ func managerPlanningWithoutAPlanPausesWithoutAdoptingOlderMessages() async throw
             managerPlanningResponses: [""]
         )
         let model = AppModel(runtime: runtime, store: store)
+        #expect(model.setRepositoryPath("/tmp/project", for: manager.id))
 
         model.send("Plan this change", to: manager.id)
         for _ in 0..<100
@@ -3583,7 +3942,22 @@ func relaunchRecoversACompletedManagerPlanAndDispatchesBuilderOnce() async throw
     )
 
     let runtime = RecoveredApprovalRuntime()
-    let firstRelaunch = AppModel(runtime: runtime, store: store)
+    let recoveredOwnership = GitWorktreeOwnership(
+        ownerProfileID: fixture.builder.id,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/recovered-plan",
+        branch: "bl00p/recovered-plan",
+        baseRevision: "abc123"
+    )
+    let worktrees = StubWorktreeManager(
+        packages: [],
+        preparedOwnership: recoveredOwnership
+    )
+    let firstRelaunch = AppModel(
+        runtime: runtime,
+        worktrees: worktrees,
+        store: store
+    )
     let firstApproval = try #require(
         firstRelaunch.session(for: fixture.manager.id).entries.first(where: {
             $0.kind == .approval && $0.approvalState == .pending
@@ -3599,7 +3973,11 @@ func relaunchRecoversACompletedManagerPlanAndDispatchesBuilderOnce() async throw
             == .needsApproval
     )
 
-    let secondRelaunch = AppModel(runtime: runtime, store: store)
+    let secondRelaunch = AppModel(
+        runtime: runtime,
+        worktrees: worktrees,
+        store: store
+    )
     let pendingApprovals = secondRelaunch
         .session(for: fixture.manager.id)
         .entries
@@ -4075,6 +4453,7 @@ func managerWithoutATeamRemainsAStandaloneBot() async throws {
     )
     let runtime = ImmediateRecordingRuntime()
     let model = AppModel(runtime: runtime, store: store)
+    #expect(model.setRepositoryPath("/tmp", for: manager.id))
 
     model.send("Help me scope this change", to: manager.id)
     for _ in 0..<30
@@ -4120,6 +4499,7 @@ func managedPublishingPausesUntilADraftPRURLIsReturned() async throws {
     )
     let workflow = ManagerWorkflow(
         managerProfileID: manager.id,
+        repositoryPath: "/tmp/project",
         team: team,
         request: "Ship the feature",
         stage: .publishing
@@ -4189,6 +4569,7 @@ func cleanReviewPausesBeforeTransitionWhenPublisherWasDeleted() async throws {
     )
     let workflow = ManagerWorkflow(
         managerProfileID: manager.id,
+        repositoryPath: "/tmp/project",
         team: team,
         request: "Ship safely",
         stage: .reviewing
@@ -4421,8 +4802,10 @@ func implementationBotRunsInsideItsOwnedWorktree() async throws {
 
     #expect(await runtime.startedDirectories == [ownership.worktreePath])
     #expect(await runtime.respondedDirectories == [ownership.worktreePath])
-    #expect(model.profiles.first?.worktree == ownership)
-    #expect(model.profiles.first?.workingDirectory == ownership.repositoryPath)
+    #expect(model.session(for: profile.id).worktree?.worktreePath
+        == ownership.worktreePath)
+    #expect(model.session(for: profile.id).repositoryPath
+        == ownership.repositoryPath)
 }
 
 @MainActor
@@ -4751,7 +5134,8 @@ func fiveHundredEventStreamIsNotBlockedBySlowPersistence() async throws {
     )
     let runtime = FiveHundredEventRuntime()
     let model = AppModel(runtime: runtime, store: store)
-    let profileID = try #require(model.profiles.first?.id)
+    let profileID = try #require(model.profiles.dropFirst().first?.id)
+    #expect(model.setRepositoryPath("/tmp", for: profileID))
 
     model.send("Stream a large result", to: profileID)
     for _ in 0..<200 {
@@ -6567,7 +6951,8 @@ func firstMessageLaunchesAStoppedBotWithoutAddingAQuestionCard() async throws {
         runtime: runtime,
         store: AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
     )
-    let profileID = try #require(model.profiles.first?.id)
+    let profileID = try #require(model.profiles.dropFirst().first?.id)
+    #expect(model.setRepositoryPath("/tmp", for: profileID))
 
     model.send("Inspect the repository", to: profileID)
 
@@ -6590,7 +6975,8 @@ func firstMessageLaunchesAStoppedBotWithoutAddingAQuestionCard() async throws {
 func resumingAStoppedBotKeepsItsExistingTranscript() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("bl00p-resume-\(UUID().uuidString)", isDirectory: true)
-    let profile = BotProfile.defaults[0]
+    var profile = BotProfile.defaults[1]
+    profile.workingDirectory = "/tmp"
     let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
     try store.saveFixture(
         PersistedAppState(
@@ -6626,7 +7012,8 @@ func resumingAStoppedBotKeepsItsExistingTranscript() async throws {
 func persistedCompletedBotReconnectsBeforeItsNextMessage() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("bl00p-reconnect-\(UUID().uuidString)", isDirectory: true)
-    let profile = BotProfile.defaults[0]
+    var profile = BotProfile.defaults[1]
+    profile.workingDirectory = "/tmp"
     let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
     try store.saveFixture(
         PersistedAppState(
@@ -6669,7 +7056,8 @@ func aLongLivedStartupStreamDoesNotBlockTheFirstTurn() async throws {
         runtime: runtime,
         store: AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
     )
-    let profileID = try #require(model.profiles.first?.id)
+    let profileID = try #require(model.profiles.dropFirst().first?.id)
+    #expect(model.setRepositoryPath("/tmp", for: profileID))
 
     model.send("Run the review", to: profileID)
 
@@ -6689,7 +7077,8 @@ func failedMessageCanRetryInPlaceWithItsAttachments() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("bl00p-retry-\(UUID().uuidString)", isDirectory: true)
     let runtime = FailOnceRuntime()
-    let profile = BotProfile.defaults[0]
+    var profile = BotProfile.defaults[1]
+    profile.workingDirectory = "/tmp"
     let earlierEntry = TimelineEntry(kind: .user, text: "Earlier message")
     let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
     try store.saveFixture(
@@ -6766,7 +7155,7 @@ func pendingQuestionAndApprovalStatesBlockFailedMessageRetry() async throws {
         runtime: runtime,
         store: AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
     )
-    let profileID = try #require(model.profiles.first?.id)
+    let profileID = try #require(model.profiles.dropFirst().first?.id)
     let failedEntry = TimelineEntry(
         kind: .user,
         text: "Do not resend this",
@@ -6805,7 +7194,8 @@ func anotherRetryFailureKeepsTheSameBubbleRetryable() async throws {
         runtime: runtime,
         store: AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
     )
-    let profileID = try #require(model.profiles.first?.id)
+    let profileID = try #require(model.profiles.dropFirst().first?.id)
+    #expect(model.setRepositoryPath("/tmp", for: profileID))
 
     model.send("Still failing", to: profileID)
     for _ in 0..<30 where model.session(for: profileID).status != .failed {
@@ -6845,7 +7235,8 @@ func idleDisconnectDoesNotMakeACompletedMessageRetryable() async throws {
         runtime: runtime,
         store: AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
     )
-    let profileID = try #require(model.profiles.first?.id)
+    let profileID = try #require(model.profiles.dropFirst().first?.id)
+    #expect(model.setRepositoryPath("/tmp", for: profileID))
 
     model.send("Complete before disconnecting", to: profileID)
 
@@ -7304,6 +7695,32 @@ private actor StubWorktreeManager: GitWorktreeManaging {
     }
 }
 
+private actor RepositoryRecordingWorktreeManager: GitWorktreeManaging {
+    private(set) var repositories: [String] = []
+
+    func prepareWorktree(
+        for profile: BotProfile,
+        startingPoint: String?,
+        handoffID: UUID?
+    ) async throws -> GitWorktreeOwnership {
+        repositories.append(profile.workingDirectory)
+        return GitWorktreeOwnership(
+            ownerProfileID: profile.id,
+            repositoryPath: profile.workingDirectory,
+            worktreePath: "\(profile.workingDirectory)-worktree",
+            branch: "bl00p/\(repositories.count)",
+            baseRevision: "abc123"
+        )
+    }
+
+    func makeHandoff(
+        from profile: BotProfile,
+        session: AgentSessionState
+    ) async throws -> GitHandoffPackage {
+        throw GitWorktreeError.commandFailed("No handoff expected.")
+    }
+}
+
 private actor ReuseRecordingWorktreeManager: GitWorktreeManaging {
     let package: GitHandoffPackage
     let ownership: GitWorktreeOwnership
@@ -7457,19 +7874,22 @@ private func managedWorkflowFixture() -> (
         name: "Builder",
         provider: .claude,
         role: .builder,
-        instructions: "Implement."
+        instructions: "Implement.",
+        workingDirectory: "/tmp/project"
     )
     let reviewer = BotProfile(
         name: "Reviewer",
         provider: .codex,
         role: .reviewer,
-        instructions: "Review."
+        instructions: "Review.",
+        workingDirectory: "/tmp/project"
     )
     let publisher = BotProfile(
         name: "Documenter",
         provider: .claude,
         role: .publisher,
-        instructions: "Document."
+        instructions: "Document.",
+        workingDirectory: "/tmp/project"
     )
     let team = ManagerTeamConfiguration(
         builderProfileID: builder.id,
@@ -7481,6 +7901,7 @@ private func managedWorkflowFixture() -> (
         provider: .codex,
         role: .manager,
         instructions: "Coordinate.",
+        workingDirectory: "/tmp/project",
         managerTeam: team
     )
     return (
@@ -7726,6 +8147,7 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
     struct Call: Sendable {
         let role: AgentRole
         let message: String
+        let workingDirectory: String
     }
 
     private(set) var calls: [Call] = []
@@ -7788,7 +8210,13 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
         attachments: [ImageAttachment],
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent> {
-        calls.append(.init(role: profile.role, message: message))
+        calls.append(
+            .init(
+                role: profile.role,
+                message: message,
+                workingDirectory: profile.runtimeWorkingDirectory
+            )
+        )
         let count = roleResponseCounts[profile.role, default: 0]
         roleResponseCounts[profile.role] = count + 1
 
@@ -8018,6 +8446,7 @@ private actor ImmediateRecordingRuntime: AgentRuntime {
 
 private actor SessionRecordingRuntime: AgentRuntime {
     private(set) var respondedSessionIDs: [UUID] = []
+    private(set) var respondedDirectories: [UUID: String] = [:]
 
     func start(
         profile: BotProfile,
@@ -8038,6 +8467,7 @@ private actor SessionRecordingRuntime: AgentRuntime {
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent> {
         respondedSessionIDs.append(profile.id)
+        respondedDirectories[profile.id] = profile.workingDirectory
         return AsyncStream { continuation in
             continuation.yield(
                 .entry(

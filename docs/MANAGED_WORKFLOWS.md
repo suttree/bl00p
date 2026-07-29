@@ -4,6 +4,36 @@ This note describes the persisted state that connects the Manager's plan
 approval gate to the Builder handoff. It is intended for contributors changing
 workflow restoration or the associated tests.
 
+## Repository and participant sessions
+
+`AgentSessionState.repositoryPath` is the persisted source of truth for a
+chat's repository. `BotProfile.workingDirectory` and its legacy worktree field
+exist only so older saved state can be migrated; runtime setup must not read or
+mutate them as bot settings.
+
+Starting a workflow snapshots the Manager session's repository in
+`ManagerWorkflow.repositoryPath`. It also creates dedicated Builder, Reviewer,
+and Documenter sessions and records their IDs in `participantSessionIDs`.
+Those sessions all retain the same base repository:
+
+- The Manager runs in the selected repository.
+- The Builder creates and owns an isolated worktree from that repository.
+- The Reviewer and Documenter run in the Builder handoff worktree while their
+  persisted `repositoryPath` remains the workflow's base repository.
+
+Participant creation must not select, reset, or mutate an existing standalone
+chat. This is what allows two Manager chats to use the same configured profiles
+for concurrent workflows in different repositories. Handoffs whose
+`repositoryPath` differs from the workflow snapshot must be rejected or pause
+the workflow before a recipient is launched.
+
+On restoration, legacy session repositories are inferred in this order from
+session worktree ownership, a pending handoff, and the former profile working
+directory. Legacy workflows also recover their repository from saved handoffs,
+the Manager session, participant sessions, or legacy profile data. Once a
+workflow repository is known, its participant sessions are normalized to that
+base repository.
+
 ## Approval state
 
 While a Manager workflow is in the `planning` stage, the persisted workflow
@@ -40,6 +70,9 @@ approval text must not fabricate a plan.
 
 The model tests covering these invariants include:
 
+- `newChatsRequireARepositoryAndLockItAfterStarting`
+- `managedWorkflowsCreateDedicatedSessionsAndCanRunConcurrently`
+- `workflowRejectsAHandoffFromAnotherRepository`
 - `relaunchRecoversACompletedManagerPlanAndDispatchesBuilderOnce`
 - `relaunchDoesNotTurnARuntimeApprovalIntoAPlanApproval`
 - `relaunchAdoptsAPlanApprovalCardWhoseWorkflowIDWasNotSaved`

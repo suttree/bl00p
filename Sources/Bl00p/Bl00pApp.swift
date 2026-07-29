@@ -81,9 +81,7 @@ private struct RootView: View {
                     Divider()
                     ProfileInspectorView(
                         profile: model.binding(for: selectedID),
-                        profiles: model.profiles,
-                        currentWorktree: model.session(for: selectedID).worktree,
-                        chooseDirectory: { model.chooseWorkingDirectory(for: selectedID) }
+                        profiles: model.profiles
                     )
                     .frame(width: 330)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
