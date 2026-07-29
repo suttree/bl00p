@@ -1679,6 +1679,72 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
 
 @MainActor
 @Test
+func managerPlanInASecondaryChatBecomesAnApprovalCard() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-secondary-manager-plan-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let fixture = managedWorkflowFixture()
+    let plan = """
+    ## Implementation plan
+
+    1. Make plan capture session-aware.
+    2. Add a regression test.
+    """
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    try store.saveFixture(
+        PersistedAppState(
+            profiles: fixture.profiles,
+            sessions: Dictionary(
+                uniqueKeysWithValues: fixture.profiles.map {
+                    ($0.id, AgentSessionState())
+                }
+            ),
+            selectedBotID: fixture.manager.id
+        )
+    )
+    let runtime = OrchestrationRecordingRuntime(
+        managerPlanningResponses: [plan]
+    )
+    let model = AppModel(runtime: runtime, store: store)
+    let managerChatID = model.newChat(for: fixture.manager.id)
+
+    model.send("Plan this change", to: fixture.manager.id)
+    for _ in 0..<100
+        where model.session(for: fixture.manager.id).status
+            != .needsApproval {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let session = try #require(model.sessions[managerChatID])
+    let approval = try #require(
+        session.entries.last(where: {
+            $0.kind == .approval && $0.approvalState == .pending
+        })
+    )
+    #expect(managerChatID != fixture.manager.id)
+    #expect(session.status == .needsApproval)
+    #expect(approval.title == "Approve implementation plan")
+    #expect(approval.text == plan)
+    #expect(approval.contentFormat == .markdown)
+    #expect(
+        session.entries.contains(where: {
+            $0.kind == .assistant && $0.text == plan
+        }) == false
+    )
+    #expect(
+        model.managerWorkflows[managerChatID]?.planApprovalEntryID
+            == approval.id
+    )
+}
+
+@MainActor
+@Test
 func invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(

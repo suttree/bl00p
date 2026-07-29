@@ -1038,17 +1038,17 @@ final class AppModel: ObservableObject {
                 ),
                 handoff: pendingHandoff
             )
-            if managerWorkflows[profileID]?.stage == .planning,
-               managerWorkflows[profileID]?.planApprovalEntryID == nil {
-                planningTurnAssistantEntryIDs[profileID] = []
+            if managerWorkflows[chatID]?.stage == .planning,
+               managerWorkflows[chatID]?.planApprovalEntryID == nil {
+                planningTurnAssistantEntryIDs[chatID] = []
             }
             let responseStream = await runtime.respond(
                 to: runtimeMessage,
                 attachments: attachments,
                 profile: preparedProfile
             )
-            turnEntryStartIndices[profileID] =
-                sessions[profileID]?.entries.count ?? 0
+            turnEntryStartIndices[chatID] =
+                sessions[chatID]?.entries.count ?? 0
             var recordedFirstOutput = false
             for await event in responseStream {
                 guard runGenerations[chatID] == generation else { return }
