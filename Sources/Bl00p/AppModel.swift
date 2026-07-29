@@ -307,6 +307,11 @@ final class AppModel: ObservableObject {
                 uniqueKeysWithValues: sessions.map {
                     sessionID, restoredSession in
                     var session = restoredSession
+                    for index in session.entries.indices
+                        where session.entries[index]
+                            .questionResolution?.state == .pending {
+                        session.entries[index].questionResolution = .cancelled
+                    }
                     if session.status == .launching
                         || session.status == .working
                         || session.status == .needsApproval
@@ -1260,6 +1265,35 @@ final class AppModel: ObservableObject {
             let stream = await runtime.resolveApproval(
                 entryID: entryID,
                 approved: approved,
+                profile: runtimeProfile(for: profile, sessionID: chatID)
+            )
+            consume(stream, for: chatID, generation: generation)
+        }
+    }
+
+    func resolveQuestion(
+        _ entryID: UUID,
+        selections: [QuestionSelection],
+        for profileID: UUID
+    ) {
+        guard let chatID = selectedSessionID(for: profileID),
+              let state = sessions[chatID],
+              state.entries.contains(where: {
+                  $0.id == entryID
+                      && $0.kind == .question
+                      && $0.questionResolution?.state == .pending
+              }),
+              let profile = profiles.first(where: { $0.id == profileID })
+        else {
+            return
+        }
+
+        let generation = runGenerations[chatID] ?? UUID()
+        runGenerations[chatID] = generation
+        Task {
+            let stream = await runtime.resolveQuestion(
+                entryID: entryID,
+                selections: selections,
                 profile: runtimeProfile(for: profile, sessionID: chatID)
             )
             consume(stream, for: chatID, generation: generation)
@@ -3667,6 +3701,10 @@ final class AppModel: ObservableObject {
             if let index = state.entries.firstIndex(where: { $0.id == entryID }) {
                 state.entries[index].approvalState = approvalState
             }
+        case .questionResolved(let entryID, let resolution):
+            if let index = state.entries.firstIndex(where: { $0.id == entryID }) {
+                state.entries[index].questionResolution = resolution
+            }
         case .sessionID(let sessionID):
             state.sessionID = sessionID
             if profiles.first(where: { $0.id == ownerProfileID })?.provider == .codex {
@@ -3686,7 +3724,7 @@ final class AppModel: ObservableObject {
                     || status == .completed
                     || status == .failed
                     || status == .stopped
-        case .approvalResolved:
+        case .approvalResolved, .questionResolved:
             requiresImmediatePersistence = true
         case .entry, .upsertEntry, .sessionID:
             requiresImmediatePersistence = false

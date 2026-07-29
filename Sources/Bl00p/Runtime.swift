@@ -5,6 +5,7 @@ enum AgentEvent: Sendable {
     case entry(TimelineEntry)
     case upsertEntry(TimelineEntry)
     case approvalResolved(UUID, ApprovalState)
+    case questionResolved(UUID, QuestionResolution)
     case sessionID(String)
 }
 
@@ -20,7 +21,22 @@ protocol AgentRuntime: Sendable {
         approved: Bool,
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent>
+    func resolveQuestion(
+        entryID: UUID,
+        selections: [QuestionSelection],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent>
     func stop(profile: BotProfile) async
+}
+
+extension AgentRuntime {
+    func resolveQuestion(
+        entryID: UUID,
+        selections: [QuestionSelection],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
 }
 
 struct DemoAgentRuntime: AgentRuntime {
@@ -159,6 +175,31 @@ struct DemoAgentRuntime: AgentRuntime {
         ])
     }
 
+    func resolveQuestion(
+        entryID: UUID,
+        selections: [QuestionSelection],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        stream([
+            (
+                .questionResolved(
+                    entryID,
+                    QuestionResolution(
+                        state: .submitted,
+                        selections: selections
+                    )
+                ),
+                0
+            ),
+            (.status(.working), 0),
+            (.entry(.init(
+                kind: .assistant,
+                text: "Thanks — I’ll continue with those choices."
+            )), 220),
+            (.status(.completed), 80)
+        ])
+    }
+
     func stop(profile: BotProfile) async {}
 
     private func stream(_ scheduledEvents: [(AgentEvent, UInt64)]) -> AsyncStream<AgentEvent> {
@@ -264,6 +305,26 @@ actor AgentRuntimeRouter: AgentRuntime {
         return await claude.resolveApproval(
             entryID: entryID,
             approved: approved,
+            profile: profile
+        )
+    }
+
+    func resolveQuestion(
+        entryID: UUID,
+        selections: [QuestionSelection],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        let provider = activeProviders[profile.id] ?? profile.provider
+        if provider == .codex {
+            return await codex.resolveQuestion(
+                entryID: entryID,
+                selections: selections,
+                profile: profile
+            )
+        }
+        return await claude.resolveQuestion(
+            entryID: entryID,
+            selections: selections,
             profile: profile
         )
     }

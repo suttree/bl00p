@@ -757,6 +757,70 @@ enum TimelineContentFormat: String, Codable, Sendable {
     case markdown
 }
 
+struct StructuredQuestionOption: Identifiable, Codable, Hashable, Sendable {
+    var label: String
+    var description: String?
+
+    var id: String { label }
+}
+
+struct StructuredQuestion: Identifiable, Codable, Hashable, Sendable {
+    var id: String
+    var header: String?
+    var prompt: String
+    var options: [StructuredQuestionOption]
+    var multiSelect: Bool
+}
+
+struct QuestionSelection: Codable, Hashable, Sendable {
+    var questionID: String
+    var answers: [String]
+}
+
+enum QuestionSelectionValidator {
+    static func isValid(
+        _ selections: [QuestionSelection],
+        for questions: [StructuredQuestion]
+    ) -> Bool {
+        guard selections.count == questions.count else { return false }
+        let byID = Dictionary(
+            selections.map { ($0.questionID, $0.answers) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        guard byID.count == selections.count else { return false }
+
+        return questions.allSatisfy { question in
+            guard let answers = byID[question.id], !answers.isEmpty else {
+                return false
+            }
+            if question.options.isEmpty {
+                return answers.count == 1
+                    && !answers[0]
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .isEmpty
+            }
+            let labels = Set(question.options.map(\.label))
+            return (question.multiSelect || answers.count == 1)
+                && Set(answers).count == answers.count
+                && answers.allSatisfy(labels.contains)
+        }
+    }
+}
+
+enum QuestionResolutionState: String, Codable, Sendable {
+    case pending
+    case submitted
+    case cancelled
+}
+
+struct QuestionResolution: Codable, Hashable, Sendable {
+    var state: QuestionResolutionState
+    var selections: [QuestionSelection]
+
+    static let pending = QuestionResolution(state: .pending, selections: [])
+    static let cancelled = QuestionResolution(state: .cancelled, selections: [])
+}
+
 struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var kind: TimelineKind
@@ -768,6 +832,8 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
     var attachments: [ImageAttachment]?
     var deliveryFailed: Bool?
     var contentFormat: TimelineContentFormat?
+    var questions: [StructuredQuestion]?
+    var questionResolution: QuestionResolution?
 
     init(
         id: UUID = UUID(),
@@ -779,7 +845,9 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
         approvalState: ApprovalState? = nil,
         attachments: [ImageAttachment]? = nil,
         deliveryFailed: Bool? = nil,
-        contentFormat: TimelineContentFormat? = nil
+        contentFormat: TimelineContentFormat? = nil,
+        questions: [StructuredQuestion]? = nil,
+        questionResolution: QuestionResolution? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -791,6 +859,8 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
         self.attachments = attachments
         self.deliveryFailed = deliveryFailed
         self.contentFormat = contentFormat
+        self.questions = questions
+        self.questionResolution = questionResolution
     }
 }
 

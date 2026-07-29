@@ -146,3 +146,38 @@ enum JSONValueError: LocalizedError {
 extension Dictionary where Key == String, Value == JSONValue {
     var jsonValue: JSONValue { .object(self) }
 }
+
+extension StructuredQuestion {
+    init?(json: JSONValue, index: Int) {
+        guard let prompt = json["question"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !prompt.isEmpty else {
+            return nil
+        }
+
+        let options = (json["options"]?.arrayValue ?? []).compactMap {
+            option -> StructuredQuestionOption? in
+            guard let label = option["label"]?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                !label.isEmpty else {
+                return nil
+            }
+            let description = option["description"]?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return StructuredQuestionOption(
+                label: label,
+                description: description?.isEmpty == false
+                    ? description
+                    : nil
+            )
+        }
+
+        self.init(
+            id: json["id"]?.stringValue ?? "question-\(index)",
+            header: json["header"]?.stringValue,
+            prompt: prompt,
+            options: options,
+            multiSelect: json["multiSelect"]?.boolValue ?? false
+        )
+    }
+}

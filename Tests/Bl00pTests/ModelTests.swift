@@ -5715,6 +5715,337 @@ func claudeToolApprovalsUseTheSDKControlProtocol() throws {
 }
 
 @Test
+func structuredQuestionsPreserveOptionsAndBuildClaudeAnswers() throws {
+    let request = try JSONDecoder().decode(
+        JSONValue.self,
+        from: Data(
+            """
+            {
+              "subtype": "can_use_tool",
+              "tool_name": "AskUserQuestion",
+              "input": {
+                "questions": [
+                  {
+                    "header": "Approach",
+                    "question": "Which implementation should I use?",
+                    "options": [
+                      {
+                        "label": "Focused fix",
+                        "description": "Change only the broken prompt."
+                      },
+                      {
+                        "label": "Shared component",
+                        "description": "Use one question UI for both providers."
+                      },
+                      {
+                        "label": "Defer",
+                        "description": "Leave the current behavior unchanged."
+                      }
+                    ],
+                    "multiSelect": false
+                  },
+                  {
+                    "header": "Verification",
+                    "question": "Which checks should I run?",
+                    "options": [
+                      {
+                        "label": "Build",
+                        "description": "Compile the application."
+                      },
+                      {
+                        "label": "Tests",
+                        "description": "Run the complete test suite."
+                      }
+                    ],
+                    "multiSelect": true
+                  }
+                ],
+                "context": "keep-this-field"
+              }
+            }
+            """.utf8
+        )
+    )
+    let questionRequest = try #require(
+        ClaudeUserQuestionRequest(request: request)
+    )
+    let entry = questionRequest.timelineEntry()
+
+    #expect(entry.kind == .question)
+    #expect(entry.approvalState == nil)
+    #expect(entry.questionResolution == .pending)
+    #expect(entry.questions?.count == 2)
+    #expect(entry.questions?.first?.header == "Approach")
+    #expect(entry.questions?.first?.options.count == 3)
+    #expect(
+        entry.questions?.first?.options[1].description
+            == "Use one question UI for both providers."
+    )
+    #expect(entry.questions?.last?.multiSelect == true)
+
+    let response = questionRequest.response(
+        for: [
+            QuestionSelection(
+                questionID: "question-0",
+                answers: ["Shared component"]
+            ),
+            QuestionSelection(
+                questionID: "question-1",
+                answers: ["Build", "Tests"]
+            )
+        ]
+    )
+    #expect(response["behavior"]?.stringValue == "allow")
+    #expect(
+        response["updatedInput"]?["questions"]
+            == request["input"]?["questions"]
+    )
+    #expect(
+        response["updatedInput"]?["context"]?.stringValue
+            == "keep-this-field"
+    )
+    #expect(
+        response["updatedInput"]?["answers"]?[
+            "Which implementation should I use?"
+        ]?.stringValue == "Shared component"
+    )
+    #expect(
+        response["updatedInput"]?["answers"]?[
+            "Which checks should I run?"
+        ]?.stringValue == "Build, Tests"
+    )
+}
+
+@Test
+func structuredQuestionPersistenceAndCodexAnswersRoundTrip() throws {
+    let questions = [
+        StructuredQuestion(
+            id: "scope",
+            header: "Scope",
+            prompt: "What should change?",
+            options: [
+                .init(label: "UI", description: "Update the visible card."),
+                .init(label: "Runtime", description: "Update provider handling.")
+            ],
+            multiSelect: true
+        )
+    ]
+    let resolution = QuestionResolution(
+        state: .submitted,
+        selections: [
+            QuestionSelection(
+                questionID: "scope",
+                answers: ["UI", "Runtime"]
+            )
+        ]
+    )
+    let entry = TimelineEntry(
+        kind: .question,
+        title: "Codex has a question",
+        text: "",
+        questions: questions,
+        questionResolution: resolution
+    )
+
+    let decoded = try JSONDecoder().decode(
+        TimelineEntry.self,
+        from: JSONEncoder().encode(entry)
+    )
+    #expect(decoded == entry)
+    #expect(
+        CodexQuestionResponse.result(
+            questions: questions,
+            selections: resolution.selections
+        ) == .object([
+            "answers": .object([
+                "scope": .object([
+                    "answers": .array([
+                        .string("UI"),
+                        .string("Runtime")
+                    ])
+                ])
+            ])
+        ])
+    )
+
+    let legacy = try JSONDecoder().decode(
+        TimelineEntry.self,
+        from: Data(
+            """
+            {
+              "id": "BD1F67B4-F1B8-48EE-89B9-D68B3510A0A7",
+              "kind": "question",
+              "title": "Legacy question",
+              "text": "Type an answer",
+              "timestamp": 0
+            }
+            """.utf8
+        )
+    )
+    #expect(legacy.questions == nil)
+    #expect(legacy.questionResolution == nil)
+}
+
+@Test
+func claudeStructuredQuestionResumesAfterSubmission() async throws {
+    let toolInput: JSONValue = .object([
+        "questions": .array([
+            .object([
+                "header": .string("Approach"),
+                "question": .string("Which approach?"),
+                "options": .array([
+                    .object([
+                        "label": .string("Focused"),
+                        "description": .string("Keep the change narrow.")
+                    ]),
+                    .object([
+                        "label": .string("Shared"),
+                        "description": .string("Use the shared flow.")
+                    ])
+                ]),
+                "multiSelect": .bool(false)
+            ])
+        ])
+    ])
+    let client = ApprovalStubClaudeClient(
+        toolName: "AskUserQuestion",
+        toolInput: toolInput,
+        emitToolUseBlock: true
+    )
+    let runtime = testClaudeRuntime(client: client)
+    let profile = claudeProfile(role: .builder, approvalMode: .ask)
+    await launchClaude(runtime, profile: profile)
+
+    let stream = await runtime.respond(
+        to: "Ask me which approach to use",
+        attachments: [],
+        profile: profile
+    )
+    var questionEntry: TimelineEntry?
+    var submitted = false
+    var sawRawToolCard = false
+    var finalStatus: AgentStatus?
+
+    for await event in stream {
+        switch event {
+        case .entry(let entry)
+            where entry.questionResolution?.state == .pending:
+            questionEntry = entry
+
+        case .status(.needsAnswer):
+            let entry = try #require(questionEntry)
+            let resolution = await runtime.resolveQuestion(
+                entryID: entry.id,
+                selections: [
+                    QuestionSelection(
+                        questionID: "question-0",
+                        answers: ["Shared"]
+                    )
+                ],
+                profile: profile
+            )
+            for await _ in resolution {}
+
+        case .questionResolved(let entryID, let resolution):
+            submitted = entryID == questionEntry?.id
+                && resolution.state == .submitted
+                && resolution.selections.first?.answers == ["Shared"]
+
+        case .entry(let entry)
+            where entry.kind == .command
+                && entry.detail?.contains("Which approach?") == true:
+            sawRawToolCard = true
+
+        case .upsertEntry(let entry)
+            where entry.kind == .command
+                && entry.detail?.contains("Which approach?") == true:
+            sawRawToolCard = true
+
+        case .status(let status):
+            finalStatus = status
+
+        default:
+            break
+        }
+    }
+
+    let responses = await client.responses
+    #expect(submitted)
+    #expect(!sawRawToolCard)
+    #expect(finalStatus == .completed)
+    #expect(
+        responses.first?["updatedInput"]?["questions"]
+            == toolInput["questions"]
+    )
+    #expect(
+        responses.first?["updatedInput"]?["answers"]?[
+            "Which approach?"
+        ]?.stringValue == "Shared"
+    )
+}
+
+@Test
+func cancelledClaudeQuestionCannotBeSubmitted() async throws {
+    let client = ApprovalStubClaudeClient(
+        toolName: "AskUserQuestion",
+        toolInput: .object([
+            "questions": .array([
+                .object([
+                    "question": .string("Continue?"),
+                    "options": .array([
+                        .object(["label": .string("Yes")]),
+                        .object(["label": .string("No")])
+                    ])
+                ])
+            ])
+        ]),
+        cancelRequests: true
+    )
+    let runtime = testClaudeRuntime(client: client)
+    let profile = claudeProfile(role: .builder, approvalMode: .ask)
+    await launchClaude(runtime, profile: profile)
+
+    let stream = await runtime.respond(
+        to: "Ask and cancel",
+        attachments: [],
+        profile: profile
+    )
+    var entryID: UUID?
+    var cancelled = false
+    for await event in stream {
+        switch event {
+        case .entry(let entry)
+            where entry.questionResolution?.state == .pending:
+            entryID = entry.id
+        case .questionResolved(let resolvedID, let resolution):
+            cancelled = resolvedID == entryID
+                && resolution.state == .cancelled
+        default:
+            break
+        }
+    }
+
+    let resolution = await runtime.resolveQuestion(
+        entryID: try #require(entryID),
+        selections: [
+            QuestionSelection(
+                questionID: "question-0",
+                answers: ["Yes"]
+            )
+        ],
+        profile: profile
+    )
+    var lateEvents: [AgentEvent] = []
+    for await event in resolution {
+        lateEvents.append(event)
+    }
+
+    #expect(cancelled)
+    #expect(lateEvents.isEmpty)
+    #expect(await client.responses.isEmpty)
+}
+
+@Test
 func claudeCLIClientCompletesThePermissionRoundTrip() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(
@@ -6404,6 +6735,8 @@ func claudePreapprovedCommandsAndRuntimeClassificationStayAligned() throws {
     let builderTools = ClaudeToolApprovalPolicy.allowedTools(for: .builder)
     let reviewerTools = ClaudeToolApprovalPolicy.allowedTools(for: .reviewer)
     #expect(!reviewerTools.contains(where: { $0.hasPrefix("Bash(") }))
+    #expect(builderTools.contains("AskUserQuestion"))
+    #expect(reviewerTools.contains("AskUserQuestion"))
     #expect(builderTools.contains("Bash(env swift --version:*)"))
     #expect(builderTools.contains("Bash(xcode-select -p:*)"))
     #expect(builderTools.contains("Bash(pnpm typecheck:*)"))
@@ -7636,6 +7969,8 @@ private actor ApprovalStubClaudeClient: ClaudeClient {
     private let requestIDs: [String]
     private let failResponses: Bool
     private let resultMode: ApprovalStubResultMode
+    private let cancelRequests: Bool
+    private let emitToolUseBlock: Bool
     private(set) var responses: [JSONValue] = []
 
     init(
@@ -7645,7 +7980,9 @@ private actor ApprovalStubClaudeClient: ClaudeClient {
         ]),
         requestIDs: [String] = ["permission-1"],
         failResponses: Bool = false,
-        resultMode: ApprovalStubResultMode = .success
+        resultMode: ApprovalStubResultMode = .success,
+        cancelRequests: Bool = false,
+        emitToolUseBlock: Bool = false
     ) {
         let pair = AsyncStream.makeStream(of: JSONValue.self)
         messages = pair.stream
@@ -7655,11 +7992,30 @@ private actor ApprovalStubClaudeClient: ClaudeClient {
         self.requestIDs = requestIDs
         self.failResponses = failResponses
         self.resultMode = resultMode
+        self.cancelRequests = cancelRequests
+        self.emitToolUseBlock = emitToolUseBlock
     }
 
     func connect(arguments: [String], workingDirectory: URL) async throws {}
 
     func send(_ message: JSONValue) throws {
+        if emitToolUseBlock {
+            messageContinuation.yield(
+                .object([
+                    "type": .string("assistant"),
+                    "message": .object([
+                        "content": .array([
+                            .object([
+                                "type": .string("tool_use"),
+                                "id": .string("toolu_question"),
+                                "name": .string(toolName),
+                                "input": toolInput
+                            ])
+                        ])
+                    ])
+                ])
+            )
+        }
         for requestID in requestIDs {
             messageContinuation.yield(
                 .object([
@@ -7673,6 +8029,22 @@ private actor ApprovalStubClaudeClient: ClaudeClient {
                     ])
                 ])
             )
+            if cancelRequests {
+                messageContinuation.yield(
+                    .object([
+                        "type": .string("control_cancel_request"),
+                        "request_id": .string(requestID)
+                    ])
+                )
+                messageContinuation.yield(
+                    .object([
+                        "type": .string("result"),
+                        "is_error": .bool(false),
+                        "result": .string("Question cancelled"),
+                        "permission_denials": .array([])
+                    ])
+                )
+            }
         }
     }
 
