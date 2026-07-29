@@ -13,7 +13,7 @@ The current prototype includes:
 - Claude and Codex bot profiles
 - Sidebar bot renaming with the name field focused as soon as the alert opens
 - Builder, reviewer, and PR-writer roles
-- Editable role prompts and working directories
+- Editable role prompts and a repository selected independently for each chat
 - A Slack-like sidebar with attention badges
 - Automatic light and dark appearances that follow the system setting (macOS: live; Linux: read once at launch from `org.gnome.desktop.interface color-scheme`)
 - Consistent, legible typography across conversations, settings, and bot creation
@@ -124,7 +124,8 @@ claude auth login
 
 Every bot can still be used independently. To enable orchestration, add or edit
 a bot with the **Manager** role, then assign one existing Builder, Reviewer, and
-Documenter / PR Writer in its settings. The Manager's next request starts a
+Documenter / PR Writer in its settings. Choose a repository in the Manager
+chat's header before sending the request. The Manager's next request starts a
 persisted workflow with this sequence:
 
 1. The Manager prepares the implementation brief.
@@ -143,6 +144,23 @@ appropriate committed revision, and passing test evidence. Revision passes
 must include fresh passing test evidence recorded after the review began.
 Saved workflows recover these handoff requirements across app restarts without
 discarding an already-running Documenter session.
+
+Repository selection belongs to the chat, not the bot profile. New chats start
+without a repository, so two chats for the same bot can work in different
+repositories. Once a chat has started a runtime thread, created a worktree, or
+joined a managed workflow, its repository is locked; create another chat to
+work elsewhere.
+
+When upgrading, existing chats retain their effective repository. bl00p
+migrates the former profile-level repository only when the chat does not
+already have repository information from its worktree or pending handoff.
+
+Each workflow snapshots its Manager chat's repository and creates dedicated
+Builder, Reviewer, and Documenter chats without changing those bots' selected
+standalone chats. The Builder receives an isolated worktree based on that
+repository, while the Reviewer and Documenter use the Builder's handed-off
+worktree. This lets multiple Manager chats run concurrently against different
+repositories with the same configured team.
 
 Questions, failures, and approval requests pause the workflow for the user.
 The Manager's implementation plan approval is persisted with the workflow, so a

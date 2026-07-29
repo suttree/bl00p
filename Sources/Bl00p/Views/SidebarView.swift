@@ -116,10 +116,6 @@ struct SidebarView: View {
                         model.showSettings(for: profile.id)
                     }
 
-                    Button("Set Working Directory…") {
-                        model.chooseWorkingDirectory(for: profile.id)
-                    }
-
                     Divider()
 
                     Button("Duplicate Bot") {
@@ -168,9 +164,6 @@ struct SidebarView: View {
                     }
                     MenuItem("Edit Prompt") {
                         model.showSettings(for: profile.id)
-                    }
-                    MenuItem("Set Working Directory…") {
-                        model.chooseWorkingDirectory(for: profile.id)
                     }
                     MenuDivider()
                     MenuItem("Duplicate Bot") {

@@ -9,8 +9,6 @@ import SwiftOpenUI
 struct ProfileInspectorView: View {
     @Binding var profile: BotProfile
     let profiles: [BotProfile]
-    let currentWorktree: GitWorktreeOwnership?
-    let chooseDirectory: () -> Void
 
     var body: some View {
         ScrollView {
@@ -55,49 +53,6 @@ struct ProfileInspectorView: View {
                     }
                     .labelsHidden()
                     .frame(maxWidth: 180)
-                }
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("REPOSITORY")
-                        .font(.bl00p(.caption2, weight: .bold))
-                        .tracking(1.1)
-                        .foregroundStyle(.secondary)
-
-                    HStack(spacing: 8) {
-                        TextField(
-                            "Repository path",
-                            text: .constant(profile.workingDirectory)
-                        )
-                            .textFieldStyle(.roundedBorder)
-                            .disabled(true)
-
-                        Button(action: chooseDirectory) {
-                            Image(systemName: "folder")
-                        }
-                        .buttonStyle(.bordered)
-                        .help("Browse for a working directory")
-                    }
-
-                    if let worktree = currentWorktree {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Label(worktree.branch, systemImage: "arrow.triangle.branch")
-                                .font(.bl00p(.caption1, weight: .semibold))
-                            Text(worktree.worktreePath)
-                                .font(.bl00p(.caption2, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                                .textSelection(.enabled)
-                        }
-                        .padding(.top, 4)
-                    } else if profile.role == .builder {
-                        Text(
-                            "An isolated branch and worktree will be created automatically when this bot starts."
-                        )
-                            .font(.bl00p(.caption1))
-                            .foregroundStyle(.secondary)
-                    }
                 }
 
                 if profile.role == .manager {
