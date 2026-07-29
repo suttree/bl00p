@@ -454,7 +454,11 @@ func markdownTablesRenderAsMonospacedAsciiBlocks() throws {
     }
     let prose = blocks.compactMap { block -> String? in
         guard case .prose(let text) = block.content else { return nil }
+        #if os(macOS)
         return String(text.characters)
+        #else
+        return text
+        #endif
     }.joined(separator: "\n")
 
     #expect(code.count == 1)
