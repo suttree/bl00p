@@ -14,6 +14,7 @@ The current prototype includes:
 - Sidebar bot renaming with the name field focused as soon as the alert opens
 - Builder, reviewer, and PR-writer roles
 - Editable role prompts and a repository selected independently for each chat
+- Position-labeled conversation tabs with `⌘1`–`⌘9` switching on macOS
 - A Slack-like sidebar with attention badges
 - Automatic light and dark appearances that follow the system setting (macOS: live; Linux: read once at launch from `org.gnome.desktop.interface color-scheme`)
 - Consistent, legible typography across conversations, settings, and bot creation
@@ -113,6 +114,20 @@ notarization before the stapled app is archived for distribution.
 Release cadence, Sparkle signing, and GitHub Actions setup are documented in
 [docs/RELEASING.md](docs/RELEASING.md). This applies to the macOS build only —
 Sparkle is a macOS-only dependency and is not linked into the Linux build.
+
+### Conversation tabs
+
+Conversation tabs are labeled by their current position rather than by a
+generated chat title. On macOS, the first nine tabs show `⌘1` through `⌘9` and
+those shortcuts select the matching tab in the active window, including while
+the composer has focus. Tabs after the ninth show their ordinal without a
+shortcut. Adding or closing a tab immediately reindexes the labels and
+shortcuts; the original chat title remains available as hover and accessibility
+context.
+
+Manager workflow participants share the Manager's ordered tab strip, so the
+same positional shortcuts continue to select the corresponding Manager chat
+when viewing a Builder, Reviewer, or Documenter / PR Writer profile.
 
 ## Claude Code authentication
 
