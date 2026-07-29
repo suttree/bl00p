@@ -15,6 +15,10 @@ struct ConversationView: View {
             let sessionID = model.selectedSessionID(for: profile.id) ?? session.id
             let isAwaitingPlanApproval =
                 model.workflow(for: profile.id)?.planApprovalEntryID != nil
+            let isAwaitingStructuredAnswer = session.entries.contains {
+                $0.kind == .question
+                    && $0.questionResolution?.state == .pending
+            }
 
             VStack(spacing: 0) {
                 ConversationHeader(
@@ -74,6 +78,13 @@ struct ConversationView: View {
                         },
                         resolveApproval: { entryID, approved in
                             model.resolveApproval(entryID, approved: approved, for: profile.id)
+                        },
+                        resolveQuestion: { entryID, selections in
+                            model.resolveQuestion(
+                                entryID,
+                                selections: selections,
+                                for: profile.id
+                            )
                         }
                     )
                 }
@@ -84,7 +95,8 @@ struct ConversationView: View {
                     attachments: $attachments,
                     isEnabled: session.status != .launching
                         && session.status != .working
-                        && !isAwaitingPlanApproval,
+                        && !isAwaitingPlanApproval
+                        && !isAwaitingStructuredAnswer,
                     send: {
                         let outgoing = draft
                         let outgoingAttachments = attachments
@@ -567,6 +579,7 @@ private struct TranscriptView: View {
     let canRetryFailedMessage: Bool
     let retry: (UUID) -> Void
     let resolveApproval: (UUID, Bool) -> Void
+    let resolveQuestion: (UUID, [QuestionSelection]) -> Void
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -578,7 +591,8 @@ private struct TranscriptView: View {
                             profile: profile,
                             canRetryFailedMessage: canRetryFailedMessage,
                             retry: retry,
-                            resolveApproval: resolveApproval
+                            resolveApproval: resolveApproval,
+                            resolveQuestion: resolveQuestion
                         )
                         .id(entry.id)
                     }
@@ -619,6 +633,7 @@ private struct TimelineEntryView: View {
     let canRetryFailedMessage: Bool
     let retry: (UUID) -> Void
     let resolveApproval: (UUID, Bool) -> Void
+    let resolveQuestion: (UUID, [QuestionSelection]) -> Void
 
     var body: some View {
         switch entry.kind {
@@ -637,7 +652,14 @@ private struct TimelineEntryView: View {
                 tint: .orange
             )
         case .question:
-            eventCard(icon: "questionmark.bubble.fill", tint: .bl00pPinkText)
+            if entry.questions?.isEmpty == false {
+                StructuredQuestionCard(
+                    entry: entry,
+                    submit: { resolveQuestion(entry.id, $0) }
+                )
+            } else {
+                eventCard(icon: "questionmark.bubble.fill", tint: .bl00pPinkText)
+            }
         case .approval:
             approvalCard
         case .handoff:
@@ -827,6 +849,234 @@ private struct TimelineEntryView: View {
         .overlay {
             RoundedRectangle(cornerRadius: 14)
                 .stroke(Color.bl00pPink.opacity(0.40), lineWidth: 1)
+        }
+    }
+}
+
+private struct StructuredQuestionCard: View {
+    let entry: TimelineEntry
+    let submit: ([QuestionSelection]) -> Void
+
+    @State private var selectedAnswers: [String: Set<String>] = [:]
+    @State private var textAnswers: [String: String] = [:]
+    @State private var isSubmitting = false
+
+    private var questions: [StructuredQuestion] {
+        entry.questions ?? []
+    }
+
+    private var state: QuestionResolutionState {
+        entry.questionResolution?.state ?? .cancelled
+    }
+
+    private var isPending: Bool {
+        state == .pending && !isSubmitting
+    }
+
+    private var canSubmit: Bool {
+        state == .pending
+            && !isSubmitting
+            && questions.allSatisfy { !answers(for: $0).isEmpty }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                Label(
+                    entry.title ?? "Question",
+                    systemImage: "questionmark.bubble.fill"
+                )
+                .font(.bl00p(.callout, weight: .bold))
+                .foregroundStyle(Color.bl00pPinkText)
+                Spacer()
+                TimelineTimestamp(entry.timestamp)
+                if state != .pending {
+                    Text(state == .submitted ? "Submitted" : "Cancelled")
+                        .font(.bl00p(.caption1, weight: .semibold))
+                        .foregroundStyle(
+                            state == .submitted ? Color.green : Color.secondary
+                        )
+                }
+            }
+
+            ForEach(Array(questions.enumerated()), id: \.element.id) {
+                index,
+                question in
+                VStack(alignment: .leading, spacing: 9) {
+                    if let header = question.header, !header.isEmpty {
+                        Text(header)
+                            .font(.bl00p(.caption1, weight: .bold))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text(question.prompt)
+                        .font(.bl00p(.callout, weight: .semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if question.options.isEmpty {
+                        if state == .submitted {
+                            submittedTextAnswer(for: question)
+                        } else if state == .cancelled {
+                            Text("No answer submitted")
+                                .font(.bl00p(.caption1))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            TextField(
+                                "Type your answer",
+                                text: Binding(
+                                    get: {
+                                        textAnswers[question.id, default: ""]
+                                    },
+                                    set: { textAnswers[question.id] = $0 }
+                                )
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(!isPending)
+                        }
+                    } else {
+                        VStack(spacing: 7) {
+                            ForEach(question.options) { option in
+                                optionRow(option, for: question)
+                            }
+                        }
+                    }
+                }
+
+                if index < questions.count - 1 {
+                    Divider()
+                }
+            }
+
+            if state == .pending {
+                HStack {
+                    Spacer()
+                    Button(isSubmitting ? "Submitting…" : "Submit answer") {
+                        isSubmitting = true
+                        submit(
+                            questions.map {
+                                QuestionSelection(
+                                    questionID: $0.id,
+                                    answers: answers(for: $0)
+                                )
+                            }
+                        )
+                        Task {
+                            try? await Task.sleep(for: .seconds(2))
+                            isSubmitting = false
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .foregroundStyle(Color.bl00pAvatarInk)
+                    .disabled(!canSubmit)
+                }
+            }
+        }
+        .padding(15)
+        .background(Color.bl00pPinkSoft, in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(Color.bl00pPink.opacity(0.40), lineWidth: 1)
+        }
+    }
+
+    @ViewBuilder
+    private func optionRow(
+        _ option: StructuredQuestionOption,
+        for question: StructuredQuestion
+    ) -> some View {
+        let selected = answers(for: question).contains(option.label)
+        Button {
+            toggle(option.label, for: question)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(
+                    systemName: question.multiSelect
+                        ? (selected ? "checkmark.square.fill" : "square")
+                        : (selected ? "circle.inset.filled" : "circle")
+                )
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(
+                    selected ? Color.bl00pPinkText : Color.secondary
+                )
+                .frame(width: 18, height: 20)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(option.label)
+                        .font(.bl00p(.callout, weight: .semibold))
+                    if let description = option.description {
+                        Text(description)
+                            .font(.bl00p(.caption1))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .background(
+                selected
+                    ? Color.bl00pPink.opacity(0.10)
+                    : Color(nsColor: .controlBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 10)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(
+                        selected
+                            ? Color.bl00pPink.opacity(0.55)
+                            : Color.secondary.opacity(0.18),
+                        lineWidth: 1
+                    )
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isPending)
+    }
+
+    @ViewBuilder
+    private func submittedTextAnswer(
+        for question: StructuredQuestion
+    ) -> some View {
+        Text(answers(for: question).joined(separator: ", "))
+            .font(.bl00p(.callout))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .background(
+                Color(nsColor: .controlBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 10)
+            )
+    }
+
+    private func answers(for question: StructuredQuestion) -> [String] {
+        if state == .submitted {
+            return entry.questionResolution?.selections
+                .first(where: { $0.questionID == question.id })?
+                .answers ?? []
+        }
+        if question.options.isEmpty {
+            let answer = textAnswers[question.id, default: ""]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return answer.isEmpty ? [] : [answer]
+        }
+        let labels = selectedAnswers[question.id, default: []]
+        return question.options.compactMap {
+            labels.contains($0.label) ? $0.label : nil
+        }
+    }
+
+    private func toggle(_ label: String, for question: StructuredQuestion) {
+        if question.multiSelect {
+            if selectedAnswers[question.id, default: []].contains(label) {
+                selectedAnswers[question.id]?.remove(label)
+            } else {
+                selectedAnswers[question.id, default: []].insert(label)
+            }
+        } else {
+            selectedAnswers[question.id] = [label]
         }
     }
 }
