@@ -23,3 +23,35 @@ SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/swiftpm-module-cache" \
 XDG_CACHE_HOME="$PWD/.build/cache" \
 xcrun swift test --disable-sandbox
 ```
+
+## Structured user questions
+
+Claude `AskUserQuestion` control requests and Codex
+`item/tool/requestUserInput` events use the same question model and UI flow.
+`StructuredQuestion` preserves each question's identifier, optional heading,
+prompt, option labels and descriptions, and `multiSelect` flag. A
+`TimelineEntry` stores the questions and a `QuestionResolution`, so submitted
+and cancelled cards remain readable in the persisted transcript. The optional
+fields keep older saved sessions decodable.
+
+The provider runtimes retain the original request while the card is pending and
+emit `.needsAnswer`, rather than treating a question as a permission approval.
+The shared `resolveQuestion` path validates that every question has an answer,
+prevents duplicate resolution, and emits a terminal submitted or cancelled
+state. Claude responses must preserve the original `questions` payload and add
+an `answers` object keyed by the exact question text; Codex responses map each
+selection back to its request question identifier. Pending question state is
+cleared when a turn is cancelled, completed, disconnected, or fails.
+
+`ConversationView` renders option descriptions in vertically stacked rows. Use
+radio-style rows for single-select questions and checkbox-style rows for
+multi-select questions. Keep question cards distinct from ordinary approval
+cards: permission requests still render their existing Approve and Decline
+actions, while question cards never expose raw provider JSON.
+
+When changing this flow, update the model/runtime tests for the provider
+payload, response encoding, multiple questions, multi-select answers,
+cancellation, persistence, and unchanged approval behavior. Manual checks
+should also cover selecting and submitting a fixture-backed question, resumed
+provider execution, a resolved card that cannot be edited twice, and readable
+option wrapping at a narrow conversation width.

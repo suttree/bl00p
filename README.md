@@ -13,6 +13,9 @@ The current prototype includes:
 - Signed automatic updates through GitHub Releases, with install and relaunch
 - Consistent, legible typography across conversations, settings, and bot creation
 - Structured messages, commands, findings, and approval cards
+- Interactive structured question cards for Claude `AskUserQuestion` and Codex
+  `requestUserInput`, including option descriptions, single-select and
+  multi-select answers, and submitted or cancelled states
 - Optional Manager bots that coordinate a persistent Builder → Reviewer →
   conditional Builder fixes and Reviewer re-check → Documenter / PR Writer
   workflow
@@ -132,6 +135,15 @@ Reviewer boundary.
 The Manager's implementation plan appears once, inside the approval card. The
 card renders the plan as readable Markdown and provides the Approve and Decline
 actions; the same plan is not repeated as a separate conversation message.
+
+Provider questions are rendered separately from permission approvals. Claude
+`AskUserQuestion` requests and Codex `requestUserInput` events appear as
+question cards with the original headings and prompts, vertically stacked
+options, and radio-style or checkbox-style selection. The Submit action becomes
+available after every question has an answer; once submitted, the card shows
+the selected labels and cannot be edited again. Cancelling a turn also marks a
+pending question as cancelled. Ordinary command and file permission requests
+continue to use their existing Approve and Decline controls.
 
 The persistence rules and restore invariants are documented in
 [docs/MANAGED_WORKFLOWS.md](docs/MANAGED_WORKFLOWS.md).

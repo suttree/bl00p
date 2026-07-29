@@ -25,6 +25,9 @@ All notable changes to bl00p are documented in this file.
 - Add bot renaming from the sidebar.
 - Add managed Manager workflows with an explicit user approval gate between
   planning and the Builder handoff.
+- Add interactive structured question cards for Claude `AskUserQuestion` and
+  Codex `requestUserInput`, with option descriptions, single-select and
+  multi-select controls, and submitted or cancelled states.
 
 ### Changed
 
@@ -85,6 +88,9 @@ All notable changes to bl00p are documented in this file.
 - Let failed chat messages retry in place with their original text and attachments
   without marking completed messages as failed after idle disconnects.
 - Show blocked Claude actions as a readable question that the user can respond to.
+- Keep provider question requests separate from permission approvals, preserve
+  Claude's original question payload when returning answers, and cancel
+  unanswered question cards when their runtime turn ends.
 - Prevent duplicate sends while a bot is launching or working.
 - Migrate legacy bot names, starter cards, permission messages, and Codex review sessions when restoring saved state.
 - Stage Claude image attachments in an isolated temporary directory and remove them after each turn.
@@ -128,3 +134,6 @@ All notable changes to bl00p are documented in this file.
   or inconsistent plan safeguards.
 - Cover idempotent plan-approval restoration, stale or duplicate approval-card
   cleanup, and relaunch behavior for unrelated runtime approvals.
+- Cover structured Claude and Codex questions, response encoding, multiple and
+  multi-select answers, cancellation, persistence round-trips, and unchanged
+  approval flows.
