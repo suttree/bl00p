@@ -6,6 +6,8 @@ All notable changes to bl00p are documented in this file.
 
 ### Added
 
+- Add repository selection to individual chats, including a **Choose
+  Repository…** action in the conversation header for new chats.
 - Add signed automatic update checks, installation, and relaunch through
   Sparkle and GitHub Releases.
 - Add automatic light and dark appearances across every app surface.
@@ -26,6 +28,10 @@ All notable changes to bl00p are documented in this file.
 
 ### Changed
 
+- Keep repository ownership with chat sessions instead of bot profiles. Chats
+  lock their repository after launch, worktree creation, or workflow
+  participation, while each managed workflow receives dedicated Builder,
+  Reviewer, and Documenter / PR Writer chats so workflows can run concurrently.
 - Speed up managed workflows by skipping unnecessary fix/re-check turns after
   a clean review, composing the completion entry locally, and moving state
   encoding and writes onto a coalescing persistence queue.
@@ -46,6 +52,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Migrate saved profile-level repositories into their existing chats, preferring
+  repository information from owned worktrees and pending handoffs, and restore
+  workflow participants without cross-repository state changes.
 - Focus the bot name field when the sidebar rename alert opens without
   replacing text entered during presentation.
 - Hand the Builder the exact implementation plan approved by the user, while
