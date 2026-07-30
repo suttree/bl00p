@@ -3272,7 +3272,8 @@ final class AppModel: ObservableObject {
                     base: pass == .initial
                         ? "The Builder handoff has no local commit."
                         : "The Builder revision pass has no new local commit.",
-                    blockedActionsDetail: blockedActionsDetail
+                    blockedActionsDetail: blockedActionsDetail,
+                    correlatesWithFailure: denialLooksCommitRelated
                 )
             )
         }
@@ -3281,7 +3282,8 @@ final class AppModel: ObservableObject {
                 category: .dirtyTree,
                 reason: actionableReason(
                     base: "The Builder handoff still has uncommitted changes.",
-                    blockedActionsDetail: blockedActionsDetail
+                    blockedActionsDetail: blockedActionsDetail,
+                    correlatesWithFailure: denialLooksCommitRelated
                 )
             )
         }
@@ -3316,26 +3318,27 @@ final class AppModel: ObservableObject {
                 "Tests could not be verified this pass — a required action was blocked:\n\(blockedActionsDetail)"
             )
         }
-        switch pass {
-        case .initial:
-            // A non-blocked initial pass without test evidence has always
-            // been allowed through; the Reviewer sees "Test state: Not run"
-            // and decides whether to push back. Only the blocked case above
-            // needs a caveat and different handling.
-            return .ready
-        case .revision:
-            return .notReady(
-                category: .testsBlocked,
-                reason: "The Builder handoff does not report passing tests from the revision pass."
-            )
-        }
+        return .notReady(
+            category: .testsBlocked,
+            reason: pass == .initial
+                ? "The Builder handoff does not report passing tests."
+                : "The Builder handoff does not report passing tests from the revision pass."
+        )
     }
 
+    /// Only names the blocked action when it plausibly explains this
+    /// specific failure category — an unrelated denial (e.g. `rm -rf build`
+    /// blocked while `git commit` was never attempted for some other
+    /// reason) must not be misattributed as the cause.
     private func actionableReason(
         base: String,
-        blockedActionsDetail: String?
+        blockedActionsDetail: String?,
+        correlatesWithFailure: (String) -> Bool
     ) -> String {
-        guard let blockedActionsDetail else { return base }
+        guard let blockedActionsDetail,
+              correlatesWithFailure(blockedActionsDetail) else {
+            return base
+        }
         let action = primaryBlockedAction(in: blockedActionsDetail)
             .map { "`\($0)`" } ?? "An action"
         return "\(base) \(action) was blocked by a deny rule — approve the bl00p prompt or adjust the rule. The handoff will retry automatically once resolved."
@@ -3361,6 +3364,15 @@ final class AppModel: ObservableObject {
     private func denialLooksTestRelated(_ detail: String) -> Bool {
         let lowered = detail.lowercased()
         return HandoffTestEvidence.knownTestCommands.contains {
+            lowered.contains($0)
+        }
+    }
+
+    /// Whether a recorded denial plausibly explains a missing commit or a
+    /// dirty tree — both ultimately trace back to the commit step itself.
+    private func denialLooksCommitRelated(_ detail: String) -> Bool {
+        let lowered = detail.lowercased()
+        return ["git commit", "git add", "git stage"].contains {
             lowered.contains($0)
         }
     }

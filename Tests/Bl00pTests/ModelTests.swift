@@ -2324,8 +2324,9 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
         baseRevision: ownership.baseRevision,
         headRevision: "def456",
         taskContext: "Add optional orchestration",
-        testStatus: .notRun,
-        testSummary: "No test command was recorded.",
+        testStatus: .passed,
+        testSummary: "`swift test` — 12 tests passed",
+        testEvidenceAt: .distantFuture,
         workingTreeSummary: "Clean"
     )
     let revisedPackage = GitHandoffPackage(
@@ -2553,7 +2554,8 @@ func configuredManagerRunsTheOptionalDeliveryWorkflowEndToEnd() async throws {
             == originalRequest
     )
     #expect(calls[2].message.contains("Source branch: \(ownership.branch)"))
-    #expect(calls[2].message.contains("Test state: Not run"))
+    #expect(calls[2].message.contains("Test state: Passed"))
+    #expect(calls[2].message.contains(initialPackage.testSummary))
     #expect(calls[3].message.contains("Review finding"))
     #expect(calls[3].message.contains("Also verify pipeline permissions."))
     #expect(calls[4].message.contains("Re-check the updated"))
@@ -3503,21 +3505,28 @@ func revisitedBuilderTurnDoesNotReuseAStaleBlockedActionFromAnEarlierTurn() asyn
     )
 
     // Turn 2: a fresh explicit send resets the turn boundary. This turn ends
-    // blocked again but records no denial of its own — the stale turn-1
-    // "swift test" denial must not be reused to justify a caveat here.
+    // blocked again but records no denial of its own. If the stale turn-1
+    // "swift test" denial were wrongly reused, it would correlate as
+    // test-related and wrongly advance this turn to the Reviewer with a
+    // caveat; instead it must hard-pause like any other untested pass.
     model.send("Commit the remaining changes", to: builderID)
     for _ in 0..<100
-        where model.workflow(for: managerID)?.stage != .reviewing {
+        where model.workflow(for: managerID)?.pauseReason == nil
+            || model.workflow(for: managerID)?.pauseReason
+                == afterFirstTurn.pauseReason {
         try await Task.sleep(for: .milliseconds(10))
     }
 
-    let advanced = try #require(model.workflow(for: managerID))
-    #expect(advanced.stage == .reviewing)
-    #expect(!advanced.isPaused)
-    #expect(advanced.latestHandoff?.testStatus == .notRun)
-    #expect(model.session(for: reviewerID).entries.contains {
-        $0.kind == .handoff
-    })
+    let afterSecondTurn = try #require(model.workflow(for: managerID))
+    #expect(afterSecondTurn.stage == .building)
+    #expect(afterSecondTurn.isPaused)
+    #expect(
+        afterSecondTurn.pauseReason
+            == "The Builder handoff does not report passing tests."
+    )
+    #expect(afterSecondTurn.awaitingBuilderHandoffRetry)
+    #expect(afterSecondTurn.latestHandoff == nil)
+    #expect(model.session(for: reviewerID).entries.isEmpty)
 }
 
 @MainActor
