@@ -8526,45 +8526,38 @@ func claudeManagerCannotEditFilesInEitherApprovalMode() throws {
 }
 
 @Test
-func claudeManagerNeverAutoApprovesWriteCapableOrOutOfWorkspaceShell() throws {
+func claudeManagerBlocksWriteCapableShellCommandsInBothModes() throws {
     let workingDirectory = URL(fileURLWithPath: "/tmp/bl00p-manager")
-    for command in [
-        "git diff --output=review.txt",
-        "cat README.md > review.txt",
-        "unknown-writer README.md",
-        "cat /etc/passwd"
-    ] {
-        let request = try #require(
-            ClaudeToolApprovalRequest(request: .object([
-                "subtype": .string("can_use_tool"),
-                "tool_name": .string("Bash"),
-                "input": .object(["command": .string(command)])
-            ]))
-        )
-
-        // Ask mode always surfaces an explicit approval card for Managers;
-        // it never silently allows a write-capable command.
-        #expect(
-            ClaudeToolApprovalPolicy.decision(
+    for mode in ApprovalMode.allCases {
+        for command in [
+            "git diff --output=review.txt",
+            "git commit -m done",
+            "git push",
+            "cat README.md > review.txt",
+            "unknown-writer README.md",
+            "cat /etc/passwd",
+            "rm -rf build"
+        ] {
+            let request = try #require(
+                ClaudeToolApprovalRequest(request: .object([
+                    "subtype": .string("can_use_tool"),
+                    "tool_name": .string("Bash"),
+                    "input": .object(["command": .string(command)])
+                ]))
+            )
+            if case .deny = ClaudeToolApprovalPolicy.decision(
                 for: request,
-                mode: .ask,
+                mode: mode,
                 role: .manager,
                 workingDirectory: workingDirectory,
                 stagedAttachmentDirectory: nil
-            ) == .ask
-        )
-
-        if case .deny = ClaudeToolApprovalPolicy.decision(
-            for: request,
-            mode: .auto,
-            role: .manager,
-            workingDirectory: workingDirectory,
-            stagedAttachmentDirectory: nil
-        ) {
-            // Expected: Manager Auto mode never auto-approves shell writes,
-            // redirects, or paths outside the workspace.
-        } else {
-            Issue.record("\(command) was not denied in auto mode")
+            ) {
+                // Expected: Manager shell writes, redirects, and paths
+                // outside the workspace never reach an approval card,
+                // even in Ask mode.
+            } else {
+                Issue.record("\(command) was not denied in \(mode)")
+            }
         }
     }
 }

@@ -260,8 +260,8 @@ struct ProfileInspectorView: View {
         if profile.provider == .claude {
             if profile.role == .manager {
                 return profile.approvalMode == .auto
-                    ? "Claude automatically approves supported test and inspection commands to ground the Manager's plans. Built-in file-edit tools, commits, push, and publishing remain blocked. Mode changes take effect the next time this bot connects."
-                    : "Claude asks before running test or inspection commands. Built-in file-edit tools, commits, push, and publishing remain blocked. Mode changes take effect the next time this bot connects."
+                    ? "Claude automatically approves supported test and inspection commands to ground the Manager's plans. Built-in file-edit tools and write-capable shell commands (including commits, push, and publishing) remain blocked. Mode changes take effect the next time this bot connects."
+                    : "Claude asks before running supported test or inspection commands. Built-in file-edit tools and write-capable shell commands (including commits, push, and publishing) remain blocked in every mode. Mode changes take effect the next time this bot connects."
             }
             if profile.role == .reviewer {
                 return profile.approvalMode == .auto
