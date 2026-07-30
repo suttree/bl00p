@@ -18,6 +18,7 @@ The current prototype includes:
 - Editable role prompts per bot and per chat, with fallback to bot default, plus a repository selected independently for each chat
 - Conversation-header shortcuts for opening the selected repository or active worktree in Finder and Terminal
 - Position-labeled conversation tabs with `⌘1`–`⌘9` switching on macOS
+- Transcript scrolling that follows streaming replies while preserving deliberate history browsing
 - A Slack-like sidebar whose spinner and attention badges follow the bot's
   current chat instead of stale or background chats
 - Automatic light and dark appearances that follow the system setting (macOS: live; Linux: read once at launch from `org.gnome.desktop.interface color-scheme`)
@@ -133,6 +134,15 @@ The tab strip is shown only for the Manager. Selecting a Manager chat switches
 the Builder, Reviewer, and Documenter / PR Writer to their corresponding
 workflow conversations. The same positional shortcuts continue to select the
 corresponding Manager chat while a workflow participant is visible.
+
+### Transcript scrolling
+
+Conversation transcripts open at the latest content and continue following a
+streaming reply while the viewport is at or near the bottom. If you scroll into
+history, new entries and streamed updates leave your position unchanged; use
+**Jump to Latest** to return to the newest content and resume automatic
+following. Sending a new message also returns the transcript to latest-content
+following.
 
 ## Claude Code authentication
 

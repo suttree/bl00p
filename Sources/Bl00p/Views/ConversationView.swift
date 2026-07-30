@@ -13,7 +13,7 @@ struct ConversationView: View {
     @State private var attachments: [ImageAttachment] = []
     @State private var closeRequest: SessionCloseRequest?
     @State private var closeError: String?
-    @State private var scrollPositions: [UUID: UUID] = [:]
+    @State private var transcriptScroll = TranscriptScrollCoordinator()
 
     var body: some View {
         if let profile = model.selectedProfile,
@@ -90,10 +90,7 @@ struct ConversationView: View {
                 } else {
                     TranscriptView(
                         sessionID: sessionID,
-                        scrollPosition: Binding(
-                            get: { scrollPositions[sessionID] },
-                            set: { scrollPositions[sessionID] = $0 }
-                        ),
+                        scrollCoordinator: $transcriptScroll,
                         entries: session.entries,
                         profile: profile,
                         canRetryFailedMessage:
@@ -138,6 +135,7 @@ struct ConversationView: View {
                         let outgoingAttachments = attachments
                         draft = ""
                         attachments = []
+                        transcriptScroll.userSentMessage(in: sessionID)
                         model.send(
                             outgoing,
                             attachments: outgoingAttachments,
@@ -729,7 +727,7 @@ private struct ConversationHeader: View {
 
 private struct TranscriptView: View {
     let sessionID: UUID
-    @Binding var scrollPosition: UUID?
+    @Binding var scrollCoordinator: TranscriptScrollCoordinator
     let entries: [TimelineEntry]
     let profile: BotProfile
     let canRetryFailedMessage: Bool
@@ -738,51 +736,138 @@ private struct TranscriptView: View {
     let resolveQuestion: (UUID, [QuestionSelection]) -> Void
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                #if os(macOS)
-                LazyVStack(alignment: .leading, spacing: 18) {
-                    transcriptContent
-                }
-                .scrollTargetLayout()
-                .padding(.horizontal, 32)
-                .padding(.top, 24)
-                .frame(maxWidth: 884)
-                .frame(maxWidth: .infinity)
-                #else
-                // SwiftOpenUI's LazyVStack only offers a data-driven
-                // initializer, not a free-form ViewBuilder one, so the
-                // scroll-to-bottom sentinel view below can't share it with
-                // the entries. A plain VStack renders every entry eagerly
-                // instead of only the visible ones.
-                VStack(alignment: .leading, spacing: 18) {
-                    transcriptContent
-                }
-                .padding(.horizontal, 32)
-                .padding(.top, 24)
-                .frame(maxWidth: 884)
-                .frame(maxWidth: .infinity)
-                #endif
+        ZStack(alignment: .bottomTrailing) {
+            ScrollViewReader { proxy in
+                transcriptScrollView
+                    .task(id: sessionID) {
+                        scrollCoordinator.reset(
+                            for: sessionID,
+                            hasContent: !entries.isEmpty
+                        )
+                    }
+                    .task(id: scrollCoordinator.scrollRequestID) {
+                        let requestID = scrollCoordinator.scrollRequestID
+                        guard scrollCoordinator.shouldPerformScroll(
+                            requestID: requestID,
+                            for: sessionID
+                        ) else { return }
+
+                        try? await Task.sleep(for: .milliseconds(60))
+                        guard !Task.isCancelled,
+                              scrollCoordinator.shouldPerformScroll(
+                                  requestID: requestID,
+                                  for: sessionID
+                              ) else { return }
+
+                        proxy.scrollTo(
+                            TranscriptBottomAnchor(sessionID: sessionID),
+                            anchor: .bottom
+                        )
+                        scrollCoordinator.didPerformScroll(
+                            requestID: requestID
+                        )
+                    }
+                    .onChange(of: contentVersion) { _, _ in
+                        scrollCoordinator.contentChanged(for: sessionID)
+                    }
+                    #if !os(macOS)
+                    // SwiftOpenUI does not expose scroll geometry. Use a
+                    // completed drag beyond the same near-bottom tolerance
+                    // so small bottom-edge gestures keep following.
+                    .onDrag(
+                        minimumDistance:
+                            TranscriptScrollCoordinator.nearBottomTolerance,
+                        onEnded: { value in
+                            scrollCoordinator.userDraggedTowardHistory(
+                                distance: value.height
+                            )
+                        }
+                    )
+                    #endif
             }
+
+            if scrollCoordinator.showsJumpToLatest {
+                Button {
+                    scrollCoordinator.jumpToLatest(for: sessionID)
+                } label: {
+                    Label("Jump to Latest", systemImage: "arrow.down")
+                }
+                .buttonStyle(.borderedProminent)
+                .padding(18)
+            }
+        }
+    }
+
+    private var transcriptScrollView: some View {
+        ScrollView {
             #if os(macOS)
-            .scrollPosition(id: $scrollPosition)
-            #endif
-            .task(id: sessionID) {
-                try? await Task.sleep(for: .milliseconds(60))
-                proxy.scrollTo(
-                    scrollPosition ?? sessionID,
-                    anchor: .bottom
-                )
+            LazyVStack(alignment: .leading, spacing: 18) {
+                transcriptContent
             }
-            .onChange(of: entries.count) { _, _ in
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo(
-                        sessionID,
-                        anchor: .bottom
+            .padding(.horizontal, 32)
+            .padding(.top, 24)
+            .frame(maxWidth: 884)
+            .frame(maxWidth: .infinity)
+            .background {
+                TranscriptScrollObserver { distance, userInitiated in
+                    observeViewport(
+                        distanceToBottom: distance,
+                        userInitiated: userInitiated
                     )
                 }
             }
+            #else
+            // SwiftOpenUI's LazyVStack only offers a data-driven
+            // initializer, not a free-form ViewBuilder one, so the
+            // scroll-to-bottom sentinel view below can't share it with
+            // the entries. A plain VStack renders every entry eagerly
+            // instead of only the visible ones.
+            VStack(alignment: .leading, spacing: 18) {
+                transcriptContent
+            }
+            .padding(.horizontal, 32)
+            .padding(.top, 24)
+            .frame(maxWidth: 884)
+            .frame(maxWidth: .infinity)
+            #endif
         }
+    }
+
+    private var contentVersion: TranscriptContentVersion {
+        TranscriptContentVersion(
+            entryCount: entries.count,
+            finalEntry: entries.last
+        )
+    }
+
+    private var bottomAnchor: TranscriptBottomAnchor {
+        TranscriptBottomAnchor(sessionID: sessionID)
+    }
+
+    private func observeViewport(
+        distanceToBottom: Double,
+        userInitiated: Bool
+    ) {
+        scrollCoordinator.viewportChanged(
+            distanceToBottom: distanceToBottom,
+            userInitiated: userInitiated
+        )
+    }
+
+    @ViewBuilder
+    private var bottomSentinel: some View {
+        Color.clear
+            .frame(height: 24)
+            .id(bottomAnchor)
+    }
+
+    private struct TranscriptContentVersion: Equatable {
+        let entryCount: Int
+        let finalEntry: TimelineEntry?
+    }
+
+    private struct TranscriptBottomAnchor: Hashable {
+        let sessionID: UUID
     }
 
     @ViewBuilder
@@ -799,9 +884,7 @@ private struct TranscriptView: View {
             .id(entry.id)
         }
 
-        Color.clear
-            .frame(height: 24)
-            .id(sessionID)
+        bottomSentinel
     }
 }
 

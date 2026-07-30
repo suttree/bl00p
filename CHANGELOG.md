@@ -63,6 +63,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Keep chat transcripts pinned to current streaming content without restoring
+  stale entry anchors, while preserving deliberate history browsing behind a
+  **Jump to Latest** control.
 - Scope sidebar bot spinners and attention dots to the currently visible chat,
   so stale or background chats no longer light up an idle sidebar avatar.
 - Disable the message composer for new chats until a repository is selected,
