@@ -171,9 +171,10 @@ Documenter session.
 
 Repository selection belongs to the chat, not the bot profile. New chats start
 without a repository, so two chats for the same bot can work in different
-repositories. Once a chat has started a runtime thread, created a worktree, or
-joined a managed workflow, its repository is locked; create another chat to
-work elsewhere.
+repositories. The composer stays locked until a repository is chosen from the
+conversation header, then becomes available immediately. Once a chat has
+started a runtime thread, created a worktree, or joined a managed workflow, its
+repository is locked; create another chat to work elsewhere.
 
 When upgrading, existing chats retain their effective repository. bl00p
 migrates the former profile-level repository only when the chat does not

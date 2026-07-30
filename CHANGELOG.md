@@ -59,6 +59,8 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Disable the message composer for new chats until a repository is selected,
+  while preserving editable drafts during running agent turns.
 - Migrate saved profile-level repositories into their existing chats, preferring
   repository information from owned worktrees and pending handoffs, and restore
   workflow participants without cross-repository state changes.
