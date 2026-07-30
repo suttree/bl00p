@@ -14,6 +14,7 @@ The current prototype includes:
 - Sidebar bot renaming with the name field focused as soon as the alert opens
 - Builder, reviewer, and PR-writer roles
 - Editable role prompts per bot and per chat, with fallback to bot default, plus a repository selected independently for each chat
+- Conversation-header shortcuts for opening the selected repository or active worktree in Finder and Terminal
 - Position-labeled conversation tabs with `⌘1`–`⌘9` switching on macOS
 - A Slack-like sidebar whose spinner and attention badges follow the bot's
   current chat instead of stale or background chats
@@ -176,6 +177,13 @@ repositories. The composer stays locked until a repository is chosen from the
 conversation header, then becomes available immediately. Once a chat has
 started a runtime thread, created a worktree, or joined a managed workflow, its
 repository is locked; create another chat to work elsewhere.
+
+The same conversation header also exposes shortcuts into the selected checkout.
+The folder button opens the chat's current repository or worktree in the system
+file browser, and the terminal button opens the same directory in a native
+terminal window. For managed workflows this means the Builder, Reviewer, and
+Documenter can jump directly into the active worktree without copying paths out
+of the UI.
 
 When upgrading, existing chats retain their effective repository. bl00p
 migrates the former profile-level repository only when the chat does not

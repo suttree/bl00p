@@ -46,6 +46,13 @@ struct ConversationView: View {
                     },
                     repositoryCanBeChanged:
                         model.repositoryCanBeChanged(for: sessionID),
+                    openInTerminal: {
+                        guard let path = WorktreeTerminalLauncher.terminalTargetPath(
+                            worktreePath: session.worktree?.worktreePath,
+                            repositoryPath: session.repositoryPath
+                        ) else { return }
+                        WorktreeTerminalLauncher.open(path)
+                    },
                     showSettings: { model.isInspectorVisible.toggle() }
                 )
 
@@ -599,10 +606,18 @@ private struct ConversationHeader: View {
     let handoff: (UUID) -> Void
     let chooseRepository: () -> Void
     let repositoryCanBeChanged: Bool
+    let openInTerminal: () -> Void
     let showSettings: () -> Void
 
     private var isRunning: Bool {
         session.status == .launching || session.status == .working
+    }
+
+    private var terminalTargetPath: String? {
+        WorktreeTerminalLauncher.terminalTargetPath(
+            worktreePath: session.worktree?.worktreePath,
+            repositoryPath: session.repositoryPath
+        )
     }
 
     var body: some View {
@@ -645,6 +660,14 @@ private struct ConversationHeader: View {
                         ? "Choose a different repository for this chat"
                         : "Repository is locked after this chat starts. Create a new chat to use another repository."
                 )
+            }
+
+            if let terminalTargetPath {
+                Button(action: openInTerminal) {
+                    Image(systemName: "terminal")
+                }
+                .buttonStyle(.bordered)
+                .help("Open \(terminalTargetPath) in a terminal")
             }
 
             if profile.role == .builder,
