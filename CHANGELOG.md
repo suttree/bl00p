@@ -64,6 +64,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Clarify the close-chat warning so managed worktree deletion, retained Git
+  branches, uncommitted changes, and unsafe worktrees left on disk are each
+  described accurately.
 - Keep chat transcripts pinned to current streaming content without restoring
   stale entry anchors, while preserving deliberate history browsing behind a
   **Jump to Latest** control.

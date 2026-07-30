@@ -199,6 +199,13 @@ terminal window. For managed workflows this means the Builder, Reviewer, and
 Documenter can jump directly into the active worktree without copying paths out
 of the UI.
 
+When you close a chat that owns a managed Git worktree, bl00p's confirmation
+explains the cleanup outcome. A worktree that can be removed safely is deleted
+from disk, including a dirty worktree after you confirm the warning about its
+uncommitted changes; its Git branch remains available for recovery. If bl00p
+cannot safely remove the worktree, the chat can still be closed while the
+worktree remains on disk, and the branch is retained.
+
 When upgrading, existing chats retain their effective repository. bl00p
 migrates the former profile-level repository only when the chat does not
 already have repository information from its worktree or pending handoff.

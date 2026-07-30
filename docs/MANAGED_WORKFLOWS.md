@@ -45,6 +45,27 @@ is considered locked once it has a runtime thread, an owned worktree, a pending
 handoff, or workflow membership. Closing a chat may clean up its own worktree,
 but must not unlock or change another chat's repository.
 
+## Closing chats with managed worktrees
+
+Closing a chat always deletes its local chat history. For a managed worktree,
+`AppModel.closeAssessment` distinguishes the normal cleanup path from a
+worktree that cannot be inspected safely:
+
+- A clean or dirty worktree that can be assessed is removed from disk when the
+  user confirms the close. Dirty worktrees are removed forcefully after the
+  confirmation, while their Git branch is retained for recovery.
+- If the worktree cannot be assessed or safely removed, the chat may be closed
+  while the worktree remains on disk. Its Git branch is still retained, and the
+  assessment detail is shown in the confirmation.
+
+The confirmation copy is composed by the pure
+`SessionCloseWarningMessage.make(for:)` helper in `ConversationView` so each
+cleanup outcome stays explicit and regression-tested. Keep this message logic
+in sync with `SessionCloseAssessment`: `hasManagedWorktree` controls whether
+the normal deletion/branch-retention message is shown, while
+`leavesWorktreeOnDisk` takes precedence for unsafe cleanup. Focused coverage is
+in `SessionCloseWarningMessageTests`.
+
 ## Builder handoffs
 
 Builder turns can finish as `blocked` when Claude reports one or more
