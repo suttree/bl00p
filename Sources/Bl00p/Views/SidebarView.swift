@@ -102,7 +102,7 @@ struct SidebarView: View {
             ForEach(model.profiles) { profile in
                 BotRow(
                     profile: profile,
-                    sessions: model.sessions(for: profile.id),
+                    sessions: model.sidebarIndicatorSessions(for: profile.id),
                     windowColorScheme: windowColorScheme
                 )
                 .tag(Optional(profile.id))
@@ -145,7 +145,7 @@ struct SidebarView: View {
                 } label: {
                     BotRow(
                         profile: profile,
-                        sessions: model.sessions(for: profile.id),
+                        sessions: model.sidebarIndicatorSessions(for: profile.id),
                         windowColorScheme: windowColorScheme
                     )
                     .padding(.horizontal, 10)

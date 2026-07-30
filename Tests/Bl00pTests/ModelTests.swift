@@ -1025,6 +1025,142 @@ func positionalTabSelectionTracksCurrentSessionOrder() async throws {
 
 @MainActor
 @Test
+func sidebarIndicatorSessionsIgnoreBackgroundChatsForStandaloneBots() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-sidebar-indicator-standalone-\(UUID().uuidString)"
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let model = AppModel(
+        runtime: ImmediateRecordingRuntime(),
+        store: AppStateStore(
+            fileURL: directory.appendingPathComponent("state.json")
+        )
+    )
+    let profile = try #require(model.profiles.first)
+    let backgroundID = try #require(model.selectedSessionID(for: profile.id))
+    let currentID = model.newChat(for: profile.id)
+    #expect(model.selectedSessionID(for: profile.id) == currentID)
+
+    model.sessions[backgroundID]?.status = .blocked
+    model.sessions[backgroundID]?.hasUnreadCompletion = true
+    model.sessions[currentID]?.status = .stopped
+
+    let indicatorSessions = model.sidebarIndicatorSessions(for: profile.id)
+    #expect(indicatorSessions.map(\.id) == [currentID])
+    #expect(!indicatorSessions.contains { $0.status.needsAttention })
+    #expect(!indicatorSessions.contains { $0.hasUnreadCompletion })
+
+    model.sessions[currentID]?.status = .working
+    let workingIndicatorSessions = model.sidebarIndicatorSessions(for: profile.id)
+    #expect(workingIndicatorSessions.contains { $0.status == .working })
+
+    model.selectSession(backgroundID, for: profile.id)
+    let switchedIndicatorSessions = model.sidebarIndicatorSessions(for: profile.id)
+    #expect(switchedIndicatorSessions.map(\.id) == [backgroundID])
+    #expect(switchedIndicatorSessions.contains { $0.status.needsAttention })
+}
+
+@MainActor
+@Test
+func sidebarIndicatorSessionsForManagerScopeToTheSelectedWorkflow() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-sidebar-indicator-manager-\(UUID().uuidString)"
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let managerID = UUID()
+    let builderID = UUID()
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "",
+        managerTeam: ManagerTeamConfiguration(builderProfileID: builderID)
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: ""
+    )
+    let currentManagerChatID = UUID()
+    let backgroundManagerChatID = UUID()
+    let currentBuilderSessionID = UUID()
+    let backgroundBuilderSessionID = UUID()
+
+    // Built fresh and mutated in place (rather than restored from a saved
+    // PersistedAppState) because restore resets any `.working` status back
+    // to `.stopped`, which would defeat this test.
+    let model = AppModel(
+        runtime: ImmediateRecordingRuntime(),
+        store: AppStateStore(
+            fileURL: directory.appendingPathComponent("state.json")
+        )
+    )
+    model.profiles = [manager, builder]
+    model.sessions = [
+        currentManagerChatID: AgentSessionState(
+            id: currentManagerChatID,
+            ownerProfileID: managerID,
+            status: .stopped
+        ),
+        backgroundManagerChatID: AgentSessionState(
+            id: backgroundManagerChatID,
+            ownerProfileID: managerID,
+            status: .stopped
+        ),
+        currentBuilderSessionID: AgentSessionState(
+            id: currentBuilderSessionID,
+            ownerProfileID: builderID,
+            status: .stopped
+        ),
+        backgroundBuilderSessionID: AgentSessionState(
+            id: backgroundBuilderSessionID,
+            ownerProfileID: builderID,
+            status: .working
+        )
+    ]
+    model.sessionOrder = [
+        managerID: [currentManagerChatID, backgroundManagerChatID]
+    ]
+    model.selectedBotID = managerID
+    model.selectedSessionIDs = [managerID: currentManagerChatID]
+    model.managerWorkflows = [
+        currentManagerChatID: ManagerWorkflow(
+            managerProfileID: managerID,
+            team: ManagerTeamConfiguration(builderProfileID: builderID),
+            request: "Current workflow",
+            participantSessionIDs: [.builder: currentBuilderSessionID]
+        ),
+        backgroundManagerChatID: ManagerWorkflow(
+            managerProfileID: managerID,
+            team: ManagerTeamConfiguration(builderProfileID: builderID),
+            request: "Background workflow",
+            participantSessionIDs: [.builder: backgroundBuilderSessionID]
+        )
+    ]
+
+    let indicatorSessions = model.sidebarIndicatorSessions(for: managerID)
+    #expect(
+        Set(indicatorSessions.map(\.id))
+            == [currentManagerChatID, currentBuilderSessionID]
+    )
+    #expect(!indicatorSessions.contains { $0.status == .working })
+
+    model.selectSession(backgroundManagerChatID, for: managerID)
+    let switchedIndicatorSessions = model.sidebarIndicatorSessions(for: managerID)
+    #expect(
+        Set(switchedIndicatorSessions.map(\.id))
+            == [backgroundManagerChatID, backgroundBuilderSessionID]
+    )
+    #expect(switchedIndicatorSessions.contains { $0.status == .working })
+}
+
+@MainActor
+@Test
 func newChatsRequireARepositoryAndLockItAfterStarting() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("bl00p-chat-repository-\(UUID().uuidString)")
