@@ -9,6 +9,16 @@ import SwiftOpenUI
 struct ProfileInspectorView: View {
     @Binding var profile: BotProfile
     let profiles: [BotProfile]
+    /// The currently selected chat session for this bot, if any. When
+    /// present, the prompt editor edits this chat's override rather than the
+    /// bot's global default.
+    var chatSession: Binding<AgentSessionState>?
+    /// Whether the prompt editor is showing the bot's global default instead
+    /// of the selected chat's override. Only meaningful when `chatSession`
+    /// is non-nil; reset to `false` whenever the selected bot or chat
+    /// changes so switching context doesn't leave the editor pointed at the
+    /// wrong scope.
+    @State private var isEditingBotDefault = false
 
     var body: some View {
         ScrollView {
@@ -115,10 +125,38 @@ struct ProfileInspectorView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("ROLE PROMPT")
-                        .font(.bl00p(.caption2, weight: .bold))
-                        .tracking(1.1)
-                        .foregroundStyle(.secondary)
+                    HStack {
+                        Text(isShowingBotDefaultEditor ? "ROLE PROMPT" : "CHAT PROMPT")
+                            .font(.bl00p(.caption2, weight: .bold))
+                            .tracking(1.1)
+                            .foregroundStyle(.secondary)
+
+                        if !isShowingBotDefaultEditor && isUsingChatOverride {
+                            Text("Custom")
+                                .font(.bl00p(.caption2, weight: .semibold))
+                                .foregroundStyle(Color.bl00pPink)
+                        }
+
+                        Spacer()
+
+                        if !isShowingBotDefaultEditor && isUsingChatOverride {
+                            Button("Reset to bot default") {
+                                chatSession?.wrappedValue.instructionsOverride = nil
+                            }
+                            .font(.bl00p(.caption1))
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if chatSession != nil {
+                        Picker("Editing", selection: $isEditingBotDefault) {
+                            Text("This chat").tag(false)
+                            Text("Bot default").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                    }
 
                     TextEditor(text: instructionsBinding)
                         .font(.bl00p(.body))
@@ -135,11 +173,7 @@ struct ProfileInspectorView: View {
                         }
                 }
 
-                Text(
-                    profile.provider == .codex
-                        ? "Codex receives this prompt as developer instructions when the session launches."
-                        : "Claude receives this prompt through its resumable CLI session. Structured approvals enforce read-only roles and keep elevated actions visible."
-                )
+                Text(promptCaption)
                     .font(.bl00p(.caption1))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -147,6 +181,8 @@ struct ProfileInspectorView: View {
             .padding(18)
         }
         .background(Color.bl00pWindowBackground)
+        .onChange(of: profile.id) { _, _ in isEditingBotDefault = false }
+        .onChange(of: chatSession?.wrappedValue.id) { _, _ in isEditingBotDefault = false }
     }
 
     private var modelSelection: Binding<String> {
@@ -172,8 +208,52 @@ struct ProfileInspectorView: View {
         Binding(get: { profile.approvalMode }, set: { profile.approvalMode = $0 })
     }
 
+    /// True when the editor should show the bot's global default prompt:
+    /// there's no chat session to scope to, or the user explicitly switched
+    /// the "Editing" toggle to "Bot default".
+    private var isShowingBotDefaultEditor: Bool {
+        chatSession == nil || isEditingBotDefault
+    }
+
+    /// Edits the bot's global default when `isShowingBotDefaultEditor`,
+    /// otherwise edits the selected chat's override. Shows the effective
+    /// prompt as starting text (falling back to the bot default when the
+    /// chat has no override, mirroring `AgentSessionState.effectiveInstructions`)
+    /// and any edit writes the full text back to the scope being edited.
+    /// A chat override that's cleared to blank is stored as `nil` so the
+    /// editor and the runtime never disagree about whether it's in use.
     private var instructionsBinding: Binding<String> {
-        Binding(get: { profile.instructions }, set: { profile.instructions = $0 })
+        guard let chatSession, !isShowingBotDefaultEditor else {
+            return Binding(get: { profile.instructions }, set: { profile.instructions = $0 })
+        }
+        return Binding(
+            get: {
+                AgentSessionState.effectiveInstructions(
+                    profile: profile,
+                    session: chatSession.wrappedValue
+                )
+            },
+            set: { newValue in
+                let isBlank = newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                chatSession.wrappedValue.instructionsOverride = isBlank ? nil : newValue
+            }
+        )
+    }
+
+    private var isUsingChatOverride: Bool {
+        guard let override = chatSession?.wrappedValue.instructionsOverride else { return false }
+        return !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var promptCaption: String {
+        let providerCaption = profile.provider == .codex
+            ? "Codex receives this prompt as developer instructions when the session launches."
+            : "Claude receives this prompt through its resumable CLI session. Structured approvals enforce read-only roles and keep elevated actions visible."
+        guard chatSession != nil else { return providerCaption }
+        if isShowingBotDefaultEditor {
+            return "This is the bot's default prompt, used by every chat with no custom prompt of its own. \(providerCaption)"
+        }
+        return "This prompt applies only to the selected chat. \(providerCaption)"
     }
 
     private var approvalModeDescription: String {

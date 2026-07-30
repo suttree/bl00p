@@ -94,7 +94,9 @@ struct RootView: View {
                 Divider()
                 ProfileInspectorView(
                     profile: model.binding(for: selectedID),
-                    profiles: model.profiles
+                    profiles: model.profiles,
+                    chatSession: model.selectedSessionID(for: selectedID)
+                        .flatMap { model.sessionBinding(for: $0) }
                 )
                 .frame(width: 330)
                 .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -111,7 +113,9 @@ struct RootView: View {
                 Divider()
                 ProfileInspectorView(
                     profile: model.binding(for: selectedID),
-                    profiles: model.profiles
+                    profiles: model.profiles,
+                    chatSession: model.selectedSessionID(for: selectedID)
+                        .flatMap { model.sessionBinding(for: $0) }
                 )
                 .frame(width: 330)
             }

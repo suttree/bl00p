@@ -839,6 +839,23 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// A binding to a specific chat session, for editors (like the per-chat
+    /// prompt override) that need to read and write session state directly.
+    /// Returns `nil` when the session doesn't exist so callers can fall back
+    /// to bot-level defaults.
+    func sessionBinding(for sessionID: UUID) -> Binding<AgentSessionState>? {
+        guard sessions[sessionID] != nil else { return nil }
+        return Binding(
+            get: { [weak self] in
+                self?.sessions[sessionID] ?? AgentSessionState(id: sessionID)
+            },
+            set: { [weak self] updated in
+                self?.sessions[sessionID] = updated
+                self?.save()
+            }
+        )
+    }
+
     func add(_ profile: BotProfile) {
         profiles.append(profile)
         sessions[profile.id] = AgentSessionState(
@@ -1024,7 +1041,8 @@ final class AppModel: ObservableObject {
                     sessions[chatID]?.handoffWorktreePath,
                 worktreeSeedID: sessions[chatID]?.worktreeSeedID,
                 worktree: sessions[chatID]?.worktree,
-                draft: sessions[chatID]?.draft ?? ""
+                draft: sessions[chatID]?.draft ?? "",
+                instructionsOverride: sessions[chatID]?.instructionsOverride
             )
         }
 
@@ -1801,6 +1819,10 @@ final class AppModel: ObservableObject {
         var runtimeProfile = profile
         runtimeProfile.id = chatID
         let session = sessions[chatID]
+        runtimeProfile.instructions = AgentSessionState.effectiveInstructions(
+            profile: profile,
+            session: session
+        )
         runtimeProfile.worktree = session?.worktree
         if let worktree = session?.worktree {
             runtimeProfile.workingDirectory = worktree.worktreePath

@@ -881,12 +881,14 @@ struct AgentSessionState: Codable, Sendable {
     var worktreeSeedID: UUID? = nil
     var worktree: GitWorktreeOwnership?
     var draft = ""
+    var instructionsOverride: String?
 
     enum CodingKeys: String, CodingKey {
         case id, ownerProfileID, repositoryPath, title, createdAt, updatedAt
         case status, entries
         case hasUnreadCompletion, sessionID, codexTurnModeVersion
         case pendingHandoff, handoffWorktreePath, worktreeSeedID, worktree, draft
+        case instructionsOverride
     }
 
     init(
@@ -905,7 +907,8 @@ struct AgentSessionState: Codable, Sendable {
         handoffWorktreePath: String? = nil,
         worktreeSeedID: UUID? = nil,
         worktree: GitWorktreeOwnership? = nil,
-        draft: String = ""
+        draft: String = "",
+        instructionsOverride: String? = nil
     ) {
         self.id = id
         self.ownerProfileID = ownerProfileID
@@ -923,6 +926,7 @@ struct AgentSessionState: Codable, Sendable {
         self.worktreeSeedID = worktreeSeedID
         self.worktree = worktree
         self.draft = draft
+        self.instructionsOverride = instructionsOverride
     }
 
     init(from decoder: Decoder) throws {
@@ -949,6 +953,19 @@ struct AgentSessionState: Codable, Sendable {
         worktreeSeedID = try container.decodeIfPresent(UUID.self, forKey: .worktreeSeedID)
         worktree = try container.decodeIfPresent(GitWorktreeOwnership.self, forKey: .worktree)
         draft = try container.decodeIfPresent(String.self, forKey: .draft) ?? ""
+        instructionsOverride = try container.decodeIfPresent(String.self, forKey: .instructionsOverride)
+    }
+
+    /// Resolves the prompt that should actually be sent to the runtime for a
+    /// given chat: the session's override when present and non-blank,
+    /// otherwise the bot's default `instructions`.
+    static func effectiveInstructions(profile: BotProfile, session: AgentSessionState?) -> String {
+        guard let override = session?.instructionsOverride,
+              !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return profile.instructions
+        }
+        return override
     }
 }
 
