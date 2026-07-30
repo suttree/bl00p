@@ -1041,7 +1041,8 @@ final class AppModel: ObservableObject {
                     sessions[chatID]?.handoffWorktreePath,
                 worktreeSeedID: sessions[chatID]?.worktreeSeedID,
                 worktree: sessions[chatID]?.worktree,
-                draft: sessions[chatID]?.draft ?? ""
+                draft: sessions[chatID]?.draft ?? "",
+                instructionsOverride: sessions[chatID]?.instructionsOverride
             )
         }
 

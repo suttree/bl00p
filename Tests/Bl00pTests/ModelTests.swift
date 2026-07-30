@@ -940,6 +940,38 @@ func chatTabsKeepIndependentDraftsHistoriesAndRuntimeIdentities() async throws {
 
 @MainActor
 @Test
+func launchPreservesTheChatsPromptOverrideOnColdStart() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-launch-override-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let profile = BotProfile.defaults[0]
+    var session = AgentSessionState(id: profile.id, ownerProfileID: profile.id)
+    session.repositoryPath = "/tmp/project"
+    session.instructionsOverride = "Only touch the migration scripts."
+    let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    store.save(
+        PersistedAppState(
+            profiles: [profile],
+            sessions: [profile.id: session],
+            selectedBotID: profile.id
+        )
+    )
+
+    let model = AppModel(runtime: ImmediateRecordingRuntime(), store: store)
+    // No `sessionID` was persisted, so this hits launch()'s cold-start
+    // branch that rebuilds the session state from scratch.
+    #expect(model.sessions[profile.id]?.sessionID == nil)
+
+    model.launch(profile.id)
+
+    #expect(
+        model.sessions[profile.id]?.instructionsOverride
+            == "Only touch the migration scripts."
+    )
+}
+
+@MainActor
+@Test
 func positionalTabSelectionTracksCurrentSessionOrder() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(
