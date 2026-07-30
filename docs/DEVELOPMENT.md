@@ -1,5 +1,42 @@
 # Development notes
 
+## Transcript scrolling
+
+`TranscriptView` uses one `TranscriptScrollCoordinator` per visible
+conversation. The coordinator owns the session identity, latest-content
+following state, near-bottom tolerance, and one coalesced scroll request. The
+view scrolls only to its session-specific bottom sentinel; it must not retain a
+per-entry scroll-position binding alongside imperative `scrollTo` calls.
+
+Content changes include both a new timeline entry and in-place mutation of the
+final entry, which is required for streamed assistant text. While following,
+the coordinator schedules one deferred scroll so streaming, card updates,
+multiline growth, and layout changes do not create competing animation queues.
+When a user deliberately moves beyond the 80-point near-bottom tolerance,
+following is suspended and **Jump to Latest** is shown. Explicitly jumping to
+latest, sending a message, or returning within the tolerance resumes following.
+Changing sessions resets the coordinator and invalidates pending requests so a
+previous chat cannot affect the new chat.
+
+macOS observes scroll geometry through `TranscriptScrollObserver`. Linux and
+SwiftOpenUI do not expose equivalent geometry, so the transcript uses a
+completed drag beyond the same tolerance as its history-browsing signal. Keep
+that fallback threshold aligned with `TranscriptScrollCoordinator.nearBottomTolerance`.
+
+The UI-independent state machine has focused coverage for initial positioning,
+appends, streamed mutations, layout growth, near-bottom behavior, history
+browsing, explicit return to latest, message sends, small Linux drag gestures,
+and session resets. Run the focused tests with:
+
+```sh
+swift test --disable-sandbox --filter TranscriptScrollCoordinatorTests
+```
+
+On macOS, use the repository's Xcode environment variables shown in the test
+commands below. On Linux, run the equivalent command without
+`--disable-sandbox`; the Linux toolchain's known `_Testing_Foundation` linking
+issue is documented in the README.
+
 ## Positional conversation tabs
 
 `ConversationTabBar` renders tabs from the session order supplied by
