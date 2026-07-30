@@ -123,6 +123,20 @@ All notable changes to bl00p are documented in this file.
 - Preserve managed workflow dispatch payloads through runtime delivery and
   restart recovery, including implementation plans, review findings, and
   publishing and reporting details.
+- Make the Builder to Reviewer/QA handoff robust to blocked turns: a single
+  shared readiness gate, symmetric between the initial build and the revision
+  pass, now advances a blocked-but-committed Builder handoff with unverified
+  test evidence to the Reviewer carrying a visible caveat instead of pausing,
+  but only when the recorded denial actually matches a known test command —
+  an unrelated blocked action (e.g. `rm -rf build`) still hard-blocks an
+  untested pass on either side. Names the specific blocked action (e.g. a
+  denied `git commit`) in the pause reason when the handoff genuinely isn't
+  ready and that denial plausibly explains the failure, without
+  misattributing an unrelated denial as the cause; scoped to denials recorded
+  since the current turn started so a stale denial from an earlier, already-
+  resolved turn can't be reused; and automatically re-runs the gate and
+  advances the workflow the next time the Builder reaches a terminal status,
+  instead of leaving a not-ready pause as a dead end.
 
 ### Tests
 
@@ -148,3 +162,11 @@ All notable changes to bl00p are documented in this file.
 - Cover structured Claude and Codex questions, response encoding, multiple and
   multi-select answers, cancellation, persistence round-trips, and unchanged
   approval flows.
+- Cover the Builder handoff readiness gate advancing a blocked turn with
+  unverified tests under a caveat, rejecting the caveat when the blocked
+  action is unrelated to running tests, ignoring a stale blocked-action entry
+  from an earlier turn rather than misusing it for a later turn's caveat or
+  diagnosis, still pausing on genuinely failing tests, naming a blocked
+  action in the pause reason only when it explains the specific failure, and
+  self-healing a paused handoff once the Builder next reaches a terminal
+  status.

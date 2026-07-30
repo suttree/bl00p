@@ -2042,7 +2042,11 @@ final class AppModel: ObservableObject {
             workflow.stage != .completed
                 && (!workflow.isPaused
                     || status == .launching
-                    || status == .working)
+                    || status == .working
+                    || (workflow.awaitingBuilderHandoffRetry
+                        && (workflow.stage == .building
+                            || workflow.stage == .revising)
+                        && (status == .completed || status == .blocked)))
                 && (workflow.participantSessionIDs.isEmpty
                     || workflow.participantSessionIDs.values.contains(profileID))
                 && expectedProfileID(for: workflow) == profileID
@@ -2131,6 +2135,7 @@ final class AppModel: ObservableObject {
         workflow.isPaused = false
         workflow.pauseReason = nil
         workflow.resumeAvailableAfterRestart = false
+        workflow.awaitingBuilderHandoffRetry = false
         workflow.updatedAt = .now
         managerWorkflows[managerID] = workflow
         save(immediately: true)
@@ -2234,7 +2239,9 @@ final class AppModel: ObservableObject {
                     sourceProfileID: builderProfileID,
                     targetProfileID: reviewerID,
                     summary: workflow.implementationPlan
-                        ?? workflow.request
+                        ?? workflow.request,
+                    builderTurnBlockedDetail:
+                        blockedActionsDetail(for: profileID)
                 ),
                 for: managerID
             )
@@ -2267,7 +2274,9 @@ final class AppModel: ObservableObject {
                     sourceProfileID: builderProfileID,
                     targetProfileID: reviewerID,
                     summary: workflow.implementationPlan
-                        ?? workflow.request
+                        ?? workflow.request,
+                    builderTurnBlockedDetail:
+                        blockedActionsDetail(for: profileID)
                 ),
                 for: managerID
             )
@@ -2864,127 +2873,6 @@ final class AppModel: ObservableObject {
         )
     }
 
-    private func dispatchBuilderHandoff(
-        workflow: ManagerWorkflow,
-        builderSessionID: UUID,
-        reviewerProfileID: UUID,
-        reviewerSessionID: UUID,
-        instruction: String,
-        pass: BuilderHandoffPass = .initial,
-        resetRecipient: Bool = true
-    ) async {
-        let managerSessionID =
-            workflow.participantSessionIDs[.manager] ?? workflow.managerProfileID
-        guard let builderProfileID = sessions[builderSessionID]?.ownerProfileID,
-              var builder = profiles.first(where: { $0.id == builderProfileID }),
-              let builderSession = sessions[builderSessionID] else {
-            pauseWorkflow(
-                managerSessionID,
-                reason: "The assigned Builder is no longer available."
-            )
-            return
-        }
-        builder.worktree = builderSession.worktree
-        do {
-            let startedAt = ContinuousClock.now
-            var package = try await worktrees.makeHandoff(
-                from: builder,
-                session: builderSession
-            )
-            PerformanceMetrics.record(
-                name: .handoffPreparation,
-                duration: startedAt.duration(to: .now),
-                profile: builder,
-                stage: workflow.stage
-            )
-            package.taskContext =
-                workflow.implementationPlan ?? workflow.request
-            let previousRevision =
-                workflow.latestHandoff?.headRevision ?? package.baseRevision
-            let lacksRequiredCommit =
-                package.headRevision == previousRevision
-            let hasUncommittedChanges =
-                package.workingTreeSummary != "Clean"
-            let hasInvalidTests: Bool
-            switch pass {
-            case .initial:
-                hasInvalidTests = package.testStatus == .failed
-            case .revision:
-                guard let testEvidenceAt = package.testEvidenceAt,
-                      let revisionStartedAt = workflow.revisionStartedAt else {
-                    hasInvalidTests = true
-                    break
-                }
-                hasInvalidTests =
-                    package.testStatus != .passed
-                        || testEvidenceAt < revisionStartedAt
-            }
-            guard !lacksRequiredCommit,
-                  !hasUncommittedChanges,
-                  !hasInvalidTests else {
-                _ = transitionWorkflow(
-                    managerSessionID,
-                    to: pass.fallbackStage
-                )
-                let reason: String
-                if lacksRequiredCommit {
-                    reason =
-                        pass == .initial
-                            ? "The Builder handoff has no local commit."
-                            : "The Builder revision pass has no new local commit."
-                } else if hasUncommittedChanges {
-                    reason = "The Builder handoff still has uncommitted changes."
-                } else if pass == .initial {
-                    reason = "The Builder reported failing tests."
-                } else {
-                    reason =
-                        "The Builder handoff does not report passing tests from the revision pass."
-                }
-                pauseWorkflow(managerSessionID, reason: reason)
-                append(
-                    .init(
-                        kind: .question,
-                        title: "Builder handoff is not ready",
-                        text: "\(reason) Ask this bot to finish the work, run the required tests, and commit any changes."
-                    ),
-                    to: builderSessionID
-                )
-                return
-            }
-            record(package, for: managerSessionID)
-            if resetRecipient {
-                guard await resetWorkflowRecipient(
-                    reviewerProfileID,
-                    sessionID: reviewerSessionID,
-                    handoff: package
-                ) else {
-                    pauseWorkflow(
-                        managerSessionID,
-                        reason: "The assigned Reviewer is no longer available."
-                    )
-                    return
-                }
-            } else {
-                attach(
-                    package,
-                    from: builderSessionID,
-                    to: reviewerSessionID,
-                    title: "Updated implementation"
-                )
-            }
-            performSend(
-                instruction,
-                to: reviewerProfileID,
-                sessionID: reviewerSessionID
-            )
-        } catch {
-            pauseWorkflow(
-                managerSessionID,
-                reason: "Could not prepare the Builder handoff: \(error.localizedDescription)"
-            )
-        }
-    }
-
     private func queueWorkflowDispatch(
         _ dispatch: ManagerWorkflowDispatch,
         for managerID: UUID,
@@ -3106,7 +2994,7 @@ final class AppModel: ObservableObject {
                     package.taskContext =
                         workflow.implementationPlan ?? workflow.request
                     guard validate(
-                        package,
+                        &package,
                         for: dispatch,
                         workflow: workflow,
                         managerID: managerID
@@ -3306,7 +3194,7 @@ final class AppModel: ObservableObject {
     }
 
     private func validate(
-        _ package: GitHandoffPackage,
+        _ package: inout GitHandoffPackage,
         for dispatch: ManagerWorkflowDispatch,
         workflow: ManagerWorkflow,
         managerID: UUID
@@ -3320,58 +3208,205 @@ final class AppModel: ObservableObject {
                 reason: "The Builder handoff belongs to a different repository."
             )
         }
+        let pass: BuilderHandoffPass =
+            dispatch.kind == .initialReview ? .initial : .revision
         let previousRevision =
             workflow.latestHandoff?.headRevision ?? package.baseRevision
-        let lacksRequiredCommit =
-            package.headRevision == previousRevision
-        let hasUncommittedChanges = package.workingTreeSummary != "Clean"
-        let hasInvalidTests: Bool
-        if dispatch.kind == .verification {
-            if let testEvidenceAt = package.testEvidenceAt,
-               let revisionStartedAt = workflow.revisionStartedAt {
-                hasInvalidTests =
-                    package.testStatus != .passed
-                        || testEvidenceAt < revisionStartedAt
-            } else {
-                hasInvalidTests = true
-            }
-        } else {
-            hasInvalidTests = package.testStatus == .failed
-        }
-        guard !lacksRequiredCommit,
-              !hasUncommittedChanges,
-              !hasInvalidTests else {
-            let fallbackStage: ManagerWorkflowStage =
-                dispatch.kind == .initialReview ? .building : .revising
-            let reason: String
-            if lacksRequiredCommit {
-                reason =
-                    dispatch.kind == .initialReview
-                        ? "The Builder handoff has no local commit."
-                        : "The Builder revision pass has no new local commit."
-            } else if hasUncommittedChanges {
-                reason = "The Builder handoff still has uncommitted changes."
-            } else if dispatch.kind == .initialReview {
-                reason = "The Builder reported failing tests."
-            } else {
-                reason =
-                    "The Builder handoff does not report passing tests from the revision pass."
-            }
+        switch builderHandoffReadiness(
+            package,
+            pass: pass,
+            previousRevision: previousRevision,
+            revisionStartedAt: workflow.revisionStartedAt,
+            blockedActionsDetail: dispatch.builderTurnBlockedDetail
+        ) {
+        case .ready:
+            return true
+        case .readyWithCaveat(let caveat):
+            applyHandoffCaveat(caveat, to: &package)
+            return true
+        case .notReady(_, let reason):
             return rejectWorkflowHandoff(
                 dispatch: dispatch,
                 managerID: managerID,
-                fallbackStage: fallbackStage,
-                reason: reason
+                fallbackStage: pass.fallbackStage,
+                reason: reason,
+                questionText: dispatch.builderTurnBlockedDetail == nil
+                    ? nil
+                    : reason,
+                marksAwaitingRetry: true
             )
         }
-        return true
+    }
+
+    private enum BuilderHandoffReadinessCategory: Sendable {
+        case missingCommit
+        case dirtyTree
+        case testsFailed
+        case testsBlocked
+    }
+
+    private enum BuilderHandoffReadiness: Sendable {
+        case ready
+        case readyWithCaveat(String)
+        case notReady(category: BuilderHandoffReadinessCategory, reason: String)
+    }
+
+    /// The single readiness gate for a Builder -> Reviewer/QA handoff. A
+    /// missing commit or dirty tree always hard-blocks. Failing tests always
+    /// hard-block. Missing/stale test evidence hard-blocks too, unless the
+    /// Builder turn ended `.blocked` with a recorded permission denial, in
+    /// which case the handoff advances carrying a caveat instead of dead-
+    /// ending the workflow on a retry the Builder cannot make progress on
+    /// without help resolving the deny rule.
+    private func builderHandoffReadiness(
+        _ package: GitHandoffPackage,
+        pass: BuilderHandoffPass,
+        previousRevision: String,
+        revisionStartedAt: Date?,
+        blockedActionsDetail: String?
+    ) -> BuilderHandoffReadiness {
+        guard package.headRevision != previousRevision else {
+            return .notReady(
+                category: .missingCommit,
+                reason: actionableReason(
+                    base: pass == .initial
+                        ? "The Builder handoff has no local commit."
+                        : "The Builder revision pass has no new local commit.",
+                    blockedActionsDetail: blockedActionsDetail,
+                    correlatesWithFailure: denialLooksCommitRelated
+                )
+            )
+        }
+        guard package.workingTreeSummary == "Clean" else {
+            return .notReady(
+                category: .dirtyTree,
+                reason: actionableReason(
+                    base: "The Builder handoff still has uncommitted changes.",
+                    blockedActionsDetail: blockedActionsDetail,
+                    correlatesWithFailure: denialLooksCommitRelated
+                )
+            )
+        }
+        guard package.testStatus != .failed else {
+            return .notReady(
+                category: .testsFailed,
+                reason: pass == .initial
+                    ? "The Builder reported failing tests."
+                    : "The Builder handoff does not report passing tests from the revision pass."
+            )
+        }
+
+        let hasFreshPassingEvidence: Bool
+        switch pass {
+        case .initial:
+            hasFreshPassingEvidence = package.testStatus == .passed
+        case .revision:
+            if let testEvidenceAt = package.testEvidenceAt, let revisionStartedAt {
+                hasFreshPassingEvidence =
+                    package.testStatus == .passed
+                        && testEvidenceAt >= revisionStartedAt
+            } else {
+                hasFreshPassingEvidence = false
+            }
+        }
+        if hasFreshPassingEvidence {
+            return .ready
+        }
+        if let blockedActionsDetail,
+           denialLooksTestRelated(blockedActionsDetail) {
+            return .readyWithCaveat(
+                "Tests could not be verified this pass — a required action was blocked:\n\(blockedActionsDetail)"
+            )
+        }
+        return .notReady(
+            category: .testsBlocked,
+            reason: pass == .initial
+                ? "The Builder handoff does not report passing tests."
+                : "The Builder handoff does not report passing tests from the revision pass."
+        )
+    }
+
+    /// Only names the blocked action when it plausibly explains this
+    /// specific failure category — an unrelated denial (e.g. `rm -rf build`
+    /// blocked while `git commit` was never attempted for some other
+    /// reason) must not be misattributed as the cause.
+    private func actionableReason(
+        base: String,
+        blockedActionsDetail: String?,
+        correlatesWithFailure: (String) -> Bool
+    ) -> String {
+        guard let blockedActionsDetail,
+              correlatesWithFailure(blockedActionsDetail) else {
+            return base
+        }
+        let action = primaryBlockedAction(in: blockedActionsDetail)
+            .map { "`\($0)`" } ?? "An action"
+        return "\(base) \(action) was blocked by a deny rule — approve the bl00p prompt or adjust the rule. The handoff will retry automatically once resolved."
+    }
+
+    private func primaryBlockedAction(in detail: String) -> String? {
+        let lines = detail.split(separator: "\n", omittingEmptySubsequences: false)
+        guard let bulletIndex = lines.firstIndex(where: { $0.hasPrefix("• ") }) else {
+            return nil
+        }
+        if bulletIndex + 1 < lines.count,
+           lines[bulletIndex + 1].hasPrefix("  ") {
+            return lines[bulletIndex + 1].trimmingCharacters(in: .whitespaces)
+        }
+        return String(lines[bulletIndex].dropFirst(2))
+    }
+
+    /// Whether a recorded denial plausibly covers a test command, so a
+    /// blocked turn only earns the advance-with-caveat leniency when the
+    /// thing that was actually blocked looks like the test step itself —
+    /// not an unrelated denial (e.g. `rm -rf build`) that happens to
+    /// coincide with untested evidence.
+    private func denialLooksTestRelated(_ detail: String) -> Bool {
+        let lowered = detail.lowercased()
+        return HandoffTestEvidence.knownTestCommands.contains {
+            lowered.contains($0)
+        }
+    }
+
+    /// Whether a recorded denial plausibly explains a missing commit or a
+    /// dirty tree — both ultimately trace back to the commit step itself.
+    private func denialLooksCommitRelated(_ detail: String) -> Bool {
+        let lowered = detail.lowercased()
+        return ["git commit", "git add", "git stage"].contains {
+            lowered.contains($0)
+        }
+    }
+
+    private func blockedActionsDetail(for sessionID: UUID) -> String? {
+        guard sessions[sessionID]?.status == .blocked,
+              let entries = sessions[sessionID]?.entries else {
+            return nil
+        }
+        let turnStartIndex = min(
+            turnEntryStartIndices[sessionID] ?? 0,
+            entries.count
+        )
+        return entries[turnStartIndex...].last(where: {
+            $0.kind == .question && $0.title == "Some actions were blocked"
+        })?.detail
+    }
+
+    private func applyHandoffCaveat(
+        _ caveat: String,
+        to package: inout GitHandoffPackage
+    ) {
+        package.testStatus = .unverified
+        package.testSummary =
+            "\(caveat)\n\nLast recorded test evidence: \(package.testSummary)"
     }
 
     private func rejectWorkflowHandoff(
         dispatch: ManagerWorkflowDispatch,
         managerID: UUID,
         fallbackStage: ManagerWorkflowStage,
-        reason: String
+        reason: String,
+        questionText: String? = nil,
+        marksAwaitingRetry: Bool = false
     ) -> Bool {
         guard var current = managerWorkflows[managerID],
               current.pendingDispatch?.id == dispatch.id else {
@@ -3379,6 +3414,7 @@ final class AppModel: ObservableObject {
         }
         current.pendingDispatch = nil
         current.stage = fallbackStage
+        current.awaitingBuilderHandoffRetry = marksAwaitingRetry
         current.updatedAt = .now
         managerWorkflows[managerID] = current
         save()
@@ -3387,7 +3423,8 @@ final class AppModel: ObservableObject {
             .init(
                 kind: .question,
                 title: "Builder handoff is not ready",
-                text: "\(reason) Ask this bot to finish the work, run the required tests, and create a local commit."
+                text: questionText
+                    ?? "\(reason) Ask this bot to finish the work, run the required tests, and create a local commit."
             ),
             to: participantSessionID(.builder, in: current)
                 ?? dispatch.sourceProfileID
