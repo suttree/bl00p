@@ -7975,95 +7975,22 @@ func claudeCLIClientCompletesThePermissionRoundTrip() async throws {
 
 @Test
 func unmatchedClaudeCommandReachesTheApprovalCardFlow() async throws {
-    let directory = FileManager.default.temporaryDirectory
-        .appendingPathComponent(
-            "bl00p-claude-runtime-control-\(UUID().uuidString)",
-            isDirectory: true
-        )
-    try FileManager.default.createDirectory(
-        at: directory,
-        withIntermediateDirectories: true
+    let toolInput = JSONValue.object([
+        "command": .string("uname -a"),
+        "description": .string("Inspect the host")
+    ])
+    let client = ApprovalStubClaudeClient(
+        toolInput: toolInput,
+        permissionDenials: [
+            .object([
+                "tool_name": .string("Bash"),
+                "tool_input": toolInput
+            ])
+        ]
     )
-    defer { try? FileManager.default.removeItem(at: directory) }
-
-    let executable = directory.appendingPathComponent("fake-claude")
-    try """
-    #!/usr/bin/env python3
-    import json
-    import sys
-
-    if sys.argv[1:] == ["auth", "status"]:
-        print(json.dumps({"loggedIn": True}))
-        sys.exit(0)
-
-    assert "--permission-mode" in sys.argv
-    mode_index = sys.argv.index("--permission-mode")
-    assert sys.argv[mode_index + 1] == "default"
-    expected_rules = [
-        "Bash(swift build)",
-        "Bash(swift build *)",
-        "Bash(swift build:*)",
-        "Bash(xcrun swift test)",
-        "Bash(xcrun swift test *)",
-        "Bash(xcrun swift test:*)",
-        "Bash(tail -20)"
-    ]
-    assert all(rule in sys.argv for rule in expected_rules)
-    assert "Bash(tail *)" not in sys.argv
-
-    for line in sys.stdin:
-        message = json.loads(line)
-        if message.get("type") == "control_request":
-            request = message.get("request", {})
-            if request.get("subtype") == "initialize":
-                print(json.dumps({
-                    "type": "control_response",
-                    "response": {
-                        "subtype": "success",
-                        "request_id": message["request_id"],
-                        "response": {"commands": []}
-                    }
-                }), flush=True)
-        elif message.get("type") == "user":
-            print(json.dumps({
-                "type": "control_request",
-                "request_id": "permission-1",
-                "request": {
-                    "subtype": "can_use_tool",
-                    "tool_name": "Bash",
-                    "input": {
-                        "command": "uname -a",
-                        "description": "Inspect the host"
-                    },
-                    "tool_use_id": "toolu_1"
-                }
-            }), flush=True)
-        elif message.get("type") == "control_response":
-            print(json.dumps({
-                "type": "result",
-                "is_error": False,
-                "result": "Approved and completed",
-                "permission_denials": [{
-                    "tool_name": "Bash",
-                    "tool_input": {
-                        "command": "uname -a",
-                        "description": "Inspect the host"
-                    }
-                }]
-            }), flush=True)
-            break
-    """.write(to: executable, atomically: true, encoding: .utf8)
-    try FileManager.default.setAttributes(
-        [.posixPermissions: 0o755],
-        ofItemAtPath: executable.path
-    )
-
-    var profile = BotProfile.defaults[0]
-    profile.workingDirectory = directory.path
-    let runtime = ClaudeRuntime(
-        locator: ClaudeExecutableLocator(candidateURLs: [executable])
-    )
-    for await _ in await runtime.start(profile: profile, resumeThreadID: nil) {}
+    let runtime = testClaudeRuntime(client: client)
+    let profile = claudeProfile(role: .builder, approvalMode: .ask)
+    await launchClaude(runtime, profile: profile)
 
     let stream = await runtime.respond(
         to: "Run an unmatched command",
@@ -8105,12 +8032,34 @@ func unmatchedClaudeCommandReachesTheApprovalCardFlow() async throws {
     }
     await runtime.stop(profile: profile)
 
+    let arguments = await client.invocationArguments
+    let permissionModeIndex = try #require(
+        arguments.firstIndex(of: "--permission-mode")
+    )
+    let inputFormatIndex = try #require(
+        arguments.firstIndex(of: "--input-format")
+    )
+    let permissionPromptToolIndex = try #require(
+        arguments.firstIndex(of: "--permission-prompt-tool")
+    )
+
     #expect(approvalEntry?.text == "uname -a")
     #expect(approvalEntry?.approvalState == .pending)
     #expect(sawNeedsApproval)
     #expect(sawApprovedResolution)
     #expect(!sawBlockedQuestion)
     #expect(finalStatus == .completed)
+    #expect(arguments[permissionModeIndex + 1] == "default")
+    #expect(arguments[inputFormatIndex + 1] == "stream-json")
+    #expect(arguments[permissionPromptToolIndex + 1] == "stdio")
+    #expect(arguments.contains("Bash(swift build)"))
+    #expect(arguments.contains("Bash(swift build *)"))
+    #expect(arguments.contains("Bash(swift build:*)"))
+    #expect(arguments.contains("Bash(xcrun swift test)"))
+    #expect(arguments.contains("Bash(xcrun swift test *)"))
+    #expect(arguments.contains("Bash(xcrun swift test:*)"))
+    #expect(arguments.contains("Bash(tail -20)"))
+    #expect(!arguments.contains("Bash(tail *)"))
 }
 
 @Test
@@ -9898,6 +9847,8 @@ private actor ApprovalStubClaudeClient: ClaudeClient {
     private let resultMode: ApprovalStubResultMode
     private let cancelRequests: Bool
     private let emitToolUseBlock: Bool
+    private let permissionDenials: [JSONValue]
+    private(set) var invocationArguments: [String] = []
     private(set) var responses: [JSONValue] = []
 
     init(
@@ -9909,7 +9860,8 @@ private actor ApprovalStubClaudeClient: ClaudeClient {
         failResponses: Bool = false,
         resultMode: ApprovalStubResultMode = .success,
         cancelRequests: Bool = false,
-        emitToolUseBlock: Bool = false
+        emitToolUseBlock: Bool = false,
+        permissionDenials: [JSONValue] = []
     ) {
         let pair = AsyncStream.makeStream(of: JSONValue.self)
         messages = pair.stream
@@ -9921,9 +9873,12 @@ private actor ApprovalStubClaudeClient: ClaudeClient {
         self.resultMode = resultMode
         self.cancelRequests = cancelRequests
         self.emitToolUseBlock = emitToolUseBlock
+        self.permissionDenials = permissionDenials
     }
 
-    func connect(arguments: [String], workingDirectory: URL) async throws {}
+    func connect(arguments: [String], workingDirectory: URL) async throws {
+        invocationArguments = arguments
+    }
 
     func send(_ message: JSONValue) throws {
         if emitToolUseBlock {
@@ -9991,7 +9946,7 @@ private actor ApprovalStubClaudeClient: ClaudeClient {
                     "type": .string("result"),
                     "is_error": .bool(false),
                     "result": result["behavior"] ?? .string("completed"),
-                    "permission_denials": .array([])
+                    "permission_denials": .array(permissionDenials)
                 ])
             )
         case .missingSession:
