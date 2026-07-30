@@ -617,10 +617,20 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func canSelectTab(at position: Int, viewing profileID: UUID) -> Bool {
+        guard profiles.first(where: { $0.id == profileID })?.role == .manager,
+              position > 0 else {
+            return false
+        }
+        return position <= tabSessions(for: profileID).count
+    }
+
     @discardableResult
     func selectTab(at position: Int, viewing profileID: UUID) -> Bool {
+        guard canSelectTab(at: position, viewing: profileID) else {
+            return false
+        }
         let sessions = tabSessions(for: profileID)
-        guard position > 0, position <= sessions.count else { return false }
         selectTab(sessions[position - 1].id, viewing: profileID)
         return true
     }

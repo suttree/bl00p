@@ -46,18 +46,22 @@ titles remain persisted and are used for hover and accessibility context; they
 must not be used as the visible tab label.
 
 The macOS commands in `Platform/MacEntry.swift` must derive their positions
-from the currently visible tab strip and call `selectTab(at:viewing:)`. That
-operation resolves the ordered sessions through `tabSessions(for:)` before
-delegating to the existing tab-selection path, which preserves Manager-owned
-tabs when a workflow participant is visible. The tab strip itself is rendered
-only for the Manager; participant views resolve their conversation from the
-Manager's selected tab. Adding or closing a tab must recompute both labels and
-shortcut availability from the current order.
+from the currently visible tab strip and use
+`canSelectTab(at:viewing:)` for command availability.
+`selectTab(at:viewing:)` repeats that guard before changing selection so stale
+command state cannot act after the selected profile changes. The shared check
+requires an existing Manager profile and a position in its current tab order;
+all positions are unavailable for workflow participants and other non-Manager
+profiles. The tab strip itself is rendered only for the Manager; participant
+views continue to resolve their conversation from the Manager's selected tab.
+Adding or closing a tab must recompute both labels and shortcut availability
+from the current order.
 
 Model coverage should include available and unavailable positions,
-reindexing after tab changes, and Manager-scoped selection while viewing a
-workflow participant. Managed-workflow coverage should also verify that
-selecting a Manager tab updates every participant conversation. A focused
+reindexing after tab changes, refusal without selection changes while viewing
+workflow participants and standalone non-Managers, and restored availability
+after returning to the Manager. Managed-workflow coverage should also verify
+that selecting a Manager tab updates every participant conversation. A focused
 macOS verification run is:
 
 ```sh
@@ -66,7 +70,7 @@ CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-module-cache" \
 SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/swiftpm-module-cache" \
 XDG_CACHE_HOME="$PWD/.build/cache" \
 xcrun swift test --disable-sandbox \
-  --filter positionalTabSelectionTracksCurrentSessionOrder
+  --filter positionalTabSelection
 ```
 
 ## Sidebar rename focus

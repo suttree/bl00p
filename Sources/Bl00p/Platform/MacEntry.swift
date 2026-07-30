@@ -45,7 +45,10 @@ struct Bl00pApp: App {
                     )
                     .disabled(
                         model.selectedProfile.map {
-                            model.tabSessions(for: $0.id).count < position
+                            !model.canSelectTab(
+                                at: position,
+                                viewing: $0.id
+                            )
                         } ?? true
                     )
                 }

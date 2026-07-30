@@ -17,7 +17,8 @@ The current prototype includes:
 - Builder, reviewer, and PR-writer roles
 - Editable role prompts per bot and per chat, with fallback to bot default, plus a repository selected independently for each chat
 - Conversation-header shortcuts for opening the selected repository or active worktree in Finder and Terminal
-- Position-labeled conversation tabs with `⌘1`–`⌘9` switching on macOS
+- Position-labeled conversation tabs with Manager-view-only `⌘1`–`⌘9`
+  switching on macOS
 - Transcript scrolling that follows streaming replies while preserving deliberate history browsing
 - A Slack-like sidebar whose spinner and attention badges follow the bot's
   current chat instead of stale or background chats
@@ -123,17 +124,18 @@ Sparkle is a macOS-only dependency and is not linked into the Linux build.
 ### Conversation tabs
 
 Conversation tabs are labeled by their current position rather than by a
-generated chat title. On macOS, the first nine tabs show `⌘1` through `⌘9` and
-those shortcuts select the matching tab in the active window, including while
-the composer has focus. Tabs after the ninth show their ordinal without a
-shortcut. Adding or closing a tab immediately reindexes the labels and
-shortcuts; the original chat title remains available as hover and accessibility
-context.
+generated chat title. On macOS, while the Manager is selected, the first nine
+tabs show `⌘1` through `⌘9` and those shortcuts select the matching tab in the
+active window, including while the composer has focus. Tabs after the ninth
+show their ordinal without a shortcut. Adding or closing a tab immediately
+reindexes the labels and shortcuts; the original chat title remains available
+as hover and accessibility context.
 
 The tab strip is shown only for the Manager. Selecting a Manager chat switches
 the Builder, Reviewer, and Documenter / PR Writer to their corresponding
-workflow conversations. The same positional shortcuts continue to select the
-corresponding Manager chat while a workflow participant is visible.
+workflow conversations. Positional shortcuts are disabled while a workflow
+participant or any other non-Manager profile is visible, and are restored when
+the Manager is selected again.
 
 ### Transcript scrolling
 
