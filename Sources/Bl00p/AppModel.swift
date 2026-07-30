@@ -3310,7 +3310,8 @@ final class AppModel: ObservableObject {
         if hasFreshPassingEvidence {
             return .ready
         }
-        if let blockedActionsDetail {
+        if let blockedActionsDetail,
+           denialLooksTestRelated(blockedActionsDetail) {
             return .readyWithCaveat(
                 "Tests could not be verified this pass — a required action was blocked:\n\(blockedActionsDetail)"
             )
@@ -3352,9 +3353,28 @@ final class AppModel: ObservableObject {
         return String(lines[bulletIndex].dropFirst(2))
     }
 
+    /// Whether a recorded denial plausibly covers a test command, so a
+    /// blocked turn only earns the advance-with-caveat leniency when the
+    /// thing that was actually blocked looks like the test step itself —
+    /// not an unrelated denial (e.g. `rm -rf build`) that happens to
+    /// coincide with untested evidence.
+    private func denialLooksTestRelated(_ detail: String) -> Bool {
+        let lowered = detail.lowercased()
+        return HandoffTestEvidence.knownTestCommands.contains {
+            lowered.contains($0)
+        }
+    }
+
     private func blockedActionsDetail(for sessionID: UUID) -> String? {
-        guard sessions[sessionID]?.status == .blocked else { return nil }
-        return sessions[sessionID]?.entries.last(where: {
+        guard sessions[sessionID]?.status == .blocked,
+              let entries = sessions[sessionID]?.entries else {
+            return nil
+        }
+        let turnStartIndex = min(
+            turnEntryStartIndices[sessionID] ?? 0,
+            entries.count
+        )
+        return entries[turnStartIndex...].last(where: {
             $0.kind == .question && $0.title == "Some actions were blocked"
         })?.detail
     }

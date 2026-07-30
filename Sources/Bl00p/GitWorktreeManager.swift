@@ -437,40 +437,43 @@ struct HandoffTestEvidence: Equatable {
     let summary: String
     let recordedAt: Date?
 
+    /// Shared with the Builder handoff readiness gate so it can recognize a
+    /// blocked test command instead of trusting any recorded denial.
+    static let knownTestCommands = [
+        "swift test",
+        "xcodebuild test",
+        "npm test",
+        "npm run test",
+        "pnpm test",
+        "yarn test",
+        "pytest",
+        "cargo test",
+        "go test",
+        "bundle exec rspec",
+        "make test",
+        "make check",
+        "just test",
+        "ctest",
+        "dotnet test",
+        "mvn test",
+        "gradle test",
+        "gradlew test",
+        "mix test",
+        "phpunit",
+        "composer test",
+        "deno test",
+        "bun test",
+        "rake test",
+        "bin/test",
+        "scripts/test",
+        "scripts/check"
+    ]
+
     static func latest(in entries: [TimelineEntry]) -> HandoffTestEvidence {
         let testEntry = entries.last { entry in
             guard entry.kind == .command else { return false }
             let command = entry.text.lowercased()
             let detail = entry.detail?.lowercased() ?? ""
-            let knownTestCommands = [
-                "swift test",
-                "xcodebuild test",
-                "npm test",
-                "npm run test",
-                "pnpm test",
-                "yarn test",
-                "pytest",
-                "cargo test",
-                "go test",
-                "bundle exec rspec",
-                "make test",
-                "make check",
-                "just test",
-                "ctest",
-                "dotnet test",
-                "mvn test",
-                "gradle test",
-                "gradlew test",
-                "mix test",
-                "phpunit",
-                "composer test",
-                "deno test",
-                "bun test",
-                "rake test",
-                "bin/test",
-                "scripts/test",
-                "scripts/check"
-            ]
             let outputReportsTests = [
                 "test passed",
                 "tests passed",

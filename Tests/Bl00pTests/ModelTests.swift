@@ -3225,6 +3225,303 @@ func blockedBuilderTurnWithUnverifiedTestsAdvancesWithACaveat() async throws {
 
 @MainActor
 @Test
+func blockedBuilderTurnWithUnrelatedDenialDoesNotEarnATestCaveat() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-blocked-builder-unrelated-denial-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/managed-feature",
+        baseRevision: "abc123"
+    )
+    let revisionStartedAt = Date()
+    let untestedRevision = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "def456",
+        taskContext: "Ship the feature",
+        testStatus: .notRun,
+        testSummary: "No test command was recorded.",
+        workingTreeSummary: "Clean"
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builderID,
+        reviewerProfileID: reviewerID,
+        publisherProfileID: publisherID
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement.",
+        workingDirectory: ownership.repositoryPath,
+        worktree: ownership
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Publish.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        repositoryPath: ownership.repositoryPath,
+        team: team,
+        request: "Ship the feature",
+        stage: .revising,
+        branch: ownership.branch,
+        latestHandoff: GitHandoffPackage(
+            sourceProfileID: builderID,
+            sourceName: "Builder",
+            repositoryPath: ownership.repositoryPath,
+            worktreePath: ownership.worktreePath,
+            branch: ownership.branch,
+            baseRevision: ownership.baseRevision,
+            headRevision: "abc123",
+            taskContext: "Ship the feature",
+            testStatus: .passed,
+            testSummary: "`swift test` — passed",
+            workingTreeSummary: "Clean"
+        ),
+        reviewSummary: "Review finding: add a regression test.",
+        revisionStartedAt: revisionStartedAt
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer, publisher],
+            sessions: [
+                managerID: AgentSessionState(),
+                builderID: AgentSessionState(),
+                reviewerID: AgentSessionState(),
+                publisherID: AgentSessionState()
+            ],
+            selectedBotID: builderID,
+            managerWorkflows: [managerID: workflow]
+        )
+    )
+    // The denial is real, but it has nothing to do with running tests, so it
+    // must not be treated as evidence that the test command itself was
+    // blocked.
+    let runtime = BuilderStatusStubRuntime(
+        builderFinalStatus: .blocked,
+        blockedActionDetail: "• rm -rf build"
+    )
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            package: untestedRevision,
+            preparedOwnership: ownership
+        ),
+        store: store
+    )
+
+    model.send("Finish the revision pass", to: builderID)
+    for _ in 0..<100
+        where model.workflow(for: managerID)?.pauseReason == nil {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let paused = try #require(model.workflow(for: managerID))
+    #expect(paused.stage == .revising)
+    #expect(paused.isPaused)
+    #expect(
+        paused.pauseReason
+            == "The Builder handoff does not report passing tests from the revision pass."
+    )
+    #expect(paused.awaitingBuilderHandoffRetry)
+    #expect(model.session(for: reviewerID).entries.isEmpty)
+}
+
+@MainActor
+@Test
+func revisitedBuilderTurnDoesNotReuseAStaleBlockedActionFromAnEarlierTurn() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-stale-blocked-action-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/managed-feature",
+        baseRevision: "abc123"
+    )
+    let noCommitPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: ownership.baseRevision,
+        taskContext: "Ship the feature",
+        testStatus: .notRun,
+        testSummary: "No test command was recorded.",
+        workingTreeSummary: "Clean"
+    )
+    let untestedButCommittedPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "def456",
+        taskContext: "This gets overwritten with the implementation plan.",
+        testStatus: .notRun,
+        testSummary: "No test command was recorded.",
+        workingTreeSummary: "Clean"
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builderID,
+        reviewerProfileID: reviewerID,
+        publisherProfileID: publisherID
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement.",
+        workingDirectory: ownership.repositoryPath,
+        worktree: ownership
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Publish.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        repositoryPath: ownership.repositoryPath,
+        team: team,
+        request: "Ship the feature",
+        implementationPlan: "Implement the feature end to end.",
+        stage: .building,
+        branch: ownership.branch
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer, publisher],
+            sessions: [
+                managerID: AgentSessionState(),
+                builderID: AgentSessionState(),
+                reviewerID: AgentSessionState(),
+                publisherID: AgentSessionState()
+            ],
+            selectedBotID: builderID,
+            managerWorkflows: [managerID: workflow]
+        )
+    )
+    let runtime = TwoTurnBuilderRuntime()
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            packages: [noCommitPackage, untestedButCommittedPackage],
+            preparedOwnership: ownership
+        ),
+        store: store
+    )
+
+    // Turn 1: blocked on a test-related denial, but with no commit at all,
+    // so the gate hard-pauses without ever advancing. This leaves a
+    // test-related "Some actions were blocked" entry in the transcript.
+    model.send("Implement the feature", to: builderID)
+    for _ in 0..<100
+        where model.workflow(for: managerID)?.pauseReason == nil {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    let afterFirstTurn = try #require(model.workflow(for: managerID))
+    #expect(
+        afterFirstTurn.pauseReason?
+            .hasPrefix("The Builder handoff has no local commit.") == true
+    )
+
+    // Turn 2: a fresh explicit send resets the turn boundary. This turn ends
+    // blocked again but records no denial of its own — the stale turn-1
+    // "swift test" denial must not be reused to justify a caveat here.
+    model.send("Commit the remaining changes", to: builderID)
+    for _ in 0..<100
+        where model.workflow(for: managerID)?.stage != .reviewing {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let advanced = try #require(model.workflow(for: managerID))
+    #expect(advanced.stage == .reviewing)
+    #expect(!advanced.isPaused)
+    #expect(advanced.latestHandoff?.testStatus == .notRun)
+    #expect(model.session(for: reviewerID).entries.contains {
+        $0.kind == .handoff
+    })
+}
+
+@MainActor
+@Test
 func blockedBuilderTurnWithFailingTestsStillPauses() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(
@@ -10362,6 +10659,78 @@ private actor RetryableBuilderRuntime: AgentRuntime {
             continuation.yield(.status(.blocked))
             continuation.finish()
         }
+    }
+
+    func stop(profile: BotProfile) async {}
+}
+
+/// The Builder's first turn ends blocked with a test-related denial; its
+/// second turn (a fresh explicit send) also ends blocked but records no
+/// denial of its own. Used to prove a stale denial from an earlier turn
+/// cannot be reused to justify a caveat on a later, unrelated turn.
+private actor TwoTurnBuilderRuntime: AgentRuntime {
+    private(set) var calls: [AgentRole] = []
+    private var builderRespondCount = 0
+
+    func start(
+        profile: BotProfile,
+        resumeThreadID: String?
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(
+                .sessionID(resumeThreadID ?? "session-\(profile.id.uuidString)")
+            )
+            continuation.yield(.status(.needsAnswer))
+            continuation.finish()
+        }
+    }
+
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        calls.append(profile.role)
+        guard profile.role == .builder else {
+            return AsyncStream { continuation in
+                continuation.yield(.status(.working))
+                continuation.yield(
+                    .entry(.init(kind: .assistant, text: "Acknowledged."))
+                )
+                continuation.yield(.status(.completed))
+                continuation.finish()
+            }
+        }
+        builderRespondCount += 1
+        let isFirstBuilderTurn = builderRespondCount == 1
+        return AsyncStream { continuation in
+            continuation.yield(.status(.working))
+            continuation.yield(
+                .entry(.init(kind: .assistant, text: "Working on it."))
+            )
+            if isFirstBuilderTurn {
+                continuation.yield(
+                    .entry(
+                        .init(
+                            kind: .question,
+                            title: "Some actions were blocked",
+                            text: "Claude could not run one or more required actions.",
+                            detail: "• swift test"
+                        )
+                    )
+                )
+            }
+            continuation.yield(.status(.blocked))
+            continuation.finish()
+        }
+    }
+
+    func resolveApproval(
+        entryID: UUID,
+        approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
     }
 
     func stop(profile: BotProfile) async {}
