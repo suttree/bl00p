@@ -123,6 +123,14 @@ All notable changes to bl00p are documented in this file.
 - Preserve managed workflow dispatch payloads through runtime delivery and
   restart recovery, including implementation plans, review findings, and
   publishing and reporting details.
+- Make the Builder to Reviewer/QA handoff robust to blocked turns: a single
+  shared readiness gate now advances a blocked-but-committed Builder handoff
+  with unverified test evidence to the Reviewer carrying a visible caveat
+  instead of pausing, names the specific blocked action (e.g. a denied
+  `git commit` or test command) in the pause reason when the handoff genuinely
+  isn't ready, and automatically re-runs the gate and advances the workflow
+  the next time the Builder reaches a terminal status, instead of leaving a
+  not-ready pause as a dead end.
 
 ### Tests
 
@@ -148,3 +156,7 @@ All notable changes to bl00p are documented in this file.
 - Cover structured Claude and Codex questions, response encoding, multiple and
   multi-select answers, cancellation, persistence round-trips, and unchanged
   approval flows.
+- Cover the Builder handoff readiness gate advancing a blocked turn with
+  unverified tests under a caveat, still pausing on genuinely failing tests,
+  naming a blocked action in the pause reason, and self-healing a paused
+  handoff once the Builder next reaches a terminal status.
