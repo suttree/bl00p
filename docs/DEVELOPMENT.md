@@ -152,6 +152,33 @@ should also cover selecting and submitting a fixture-backed question, resumed
 provider execution, a resolved card that cannot be edited twice, and readable
 option wrapping at a narrow conversation width.
 
+## Claude approval-flow test doubles
+
+The model test `unmatchedClaudeCommandReachesTheApprovalCardFlow` uses the
+injected `ApprovalStubClaudeClient` to exercise the complete approval-card
+round trip deterministically. The stub captures the runtime invocation
+arguments and can emit permission denials, so the test covers the pending
+`uname -a` approval, approved resolution, denial reconciliation, and completed
+turn without depending on Python, a temporary executable, or process timing.
+
+Keep `claudeCLIClientCompletesThePermissionRoundTrip` as the separate
+subprocess-level transport test. When changing Claude permission arguments or
+approval reconciliation, run the focused flow test and the transport test
+independently:
+
+```sh
+swift test --disable-sandbox \
+  --filter unmatchedClaudeCommandReachesTheApprovalCardFlow
+swift test --disable-sandbox \
+  --filter claudeCLIClientCompletesThePermissionRoundTrip
+```
+
+The approval-flow test should continue to assert `--permission-mode default`,
+structured permission transport, and the narrow Builder shell-command
+allowlist. Keep those assertions in the stub-backed test; they validate the
+runtime wiring without turning the model test into another process-level
+transport test.
+
 ## Per-chat prompt overrides
 
 A chat session can override its bot's default `instructions` by setting

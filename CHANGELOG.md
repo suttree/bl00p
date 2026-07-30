@@ -147,6 +147,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Tests
 
+- Stabilize Claude unmatched-command approval-flow coverage with an injected
+  client stub, while retaining subprocess coverage for the CLI permission
+  transport.
 - Cover sidebar indicator scoping for standalone chats and selected Manager
   workflows.
 - Cover bounded review revisions, multi-block review output, protocol-marker
