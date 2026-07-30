@@ -1004,21 +1004,43 @@ func positionalTabSelectionTracksCurrentSessionOrder() async throws {
             "bl00p-positional-tab-selection-\(UUID().uuidString)"
         )
     defer { try? FileManager.default.removeItem(at: directory) }
-    let model = AppModel(
-        runtime: ImmediateRecordingRuntime(),
-        store: AppStateStore(
-            fileURL: directory.appendingPathComponent("state.json")
+    let profile = BotProfile(
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate."
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [profile],
+            sessions: [
+                profile.id: AgentSessionState(
+                    id: profile.id,
+                    ownerProfileID: profile.id
+                )
+            ],
+            selectedBotID: profile.id
         )
     )
-    let profile = try #require(model.profiles.first)
+    let model = AppModel(
+        runtime: ImmediateRecordingRuntime(),
+        store: store
+    )
     let firstID = try #require(model.selectedSessionID(for: profile.id))
     let secondID = model.newChat(for: profile.id)
     let thirdID = model.newChat(for: profile.id)
 
+    #expect(!model.canSelectTab(at: 0, viewing: profile.id))
+    #expect(!model.canSelectTab(at: 4, viewing: profile.id))
+    #expect(!model.canSelectTab(at: 1, viewing: UUID()))
     #expect(!model.selectTab(at: 0, viewing: profile.id))
     #expect(!model.selectTab(at: 4, viewing: profile.id))
     #expect(model.selectedSessionID(for: profile.id) == thirdID)
 
+    #expect(model.canSelectTab(at: 2, viewing: profile.id))
     #expect(model.selectTab(at: 2, viewing: profile.id))
     #expect(model.selectedSessionID(for: profile.id) == secondID)
 
@@ -1035,6 +1057,121 @@ func positionalTabSelectionTracksCurrentSessionOrder() async throws {
     let fourthID = model.newChat(for: profile.id)
     #expect(model.selectTab(at: 3, viewing: profile.id))
     #expect(model.selectedSessionID(for: profile.id) == fourthID)
+}
+
+@MainActor
+@Test
+func positionalTabSelectionIsAvailableOnlyInManagerView() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-manager-only-positional-tabs-\(UUID().uuidString)"
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let fixture = managedWorkflowFixture()
+    let standalone = BotProfile(
+        name: "Standalone Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review independently.",
+        workingDirectory: "/tmp/project"
+    )
+    let profiles = fixture.profiles + [standalone]
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: profiles,
+            sessions: Dictionary(
+                uniqueKeysWithValues: profiles.map {
+                    (
+                        $0.id,
+                        AgentSessionState(
+                            id: $0.id,
+                            ownerProfileID: $0.id
+                        )
+                    )
+                }
+            ),
+            selectedBotID: fixture.manager.id
+        )
+    )
+    let model = AppModel(
+        runtime: ImmediateRecordingRuntime(),
+        store: store
+    )
+
+    model.send("First workflow", to: fixture.manager.id)
+    let firstWorkflow = try #require(
+        model.managerWorkflows[fixture.manager.id]
+    )
+    let secondManagerSessionID = model.newChat(for: fixture.manager.id)
+    #expect(
+        model.setRepositoryPath(
+            "/tmp/second-project",
+            for: secondManagerSessionID
+        )
+    )
+    model.send("Second workflow", to: fixture.manager.id)
+    let secondWorkflow = try #require(
+        model.managerWorkflows[secondManagerSessionID]
+    )
+    let secondBuilderSessionID = try #require(
+        secondWorkflow.participantSessionIDs[.builder]
+    )
+
+    #expect(model.canSelectTab(at: 1, viewing: fixture.manager.id))
+    #expect(model.selectTab(at: 1, viewing: fixture.manager.id))
+    #expect(
+        model.selectedSessionID(for: fixture.manager.id)
+            == fixture.manager.id
+    )
+
+    for participant in [
+        fixture.builder,
+        fixture.reviewer,
+        fixture.publisher
+    ] {
+        let expectedSessionID = try #require(
+            firstWorkflow.participantSessionIDs[participant.role]
+        )
+        model.selectedBotID = participant.id
+        #expect(
+            (1...9).allSatisfy {
+                !model.canSelectTab(at: $0, viewing: participant.id)
+            }
+        )
+        #expect(!model.selectTab(at: 2, viewing: participant.id))
+        #expect(
+            model.selectedSessionID(for: fixture.manager.id)
+                == fixture.manager.id
+        )
+        #expect(
+            model.conversationSessionID(for: participant.id)
+                == expectedSessionID
+        )
+    }
+
+    model.selectedBotID = standalone.id
+    #expect(!model.canSelectTab(at: 1, viewing: standalone.id))
+    #expect(!model.selectTab(at: 1, viewing: standalone.id))
+    #expect(
+        model.selectedSessionID(for: fixture.manager.id)
+            == fixture.manager.id
+    )
+    #expect(model.conversationSessionID(for: standalone.id) == standalone.id)
+
+    model.selectedBotID = fixture.manager.id
+    #expect(model.canSelectTab(at: 2, viewing: fixture.manager.id))
+    #expect(model.selectTab(at: 2, viewing: fixture.manager.id))
+    #expect(
+        model.selectedSessionID(for: fixture.manager.id)
+            == secondManagerSessionID
+    )
+    #expect(
+        model.conversationSessionID(for: fixture.builder.id)
+            == secondBuilderSessionID
+    )
 }
 
 @MainActor
