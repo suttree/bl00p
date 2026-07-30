@@ -7116,24 +7116,20 @@ func repeatedClaudeLaunchesReuseSuccessfulAuthenticationProbe() async throws {
 
 @Test
 func claudeRuntimeFailureInvalidatesCachedPreflight() async throws {
-    let directory = FileManager.default.temporaryDirectory
-        .appendingPathComponent(
-            "bl00p-claude-invalidation-\(UUID().uuidString)",
-            isDirectory: true
-        )
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let executable = directory.appendingPathComponent("claude")
-    try makeExecutable(at: executable)
     let probe = LockedPreflightProbe()
+    let client = ApprovalStubClaudeClient(failConnection: true)
+    let clients = ClaudeClientQueue([client])
     let runtime = ClaudeRuntime(
-        locator: ClaudeExecutableLocator(candidateURLs: [executable]),
+        locator: ClaudeExecutableLocator(
+            candidateURLs: [URL(fileURLWithPath: "/usr/bin/true")]
+        ),
         authenticationProbe: { _ in
             probe.recordAuthenticationProbe()
             return .loggedIn
-        }
+        },
+        clientFactory: { _ in clients.next() }
     )
-    var profile = BotProfile.defaults[0]
-    profile.workingDirectory = directory.path
+    let profile = claudeProfile(role: .builder, approvalMode: .ask)
 
     let launch = await runtime.start(
         profile: profile,
@@ -9751,10 +9747,16 @@ private func agentStatuses(in events: [AgentEvent]) -> [AgentStatus] {
 }
 
 private enum ApprovalStubError: LocalizedError {
+    case connectionFailed
     case responseFailed
 
     var errorDescription: String? {
-        "simulated response failure"
+        switch self {
+        case .connectionFailed:
+            "simulated connection failure"
+        case .responseFailed:
+            "simulated response failure"
+        }
     }
 }
 
@@ -9843,6 +9845,7 @@ private actor ApprovalStubClaudeClient: ClaudeClient {
     private let toolName: String
     private let toolInput: JSONValue
     private let requestIDs: [String]
+    private let failConnection: Bool
     private let failResponses: Bool
     private let resultMode: ApprovalStubResultMode
     private let cancelRequests: Bool
@@ -9857,6 +9860,7 @@ private actor ApprovalStubClaudeClient: ClaudeClient {
             "command": .string("rg -n TODO Sources")
         ]),
         requestIDs: [String] = ["permission-1"],
+        failConnection: Bool = false,
         failResponses: Bool = false,
         resultMode: ApprovalStubResultMode = .success,
         cancelRequests: Bool = false,
@@ -9869,6 +9873,7 @@ private actor ApprovalStubClaudeClient: ClaudeClient {
         self.toolName = toolName
         self.toolInput = toolInput
         self.requestIDs = requestIDs
+        self.failConnection = failConnection
         self.failResponses = failResponses
         self.resultMode = resultMode
         self.cancelRequests = cancelRequests
@@ -9877,6 +9882,9 @@ private actor ApprovalStubClaudeClient: ClaudeClient {
     }
 
     func connect(arguments: [String], workingDirectory: URL) async throws {
+        guard !failConnection else {
+            throw ApprovalStubError.connectionFailed
+        }
         invocationArguments = arguments
     }
 
