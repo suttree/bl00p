@@ -60,18 +60,19 @@ reserved for real provider questions, such as Codex `requestUserInput` events,
 and those still pause the workflow.
 
 Test evidence is more nuanced. Genuinely failing tests are always a hard
-blocker. Missing or stale test evidence is also a hard blocker on a normal
-(non-blocked) turn. But when the Builder turn ended `blocked` and recorded an
-unresolved permission denial whose command matches a known test runner (the
-same list `HandoffTestEvidence` uses to recognize a test command), missing or
-stale test evidence instead advances the handoff to the Reviewer carrying a
-caveat: `GitHandoffPackage.testStatus` is set to `.unverified` and
-`testSummary` is rewritten to name the blocked action, so the Reviewer sees
-"Tests: Unverified (blocked)" rather than a misleading "Not run" or stale
-"Passed". The Reviewer is the quality backstop for this case, not a second
-automatic test run. A denial unrelated to running tests (e.g. a blocked
-`rm -rf build`) does not earn this leniency — it hard-blocks like any other
-untested revision pass, since the denial gives no reason to believe the test
+blocker, on both the initial build and the revision pass. Missing or stale
+test evidence is also a hard blocker on a normal (non-blocked) turn, on
+either pass — the two passes are symmetric. But when the Builder turn ended
+`blocked` and recorded an unresolved permission denial whose command matches
+a known test runner (the same list `HandoffTestEvidence` uses to recognize a
+test command), missing or stale test evidence instead advances the handoff to
+the Reviewer carrying a caveat: `GitHandoffPackage.testStatus` is set to
+`.unverified` and `testSummary` is rewritten to name the blocked action, so
+the Reviewer sees "Tests: Unverified (blocked)" rather than a misleading "Not
+run" or stale "Passed". The Reviewer is the quality backstop for this case,
+not a second automatic test run. A denial unrelated to running tests (e.g. a
+blocked `rm -rf build`) does not earn this leniency — it hard-blocks like any
+other untested pass, since the denial gives no reason to believe the test
 step itself was what got blocked. This denial lookup is scoped to entries
 recorded since the current turn started (`turnEntryStartIndices`), so a stale
 "Some actions were blocked" entry from an earlier, already-resolved turn is
@@ -79,10 +80,15 @@ never reused to justify a caveat on a later turn.
 
 A blocked Builder turn without the required commit or clean tree, or with
 genuinely failing tests, still pauses with the `Builder handoff is not ready`
-question card. When the turn recorded a permission denial, the pause reason
-names the specific blocked action (parsed from the recorded denial detail) and
-states that the handoff will retry automatically, instead of the generic
-"finish the work and commit" text. `ManagerWorkflow.awaitingBuilderHandoffRetry`
+question card. When the turn recorded a permission denial whose command
+plausibly explains that specific failure (a `git commit`/`git add`-flavored
+denial for a missing commit or dirty tree), the pause reason names the
+blocked action (parsed from the recorded denial detail) and states that the
+handoff will retry automatically, instead of the generic "finish the work and
+commit" text. A denial that doesn't match the failure category (e.g. that
+same blocked `rm -rf build` alongside a genuinely missing commit) is not
+named as the cause — the pause reason falls back to the plain, un-annotated
+text rather than misattributing the failure. `ManagerWorkflow.awaitingBuilderHandoffRetry`
 is set whenever this gate hard-pauses a `building`/`revising` workflow; while
 set, the workflow is re-evaluated (bypassing the normal "skip paused
 workflows" rule) the next time its Builder session reaches `completed` or
