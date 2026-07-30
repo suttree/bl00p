@@ -33,11 +33,22 @@ start another release.
 The release job uses the protected GitHub Environment named `release`. Configure
 that environment to:
 
-- allow deployments from protected `main`;
+- allow deployments only from `main` through a custom deployment branch
+  policy;
 - have no required deployment reviewers, so a successful `main` build can
   publish without a manual gate; and
 - hold one environment secret, `SPARKLE_PRIVATE_KEY`, containing the base64
   Sparkle Ed25519 private seed.
+
+Keep the repository's active **Protect release tags** ruleset scoped to
+`refs/tags/v*`, but do not enable its tag-creation restriction: the Release
+workflow's `GITHUB_TOKEN` must be able to create each new version tag. Keep the
+update and deletion restrictions enabled, with the repository owner as the
+always-allowed bypass actor. This lets automation create a new release tag
+without allowing it to move or delete an existing one. GitHub does not permit
+this user-owned repository to add the official GitHub Actions integration as a
+ruleset bypass actor, so permitting creation while protecting updates and
+deletions is the supported account-free configuration.
 
 The app contains the matching public Sparkle Ed25519 key. The release workflow
 cryptographically verifies every generated archive signature against that
