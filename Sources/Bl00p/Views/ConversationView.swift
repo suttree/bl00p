@@ -125,6 +125,7 @@ struct ConversationView: View {
                         && session.status != .working
                         && !isAwaitingPlanApproval
                         && !isAwaitingStructuredAnswer,
+                    repositoryReady: !session.repositoryPath.isEmpty,
                     send: {
                         let outgoing = draft
                         let outgoingAttachments = attachments
@@ -1339,6 +1340,7 @@ private struct ComposerView: View {
     @Binding var draft: String
     @Binding var attachments: [ImageAttachment]
     let isEnabled: Bool
+    let repositoryReady: Bool
     let send: () -> Void
     @State private var isDropTargeted = false
     @State private var editorWidth: CGFloat = 600
@@ -1370,6 +1372,7 @@ private struct ComposerView: View {
             HStack(alignment: .bottom, spacing: 10) {
                 TextEditor(text: limitedDraft)
                     .focused($isEditorFocused)
+                    .disabled(!repositoryReady)
                     .font(.bl00p(.body))
                     .scrollContentBackground(.hidden)
                     .frame(height: editorHeight)
@@ -1404,18 +1407,20 @@ private struct ComposerView: View {
                         .background(Color.bl00pPink, in: Circle())
                 }
                 .buttonStyle(.plain)
-                .disabled(!isEnabled || !hasContent)
+                .disabled(!isEnabled || !hasContent || !repositoryReady)
                 .opacity(
-                    isEnabled && hasContent ? 1 : 0.35
+                    isEnabled && hasContent && repositoryReady ? 1 : 0.35
                 )
                 .keyboardShortcut(.return, modifiers: [.command])
             }
 
             HStack {
                 Text(
-                    isEnabled
-                        ? "Drop images here · ⌘↩ to send"
-                        : "Working…"
+                    !repositoryReady
+                        ? "Choose a repository to start chatting"
+                        : isEnabled
+                            ? "Drop images here · ⌘↩ to send"
+                            : "Working…"
                 )
 
                 Spacer()
