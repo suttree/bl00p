@@ -49,6 +49,7 @@ struct SessionCloseAssessment: Equatable, Sendable {
     var isActive: Bool
     var hasDirtyWorktree: Bool
     var participatesInWorkflow: Bool
+    var hasManagedWorktree: Bool = false
     var leavesWorktreeOnDisk: Bool = false
     var worktreeWarning: String? = nil
 
@@ -755,6 +756,7 @@ final class AppModel: ObservableObject {
             isActive: isActive,
             hasDirtyWorktree: dirty,
             participatesInWorkflow: participates,
+            hasManagedWorktree: session.worktree != nil,
             leavesWorktreeOnDisk: leavesWorktreeOnDisk,
             worktreeWarning: worktreeWarning
         )

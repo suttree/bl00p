@@ -209,9 +209,18 @@ private struct SessionCloseRequest: Identifiable {
     var id: UUID { sessionID }
 
     var message: String {
-        var warnings: [String] = [
-            "The local chat history will be deleted. Its Git branch is retained for recovery."
-        ]
+        SessionCloseWarningMessage.make(for: assessment)
+    }
+}
+
+enum SessionCloseWarningMessage {
+    static func make(for assessment: SessionCloseAssessment) -> String {
+        var warnings = ["The local chat history will be deleted."]
+        if assessment.hasManagedWorktree && !assessment.leavesWorktreeOnDisk {
+            warnings.append(
+                "The managed Git worktree will be deleted. Its Git branch is retained for recovery."
+            )
+        }
         if assessment.isActive {
             warnings.append("The agent is active and will be stopped.")
         }
@@ -220,7 +229,7 @@ private struct SessionCloseRequest: Identifiable {
         }
         if assessment.leavesWorktreeOnDisk {
             warnings.append(
-                "The worktree cannot be safely removed automatically and will be left on disk."
+                "The managed Git worktree cannot be safely removed automatically and will be left on disk. Its Git branch is retained for recovery."
             )
             if let detail = assessment.worktreeWarning {
                 warnings.append(detail)
