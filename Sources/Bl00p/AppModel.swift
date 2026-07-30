@@ -583,6 +583,30 @@ final class AppModel: ObservableObject {
         return participantID
     }
 
+    /// Sessions whose status drives the sidebar row indicators for a bot:
+    /// only the chat currently in view, so stale/background chats don't
+    /// signal attention on the avatar.
+    func sidebarIndicatorSessions(for profileID: UUID) -> [AgentSessionState] {
+        guard let profile = profiles.first(where: { $0.id == profileID })
+        else {
+            return []
+        }
+
+        if profile.role == .manager {
+            let managerSession = session(for: profileID)
+            let participantSessions = managerWorkflows[managerSession.id]?
+                .participantSessionIDs.values
+                .compactMap { sessions[$0] } ?? []
+            return [managerSession] + participantSessions
+        }
+
+        guard let sessionID = conversationSessionID(for: profileID),
+              let currentSession = sessions[sessionID] else {
+            return [session(for: profileID)]
+        }
+        return [currentSession]
+    }
+
     func selectTab(_ sessionID: UUID, viewing profileID: UUID) {
         selectSession(
             sessionID,

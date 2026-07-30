@@ -59,6 +59,8 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Scope sidebar bot spinners and attention dots to the currently visible chat,
+  so stale or background chats no longer light up an idle sidebar avatar.
 - Disable the message composer for new chats until a repository is selected,
   while preserving editable drafts during running agent turns.
 - Migrate saved profile-level repositories into their existing chats, preferring
@@ -124,6 +126,8 @@ All notable changes to bl00p are documented in this file.
 
 ### Tests
 
+- Cover sidebar indicator scoping for standalone chats and selected Manager
+  workflows.
 - Cover bounded review revisions, multi-block review output, protocol-marker
   stripping, restored workflows, cache invalidation, cold-start tracking, and
   coalesced persistence without timing-based assertions.
