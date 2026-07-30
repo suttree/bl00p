@@ -56,6 +56,10 @@ All notable changes to bl00p are documented in this file.
 - Increase the app build number from 2 to 6.
 - Use hot pink avatars for Manager bots across the sidebar, conversation,
   settings, and bot-creation surfaces.
+- Let Claude Managers run the test suite and read-only inspection commands to
+  ground their plans, with the same Ask/Auto approval mode picker available to
+  Reviewers. Managers remain unable to edit files, commit, push, or publish in
+  either mode. Codex Managers are unchanged and stay in a read-only sandbox.
 
 ### Fixed
 
@@ -102,8 +106,8 @@ All notable changes to bl00p are documented in this file.
 - Prevent duplicate sends while a bot is launching or working.
 - Migrate legacy bot names, starter cards, permission messages, and Codex review sessions when restoring saved state.
 - Stage Claude image attachments in an isolated temporary directory and remove them after each turn.
-- Keep Manager sessions plan-only and read-only, prevent hidden delegation,
-  and reserve team dispatch for bl00p's visible managed workflow.
+- Keep Manager sessions plan-only, prevent hidden delegation, and reserve
+  team dispatch for bl00p's visible managed workflow.
 - Keep Claude permission matching compatible with exact and argument-bearing
   command forms, including common build/test pipelines such as
   `swift build 2>&1 | tail -20`, while keeping the `tail` filter allowlist
@@ -115,8 +119,7 @@ All notable changes to bl00p are documented in this file.
   turning unrelated runtime permission approvals into plan approvals or
   dispatching a Builder twice.
 - Keep Claude Reviewers read-only by denying built-in edits, write-capable shell
-  commands, and test-running commands in every approval mode; Manager profiles
-  cannot run shell commands.
+  commands, and test-running commands in every approval mode.
 - Quarantine unreadable saved state instead of letting the next autosave
   overwrite it with defaults, and rotate a `state.json.bak` backup on every
   save so one bad write can't destroy the only copy of prior state.

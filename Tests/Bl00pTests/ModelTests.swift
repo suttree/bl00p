@@ -632,7 +632,7 @@ func codexThreadConfigurationHonorsTheApprovalModeToggle() {
 }
 
 @Test
-func claudeReviewerCanSelectApprovalModeButClaudeManagerCannot() {
+func claudeReviewerAndManagerCanBothSelectApprovalMode() {
     let reviewer = BotProfile(
         name: "Reviewer",
         provider: .claude,
@@ -647,7 +647,7 @@ func claudeReviewerCanSelectApprovalModeButClaudeManagerCannot() {
     )
 
     #expect(reviewer.canSelectApprovalMode)
-    #expect(!manager.canSelectApprovalMode)
+    #expect(manager.canSelectApprovalMode)
     for role in AgentRole.allCases {
         let codex = BotProfile(
             name: role.displayName,
@@ -8374,7 +8374,7 @@ func claudeManagersCannotEscalateInEitherApprovalMode() async throws {
         #expect(
             entries.contains(where: {
                 $0.title == "Claude action blocked"
-                    && $0.detail?.contains("Managers are read-only") == true
+                    && $0.detail?.contains("cannot edit files, commit, push, or publish") == true
             })
         )
         #expect(responses.first?["behavior"]?.stringValue == "deny")
@@ -8464,6 +8464,107 @@ func claudeReviewerBlocksWriteCapableShellCommandsInBothModes() throws {
             } else {
                 Issue.record("\(command) was not denied in \(mode)")
             }
+        }
+    }
+}
+
+@Test
+func claudeManagerCanRunTestsAndInspectionCommands() throws {
+    let workingDirectory = URL(fileURLWithPath: "/tmp/bl00p-manager")
+    for command in ["swift test", "pytest", "git status"] {
+        let request = try #require(
+            ClaudeToolApprovalRequest(request: .object([
+                "subtype": .string("can_use_tool"),
+                "tool_name": .string("Bash"),
+                "input": .object(["command": .string(command)])
+            ]))
+        )
+        #expect(
+            ClaudeToolApprovalPolicy.decision(
+                for: request,
+                mode: .ask,
+                role: .manager,
+                workingDirectory: workingDirectory,
+                stagedAttachmentDirectory: nil
+            ) == .ask
+        )
+        #expect(
+            ClaudeToolApprovalPolicy.decision(
+                for: request,
+                mode: .auto,
+                role: .manager,
+                workingDirectory: workingDirectory,
+                stagedAttachmentDirectory: nil
+            ) == .allow
+        )
+    }
+}
+
+@Test
+func claudeManagerCannotEditFilesInEitherApprovalMode() throws {
+    let workingDirectory = URL(fileURLWithPath: "/tmp/bl00p-manager")
+    let edit = try #require(
+        ClaudeToolApprovalRequest(request: .object([
+            "subtype": .string("can_use_tool"),
+            "tool_name": .string("Edit"),
+            "input": .object(["file_path": .string("README.md")])
+        ]))
+    )
+    for mode in ApprovalMode.allCases {
+        if case .deny(let message) = ClaudeToolApprovalPolicy.decision(
+            for: edit,
+            mode: mode,
+            role: .manager,
+            workingDirectory: workingDirectory,
+            stagedAttachmentDirectory: nil
+        ) {
+            #expect(message.contains("cannot edit files, commit, push, or publish"))
+        } else {
+            Issue.record("Manager edit was not denied in \(mode)")
+        }
+    }
+}
+
+@Test
+func claudeManagerNeverAutoApprovesWriteCapableOrOutOfWorkspaceShell() throws {
+    let workingDirectory = URL(fileURLWithPath: "/tmp/bl00p-manager")
+    for command in [
+        "git diff --output=review.txt",
+        "cat README.md > review.txt",
+        "unknown-writer README.md",
+        "cat /etc/passwd"
+    ] {
+        let request = try #require(
+            ClaudeToolApprovalRequest(request: .object([
+                "subtype": .string("can_use_tool"),
+                "tool_name": .string("Bash"),
+                "input": .object(["command": .string(command)])
+            ]))
+        )
+
+        // Ask mode always surfaces an explicit approval card for Managers;
+        // it never silently allows a write-capable command.
+        #expect(
+            ClaudeToolApprovalPolicy.decision(
+                for: request,
+                mode: .ask,
+                role: .manager,
+                workingDirectory: workingDirectory,
+                stagedAttachmentDirectory: nil
+            ) == .ask
+        )
+
+        if case .deny = ClaudeToolApprovalPolicy.decision(
+            for: request,
+            mode: .auto,
+            role: .manager,
+            workingDirectory: workingDirectory,
+            stagedAttachmentDirectory: nil
+        ) {
+            // Expected: Manager Auto mode never auto-approves shell writes,
+            // redirects, or paths outside the workspace.
+        } else {
+            Issue.record("\(command) was not denied in auto mode")
         }
     }
 }

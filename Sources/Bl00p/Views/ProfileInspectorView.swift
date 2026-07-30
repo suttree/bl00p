@@ -259,7 +259,9 @@ struct ProfileInspectorView: View {
     private var approvalModeDescription: String {
         if profile.provider == .claude {
             if profile.role == .manager {
-                return "Claude Managers remain read-only and cannot escalate permissions. Approval mode is unavailable for this role."
+                return profile.approvalMode == .auto
+                    ? "Claude automatically approves supported test and inspection commands to ground the Manager's plans. Built-in file-edit tools, commits, push, and publishing remain blocked. Mode changes take effect the next time this bot connects."
+                    : "Claude asks before running test or inspection commands. Built-in file-edit tools, commits, push, and publishing remain blocked. Mode changes take effect the next time this bot connects."
             }
             if profile.role == .reviewer {
                 return profile.approvalMode == .auto

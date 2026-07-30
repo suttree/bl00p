@@ -1733,15 +1733,16 @@ enum ClaudeToolApprovalPolicy {
         workingDirectory: URL,
         stagedAttachmentDirectory: URL?
     ) -> ClaudeToolApprovalDecision {
-        if role == .manager {
-            return .deny(
-                "Claude Managers are read-only and cannot escalate permissions."
-            )
-        }
         if role == .reviewer,
            fileWriteTools.contains(approval.toolName) {
             return .deny(
                 "Claude Reviewers cannot use built-in file-edit tools."
+            )
+        }
+        if role == .manager,
+           fileWriteTools.contains(approval.toolName) {
+            return .deny(
+                "Claude Managers cannot edit files, commit, push, or publish."
             )
         }
 
