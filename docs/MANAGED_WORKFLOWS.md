@@ -62,12 +62,20 @@ and those still pause the workflow.
 Test evidence is more nuanced. Genuinely failing tests are always a hard
 blocker. Missing or stale test evidence is also a hard blocker on a normal
 (non-blocked) turn. But when the Builder turn ended `blocked` and recorded an
-unresolved permission denial, missing or stale test evidence instead advances
-the handoff to the Reviewer carrying a caveat: `GitHandoffPackage.testStatus`
-is set to `.unverified` and `testSummary` is rewritten to name the blocked
-action, so the Reviewer sees "Tests: Unverified (blocked)" rather than a
-misleading "Not run" or stale "Passed". The Reviewer is the quality backstop
-for this case, not a second automatic test run.
+unresolved permission denial whose command matches a known test runner (the
+same list `HandoffTestEvidence` uses to recognize a test command), missing or
+stale test evidence instead advances the handoff to the Reviewer carrying a
+caveat: `GitHandoffPackage.testStatus` is set to `.unverified` and
+`testSummary` is rewritten to name the blocked action, so the Reviewer sees
+"Tests: Unverified (blocked)" rather than a misleading "Not run" or stale
+"Passed". The Reviewer is the quality backstop for this case, not a second
+automatic test run. A denial unrelated to running tests (e.g. a blocked
+`rm -rf build`) does not earn this leniency — it hard-blocks like any other
+untested revision pass, since the denial gives no reason to believe the test
+step itself was what got blocked. This denial lookup is scoped to entries
+recorded since the current turn started (`turnEntryStartIndices`), so a stale
+"Some actions were blocked" entry from an earlier, already-resolved turn is
+never reused to justify a caveat on a later turn.
 
 A blocked Builder turn without the required commit or clean tree, or with
 genuinely failing tests, still pauses with the `Builder handoff is not ready`
@@ -144,6 +152,8 @@ The Builder handoff readiness gate is covered by:
 
 - `blockedBuilderTurnWithReadyHandoffAdvancesWorkflowAutomatically`
 - `blockedBuilderTurnWithUnverifiedTestsAdvancesWithACaveat`
+- `blockedBuilderTurnWithUnrelatedDenialDoesNotEarnATestCaveat`
+- `revisitedBuilderTurnDoesNotReuseAStaleBlockedActionFromAnEarlierTurn`
 - `blockedBuilderTurnWithFailingTestsStillPauses`
 - `blockedBuilderTurnWithoutCommitStillPausesWithAnActionableReason`
 - `pausedBuilderHandoffSelfHealsWhenTheBuilderNextFinishesReady`
