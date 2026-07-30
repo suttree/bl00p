@@ -164,3 +164,12 @@ direct users to choose a repository. Once a repository is set, the editor should
 remain editable during launching or working states while the send button
 continues to follow the normal status, plan-approval, and structured-answer
 gates.
+
+The conversation header uses the same session state to expose best-effort local
+navigation actions. The folder button continues to follow the repository lock
+rules, while the terminal button should resolve its target through
+`WorktreeTerminalLauncher.terminalTargetPath(worktreePath:repositoryPath:)` so
+every chat opens its owned worktree when present and otherwise falls back to the
+base repository. Keep the path-resolution logic pure and covered by focused
+tests; the platform-specific process launch remains intentionally untested and
+is verified by a manual smoke check.
