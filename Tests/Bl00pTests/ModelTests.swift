@@ -550,6 +550,36 @@ func codexThreadConfigurationKeepsBotPromptsSeparate() {
 }
 
 @Test
+func codexThreadConfigurationUsesAResolvedPerChatPromptOverride() {
+    let botDefault = BotProfile(
+        name: "Review",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review this code."
+    )
+    var session = AgentSessionState()
+    session.instructionsOverride = "Only look at the database layer."
+
+    // Mirrors what AppModel.runtimeProfile does: resolve the effective
+    // instructions for the chat before handing the profile to the runtime.
+    var resolvedProfile = botDefault
+    resolvedProfile.instructions = AgentSessionState.effectiveInstructions(
+        profile: botDefault,
+        session: session
+    )
+
+    let parameters = CodexThreadConfiguration.parameters(
+        profile: resolvedProfile,
+        workingDirectory: "/tmp/project"
+    )
+
+    #expect(
+        parameters["developerInstructions"]?.stringValue?
+            .hasPrefix("Only look at the database layer.\n\n") == true
+    )
+}
+
+@Test
 func codexThreadConfigurationHonorsTheApprovalModeToggle() {
     var profile = BotProfile(
         name: "Review",
@@ -681,6 +711,79 @@ func botProfileDecodesLegacyJSONMissingApprovalMode() throws {
 
     #expect(profile.approvalMode == .ask)
     #expect(profile.name == "Claude")
+}
+
+@Test
+func effectiveInstructionsPrefersANonBlankSessionOverride() {
+    let profile = BotProfile(
+        name: "Claude",
+        provider: .claude,
+        role: .builder,
+        instructions: "Bot default prompt."
+    )
+    var session = AgentSessionState()
+    session.instructionsOverride = "Chat-specific prompt."
+
+    #expect(
+        AgentSessionState.effectiveInstructions(profile: profile, session: session)
+            == "Chat-specific prompt."
+    )
+}
+
+@Test
+func effectiveInstructionsFallsBackToTheBotDefault() {
+    let profile = BotProfile(
+        name: "Claude",
+        provider: .claude,
+        role: .builder,
+        instructions: "Bot default prompt."
+    )
+
+    // No session at all (e.g. editing the bot before any chat exists).
+    #expect(
+        AgentSessionState.effectiveInstructions(profile: profile, session: nil)
+            == "Bot default prompt."
+    )
+
+    // A session with no override.
+    #expect(
+        AgentSessionState.effectiveInstructions(profile: profile, session: AgentSessionState())
+            == "Bot default prompt."
+    )
+
+    // A session whose override is present but blank/whitespace-only.
+    var blankOverrideSession = AgentSessionState()
+    blankOverrideSession.instructionsOverride = "   \n  "
+    #expect(
+        AgentSessionState.effectiveInstructions(profile: profile, session: blankOverrideSession)
+            == "Bot default prompt."
+    )
+}
+
+@Test
+func agentSessionStateRoundTripsInstructionsOverride() throws {
+    var session = AgentSessionState()
+    session.instructionsOverride = "Chat-specific prompt."
+
+    let data = try JSONEncoder().encode(session)
+    let decoded = try JSONDecoder().decode(AgentSessionState.self, from: data)
+
+    #expect(decoded.instructionsOverride == "Chat-specific prompt.")
+}
+
+@Test
+func legacySessionJSONMissingInstructionsOverrideDecodesAsNil() throws {
+    let legacyJSON = """
+    {
+        "id": "D24E2670-03E9-420B-9AB5-00A589E09249",
+        "repositoryPath": "/tmp/project",
+        "title": "New chat"
+    }
+    """.data(using: .utf8)!
+
+    let session = try JSONDecoder().decode(AgentSessionState.self, from: legacyJSON)
+
+    #expect(session.instructionsOverride == nil)
 }
 
 @Test
@@ -5723,6 +5826,36 @@ func claudeBuilderInvocationIsResumableAndConservative() throws {
         invocation.inputMessage["message"]?["content"]?.stringValue
             == "Implement BLOOP-42"
     )
+}
+
+@Test
+func claudeInvocationUsesAResolvedPerChatPromptOverride() throws {
+    var botDefault = BotProfile.defaults[0]
+    botDefault.workingDirectory = "/tmp/project"
+    var session = AgentSessionState()
+    session.instructionsOverride = "Only touch the migration scripts."
+
+    // Mirrors what AppModel.runtimeProfile does: resolve the effective
+    // instructions for the chat before handing the profile to the runtime.
+    var resolvedProfile = botDefault
+    resolvedProfile.instructions = AgentSessionState.effectiveInstructions(
+        profile: botDefault,
+        session: session
+    )
+
+    let invocation = try ClaudeInvocation(
+        sessionID: "64bfaf39-9db2-45b9-9f10-03a13ea2e772",
+        resume: false,
+        profile: resolvedProfile,
+        prompt: "Implement BLOOP-42"
+    )
+
+    let systemPromptIndex = try #require(
+        invocation.arguments.firstIndex(of: "--append-system-prompt")
+    )
+    let systemPrompt = invocation.arguments[systemPromptIndex + 1]
+    #expect(systemPrompt.contains("Only touch the migration scripts."))
+    #expect(!systemPrompt.contains(botDefault.instructions))
 }
 
 @Test

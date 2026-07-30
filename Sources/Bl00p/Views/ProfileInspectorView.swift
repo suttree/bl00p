@@ -9,6 +9,10 @@ import SwiftOpenUI
 struct ProfileInspectorView: View {
     @Binding var profile: BotProfile
     let profiles: [BotProfile]
+    /// The currently selected chat session for this bot, if any. When
+    /// present, the prompt editor edits this chat's override rather than the
+    /// bot's global default.
+    var chatSession: Binding<AgentSessionState>?
 
     var body: some View {
         ScrollView {
@@ -115,10 +119,29 @@ struct ProfileInspectorView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("ROLE PROMPT")
-                        .font(.bl00p(.caption2, weight: .bold))
-                        .tracking(1.1)
-                        .foregroundStyle(.secondary)
+                    HStack {
+                        Text(chatSession != nil ? "CHAT PROMPT" : "ROLE PROMPT")
+                            .font(.bl00p(.caption2, weight: .bold))
+                            .tracking(1.1)
+                            .foregroundStyle(.secondary)
+
+                        if isUsingChatOverride {
+                            Text("Custom")
+                                .font(.bl00p(.caption2, weight: .semibold))
+                                .foregroundStyle(Color.bl00pPink)
+                        }
+
+                        Spacer()
+
+                        if isUsingChatOverride {
+                            Button("Reset to bot default") {
+                                chatSession?.wrappedValue.instructionsOverride = nil
+                            }
+                            .font(.bl00p(.caption1))
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
 
                     TextEditor(text: instructionsBinding)
                         .font(.bl00p(.body))
@@ -135,11 +158,7 @@ struct ProfileInspectorView: View {
                         }
                 }
 
-                Text(
-                    profile.provider == .codex
-                        ? "Codex receives this prompt as developer instructions when the session launches."
-                        : "Claude receives this prompt through its resumable CLI session. Structured approvals enforce read-only roles and keep elevated actions visible."
-                )
+                Text(promptCaption)
                     .font(.bl00p(.caption1))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -172,8 +191,34 @@ struct ProfileInspectorView: View {
         Binding(get: { profile.approvalMode }, set: { profile.approvalMode = $0 })
     }
 
+    /// Edits this chat's prompt override when a chat session is selected,
+    /// falling back to the bot's global default otherwise (e.g. when editing
+    /// a bot with no chats yet). Shows the effective prompt as starting text;
+    /// any edit writes the full text back as this chat's override, leaving
+    /// the bot default and other chats untouched.
     private var instructionsBinding: Binding<String> {
-        Binding(get: { profile.instructions }, set: { profile.instructions = $0 })
+        guard let chatSession else {
+            return Binding(get: { profile.instructions }, set: { profile.instructions = $0 })
+        }
+        return Binding(
+            get: {
+                chatSession.wrappedValue.instructionsOverride ?? profile.instructions
+            },
+            set: { chatSession.wrappedValue.instructionsOverride = $0 }
+        )
+    }
+
+    private var isUsingChatOverride: Bool {
+        guard let override = chatSession?.wrappedValue.instructionsOverride else { return false }
+        return !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var promptCaption: String {
+        let providerCaption = profile.provider == .codex
+            ? "Codex receives this prompt as developer instructions when the session launches."
+            : "Claude receives this prompt through its resumable CLI session. Structured approvals enforce read-only roles and keep elevated actions visible."
+        guard chatSession != nil else { return providerCaption }
+        return "This prompt applies only to the selected chat. \(providerCaption)"
     }
 
     private var approvalModeDescription: String {
