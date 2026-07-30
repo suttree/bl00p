@@ -13,6 +13,9 @@ All notable changes to bl00p are documented in this file.
   Repository…** action in the conversation header for new chats.
 - Add signed automatic update checks, installation, and relaunch through
   Sparkle and GitHub Releases.
+- Add automatic stable GitHub Releases for every validated merge to `main`,
+  with retry-safe tags and assets, monotonic Sparkle build numbers, and
+  verified appcast metadata.
 - Add automatic light and dark appearances across every app surface.
 - Add in-app approval cards for individual Claude tool calls, returning each
   approval or rejection to the active Claude session.
@@ -39,6 +42,9 @@ All notable changes to bl00p are documented in this file.
 - Publish macOS updates with account-free ad-hoc code signing while retaining
   Sparkle Ed25519 archive verification; Apple Developer signing and
   notarization are now optional Gatekeeper usability hardening.
+- Check for macOS updates hourly while the app is running, retain immediate
+  manual checks, and let Sparkle install downloaded updates on quit or
+  relaunch without forcing an active app restart.
 - Keep repository ownership with chat sessions instead of bot profiles. Chats
   lock their repository after launch, worktree creation, or workflow
   participation, while each managed workflow receives dedicated Builder,
@@ -151,6 +157,8 @@ All notable changes to bl00p are documented in this file.
 
 ### Tests
 
+- Cover automatic-release policy, version derivation failures and retries, and
+  the one-hour Sparkle schedule.
 - Stabilize Claude unmatched-command approval-flow coverage with an injected
   client stub, while retaining subprocess coverage for the CLI permission
   transport.

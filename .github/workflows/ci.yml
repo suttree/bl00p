@@ -19,7 +19,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Verify account-free release configuration
+      - name: Verify automatic release configuration
         run: sh scripts/check-release-config.sh
 
       - name: Run tests
@@ -45,6 +45,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+
+      - name: Verify automatic release configuration
+        run: sh scripts/check-release-config.sh
 
       - name: Install Swift toolchain
         uses: swift-actions/setup-swift@v2

@@ -2,14 +2,9 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
   workflow_dispatch:
-    inputs:
-      version:
-        description: Existing semantic version tag to release, without the v prefix
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -19,11 +14,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  verify-release-ref:
+  prepare-release:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
+      build: ${{ steps.release.outputs.build }}
       sha: ${{ steps.release.outputs.sha }}
 
     steps:
@@ -32,76 +28,132 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Require a reviewed main commit
+      - name: Derive monotonic release identity
         id: release
         env:
-          DISPATCH_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "Automatic releases must run from main" >&2
+            exit 1
+          fi
+
           git fetch --force --no-tags \
               origin refs/heads/main:refs/remotes/origin/main
-
-          workflow_sha=$(git rev-parse "$GITHUB_SHA^{commit}")
-          if ! git merge-base --is-ancestor "$workflow_sha" origin/main; then
-            echo "Workflow commit $workflow_sha is not contained in origin/main" >&2
-            exit 1
-          fi
-
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            version=${GITHUB_REF_NAME#v}
-            tag=$GITHUB_REF_NAME
-            release_sha=$(git rev-parse "$GITHUB_REF_NAME^{commit}")
-          else
-            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
-              echo "Manual releases must be dispatched from main" >&2
-              exit 1
-            fi
-
-            version=$DISPATCH_VERSION
-            tag=v$version
-            git fetch --force origin \
-                "refs/tags/$tag:refs/tags/$tag"
-            release_sha=$(git rev-parse "$tag^{commit}")
-          fi
-
-          if ! printf '%s' "$version" |
-              grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'; then
-            echo "Invalid semantic version: $version" >&2
-            exit 1
-          fi
-
-          if [ "$tag" != "v$version" ]; then
-            echo "Release tag $tag does not match version $version" >&2
-            exit 1
-          fi
-
+          release_sha=$(git rev-parse "$GITHUB_SHA^{commit}")
           if ! git merge-base --is-ancestor "$release_sha" origin/main; then
-            echo "Release commit $release_sha is not contained in origin/main" >&2
+            echo "Workflow commit $release_sha is not contained in origin/main" >&2
             exit 1
           fi
 
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          metadata=$(
+            ruby -r rexml/document -e '
+              document = REXML::Document.new(File.read(ARGV.fetch(0)))
+              dict = REXML::XPath.first(document, "/plist/dict")
+              values = {}
+              elements = dict.elements.to_a
+              elements.each_with_index do |element, index|
+                next unless element.name == "key"
+                values[element.text] = elements.fetch(index + 1).text
+              end
+              puts values.fetch("CFBundleShortVersionString")
+              puts values.fetch("CFBundleVersion")
+            ' Resources/Info.plist
+          )
+          base_version=$(printf '%s\n' "$metadata" | sed -n '1p')
+          baseline_build=$(printf '%s\n' "$metadata" | sed -n '2p')
+          previous_build=$baseline_build
+
+          previous_dir="$RUNNER_TEMP/previous-release"
+          mkdir -p "$previous_dir"
+          if latest_tag=$(gh release view --json tagName --jq .tagName 2>/dev/null)
+          then
+            if gh release download "$latest_tag" \
+                --pattern appcast.xml \
+                --dir "$previous_dir"
+            then
+              released_build=$(
+                ruby -r rexml/document -e '
+                  document = REXML::Document.new(File.read(ARGV.fetch(0)))
+                  item = REXML::XPath.first(document, "//item")
+                  abort "Latest appcast has no update item" unless item
+                  version = REXML::XPath.first(
+                    item,
+                    "sparkle:version",
+                    {
+                      "sparkle" =>
+                        "http://www.andymatuschak.org/xml-namespaces/sparkle"
+                    }
+                  )
+                  abort "Latest appcast has no Sparkle version" unless version
+                  puts version.text
+                ' "$previous_dir/appcast.xml"
+              )
+              previous_build=$(
+                ruby -e '
+                  values = ARGV.map do |value|
+                    abort "Invalid published build number: #{value}" unless
+                      /\A(0|[1-9]\d*)\z/.match?(value)
+                    Integer(value, 10)
+                  end
+                  puts values.max
+                ' "$released_build" "$previous_build"
+              )
+            fi
+          fi
+
+          derived=$(
+            ruby scripts/derive-release-version.rb \
+                "$base_version" \
+                "$GITHUB_RUN_NUMBER" \
+                "$GITHUB_RUN_ID" \
+                0 \
+                "$release_sha"
+          )
+          release_tag=$(
+            printf '%s\n' "$derived" |
+                sed -n 's/^tag=//p'
+          )
+
+          existing_tag_sha=
+          if git ls-remote --exit-code --refs \
+              origin "refs/tags/$release_tag" >/dev/null 2>&1
+          then
+            git fetch --force origin \
+                "refs/tags/$release_tag:refs/tags/$release_tag"
+            existing_tag_sha=$(git rev-parse "$release_tag^{commit}")
+          fi
+
+          ruby scripts/derive-release-version.rb \
+              "$base_version" \
+              "$GITHUB_RUN_NUMBER" \
+              "$GITHUB_RUN_ID" \
+              "$previous_build" \
+              "$release_sha" \
+              "$existing_tag_sha" >> "$GITHUB_OUTPUT"
           echo "sha=$release_sha" >> "$GITHUB_OUTPUT"
 
   release:
-    needs: verify-release-ref
+    needs: prepare-release
     runs-on: macos-15
     environment:
       name: release
     permissions:
       contents: write
     env:
-      APP_VERSION: ${{ needs.verify-release-ref.outputs.version }}
-      RELEASE_TAG: ${{ needs.verify-release-ref.outputs.tag }}
-      RELEASE_SHA: ${{ needs.verify-release-ref.outputs.sha }}
+      APP_VERSION: ${{ needs.prepare-release.outputs.version }}
+      BUILD_NUMBER: ${{ needs.prepare-release.outputs.build }}
+      RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
+      RELEASE_SHA: ${{ needs.prepare-release.outputs.sha }}
 
     steps:
       - name: Check out verified release commit
         uses: actions/checkout@v6
         with:
           ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
 
-      - name: Verify account-free release configuration
+      - name: Verify automatic release configuration
         run: sh scripts/check-release-config.sh
 
       - name: Run tests
@@ -109,7 +161,6 @@ jobs:
 
       - name: Build ad-hoc-signed app
         env:
-          BUILD_NUMBER: ${{ github.run_id }}
           CODE_SIGN_IDENTITY: "-"
         run: sh scripts/build-installable-app.sh
 
@@ -121,6 +172,9 @@ jobs:
       - name: Generate and verify signed appcast
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          EXPECTED_SPARKLE_VERSION: ${{ env.BUILD_NUMBER }}
+          EXPECTED_DISPLAY_VERSION: ${{ env.APP_VERSION }}
+          EXPECTED_ASSET_URL: https://github.com/suttree/bl00p/releases/download/${{ env.RELEASE_TAG }}/bl00p-${{ env.APP_VERSION }}-macos-arm64.zip
         run: |
           if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
             echo "SPARKLE_PRIVATE_KEY is not configured" >&2
@@ -149,13 +203,44 @@ jobs:
               "$RUNNER_TEMP/appcast.xml" \
               ".build/install/$archive"
 
-      - name: Publish GitHub Release
+      - name: Publish retry-safe latest GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$RELEASE_TAG" \
-              ".build/install/bl00p-$APP_VERSION-macos-arm64.zip" \
-              "$RUNNER_TEMP/appcast.xml" \
-              --target "$RELEASE_SHA" \
-              --title "bl00p $APP_VERSION" \
-              --generate-notes
+          existing_tag_sha=
+          if git ls-remote --exit-code --refs \
+              origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1
+          then
+            git fetch --force origin \
+                "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+            existing_tag_sha=$(git rev-parse "$RELEASE_TAG^{commit}")
+            if [ "$existing_tag_sha" != "$RELEASE_SHA" ]; then
+              echo "Existing tag $RELEASE_TAG belongs to $existing_tag_sha" >&2
+              exit 1
+            fi
+          else
+            git tag "$RELEASE_TAG" "$RELEASE_SHA"
+            git push origin "refs/tags/$RELEASE_TAG"
+          fi
+
+          archive=".build/install/bl00p-$APP_VERSION-macos-arm64.zip"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1
+          then
+            gh release upload "$RELEASE_TAG" \
+                "$archive" \
+                "$RUNNER_TEMP/appcast.xml" \
+                --clobber
+            gh release edit "$RELEASE_TAG" \
+                --title "bl00p $APP_VERSION" \
+                --draft=false \
+                --prerelease=false \
+                --latest
+          else
+            gh release create "$RELEASE_TAG" \
+                "$archive" \
+                "$RUNNER_TEMP/appcast.xml" \
+                --verify-tag \
+                --title "bl00p $APP_VERSION" \
+                --generate-notes \
+                --latest
+          fi

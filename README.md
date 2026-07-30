@@ -40,6 +40,8 @@ The current prototype includes:
 - Persisted workflow handoffs and delivered dispatch payloads so an app restart
   can resume with the original plan, review findings, publishing context, and
   draft PR details intact
+- Automatic macOS releases from every validated `main` merge, with signed
+  Sparkle updates discovered hourly or immediately from **Check for Updates…**
 
 ## Run the prototype (Linux)
 
@@ -123,7 +125,15 @@ Because the app is not Developer ID signed or notarized, macOS will not
 identify its developer and the normal double-click first launch is blocked.
 Sparkle update archives remain independently protected by Ed25519 signatures;
 the release workflow verifies each signature against the public key embedded
-in the archived app before publishing.
+in the archived app before publishing. Every reviewed merge to `main`
+automatically becomes the latest stable release after tests, packaging, code
+signature checks, and appcast verification pass, so incomplete work must not be
+merged to `main`.
+
+While bl00p is running, Sparkle looks for a newer build at least once per hour;
+**Check for Updates…** starts an immediate check. Authenticated updates can
+download automatically and install when bl00p quits or is relaunched without
+forcing an active session to restart.
 
 Release cadence, Sparkle signing, and GitHub Actions setup are documented in
 [docs/RELEASING.md](docs/RELEASING.md). This applies to the macOS build only —

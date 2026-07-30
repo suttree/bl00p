@@ -32,6 +32,8 @@
     <true/>
     <key>SUFeedURL</key>
     <string>https://github.com/suttree/bl00p/releases/latest/download/appcast.xml</string>
+    <key>SUScheduledCheckInterval</key>
+    <integer>3600</integer>
     <key>SUPublicEDKey</key>
     <string>O2mHaTZMsDiYGGPMKTgkR2dR9wuOsOjiCyNiY0UsLhc=</string>
     <key>SUVerifyUpdateBeforeExtraction</key>
