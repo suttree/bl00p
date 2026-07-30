@@ -124,7 +124,7 @@ struct NewBotDraft {
     private(set) var provider = AgentProvider.codex
     var role = AgentProvider.codex.defaultRole
     var modelID = ""
-    var instructions = ""
+    var instructions = BotProfile.easolWorkingGuidelines
 
     var trimmedName: String {
         name.trimmingCharacters(in: .whitespacesAndNewlines)

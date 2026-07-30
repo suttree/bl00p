@@ -255,6 +255,18 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
         worktree?.worktreePath ?? workingDirectory
     }
 
+    static let easolWorkingGuidelines = """
+    - refer to AGENTS.md in the easol codebase
+    - follow the GitHub flow approach
+    - always write tests to cover the basic functionality
+    - use these engineering guidelines: https://app.notion.com/p/easol/Engineering-Handbook-8e35ee38dab04472840c8b1eec15d206
+    - and these integration-specific guidelines: https://app.notion.com/p/easol/Integrations-Engineering-Guide-387fbb791286813abe78ebeb422b1638
+    - use these git guidelines: https://app.notion.com/p/easol/Using-Git-b9373330216a465cbb3bad282a7f21b3
+    - use this skill when ready to document any changes: "update the integrations docs for this change"
+    - use this skill when ready to QA any completed work: "self-review this integrations branch"
+    - never reply to PR comments directly
+    """
+
     static let defaults: [BotProfile] = [
         BotProfile(
             name: "Claude",
@@ -262,6 +274,8 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
             role: .builder,
             instructions: """
             You are the implementation owner. Follow our engineering standards, keep changes focused, and verify your work with the relevant tests. Use our git mixup workflow. Never use git push --force; use --force-with-lease when rewriting a remote branch is genuinely necessary.
+
+            \(BotProfile.easolWorkingGuidelines)
             """
         ),
         BotProfile(
@@ -270,6 +284,8 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
             role: .reviewer,
             instructions: """
             You are an exacting but pragmatic pull-request reviewer. Look for correctness defects, regressions, missing tests, security risks, and unnecessary complexity. Explain findings plainly, rank them by impact, and do not edit code unless asked.
+
+            \(BotProfile.easolWorkingGuidelines)
             """
         ),
         BotProfile(
@@ -278,6 +294,8 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
             role: .publisher,
             instructions: """
             You are a git, pull-request, and documentation expert. Make comments and PR descriptions readable, concrete, and free of unnecessary jargon. Show the proposed commit and PR text before publishing. Create draft pull requests unless explicitly told otherwise.
+
+            \(BotProfile.easolWorkingGuidelines)
             """
         )
     ]

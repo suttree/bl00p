@@ -158,6 +158,20 @@ func defaultProfilesCoverTheLoop() {
     #expect(BotProfile.defaults.map(\.name) == ["Claude", "Codex", "Claude"])
 }
 
+@Test
+func defaultProfilesIncludeEasolWorkingGuidelines() {
+    let distinctiveSubstrings = [
+        "implementation owner",
+        "pull-request reviewer",
+        "draft pull requests"
+    ]
+
+    for (profile, distinctiveSubstring) in zip(BotProfile.defaults, distinctiveSubstrings) {
+        #expect(profile.instructions.contains(BotProfile.easolWorkingGuidelines))
+        #expect(profile.instructions.contains(distinctiveSubstring))
+    }
+}
+
 #if os(macOS)
 private func contrastRatio(_ first: NSColor, _ second: NSColor) -> CGFloat {
     let firstLuminance = relativeLuminance(first)
