@@ -162,6 +162,18 @@ wiring for both providers. UI coverage should test segmented picker scope
 switching, editor read/write behavior, reset action, persistence across
 relaunch, and manager-workflow override propagation.
 
+Claude approval-mode behavior is role-sensitive and should stay aligned across
+runtime policy, prompt copy, and UI copy. Builders and Publishers can use the
+workspace-scoped auto-approval path for supported actions. Reviewers stay
+inspection-only in both Ask and Auto modes: they may inspect repositories but
+cannot run test commands or edit through built-in tools. Managers sit between
+those tiers during managed-workflow planning: they may run supported test and
+inspection commands to ground an implementation plan, but built-in file edits,
+write-capable shell commands, commits, push, and publishing remain blocked in
+every mode. `ClaudeToolApprovalPolicy.allowedTools(for:)` should continue to
+omit preapproved shell access for Reviewers and Managers so shell requests
+still flow through the runtime policy.
+
 ## Repository-gated composer
 
 `AgentSessionState.repositoryPath` is the UI source of truth for whether a chat
