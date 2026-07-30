@@ -165,6 +165,18 @@ The Builder handoff readiness gate is covered by:
 - `pausedBuilderHandoffSelfHealsWhenTheBuilderNextFinishesReady`
 - `invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns`
 
+When a test seeds a persisted workflow directly at stage `building` or
+`revising`, it must also seed the Builder session with the already-delivered
+visible handoff entry (`Implementation brief` on the initial pass). Restoration
+always runs through the interrupted-dispatch recovery path, and a seeded
+workflow that omits that evidence will be treated as an incomplete initial
+dispatch rather than a ready-to-validate Builder handoff.
+
+Likewise, helper runtimes used by handoff-focused tests should only settle the
+role whose terminal state the test is asserting. Auto-completing the Reviewer
+or Documenter turn can legitimately trigger the next workflow transition
+(revision or publishing) and move the workflow past the state under test.
+
 Run the complete suite with:
 
 ```sh

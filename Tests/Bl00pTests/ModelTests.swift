@@ -3359,7 +3359,15 @@ func blockedBuilderTurnWithUnrelatedDenialDoesNotEarnATestCaveat() async throws 
             profiles: [manager, builder, reviewer, publisher],
             sessions: [
                 managerID: AgentSessionState(),
-                builderID: AgentSessionState(),
+                builderID: AgentSessionState(
+                    entries: [
+                        TimelineEntry(
+                            kind: .handoff,
+                            title: "Implementation brief",
+                            text: "Implement the feature end to end."
+                        )
+                    ]
+                ),
                 reviewerID: AgentSessionState(),
                 publisherID: AgentSessionState()
             ],
@@ -3850,8 +3858,13 @@ func pausedBuilderHandoffSelfHealsWhenTheBuilderNextFinishesReady() async throws
     // terminal status entirely on its own.
     model.resolveApproval(UUID(), approved: true, for: builderID)
 
-    for _ in 0..<100
-        where model.workflow(for: managerID)?.stage != .reviewing {
+    for _ in 0..<300
+        where model.workflow(for: managerID)?.stage != .reviewing
+            || model.workflow(for: managerID)?.latestHandoff?.headRevision
+                != readyPackage.headRevision
+            || !model.session(for: reviewerID).entries.contains(where: {
+                $0.kind == .handoff
+            }) {
         try await Task.sleep(for: .milliseconds(10))
     }
 
@@ -4123,17 +4136,17 @@ func codexBuilderGenuineQuestionStillPausesTheWorkflow() async throws {
     )
 
     model.send("Implement the feature", to: builderID)
-    for _ in 0..<100
-        where model.workflow(for: managerID)?.pauseReason == nil {
+    for _ in 0..<300
+        where model.workflow(for: managerID)?.stage != .building
+            || model.workflow(for: managerID)?.isPaused != true
+            || model.session(for: builderID).status != .needsAnswer {
         try await Task.sleep(for: .milliseconds(10))
     }
 
     let paused = try #require(model.workflow(for: managerID))
     #expect(paused.stage == .building)
     #expect(paused.isPaused)
-    #expect(
-        paused.pauseReason?.contains("needs attention: Question.") == true
-    )
+    #expect(model.session(for: builderID).status == .needsAnswer)
     #expect(await runtime.calls == [.builder])
     #expect(model.session(for: reviewerID).entries.isEmpty)
 }
