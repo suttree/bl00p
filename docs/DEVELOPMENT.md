@@ -122,3 +122,18 @@ backward-compatibility (legacy payloads lacking the field), and runtime
 wiring for both providers. UI coverage should test segmented picker scope
 switching, editor read/write behavior, reset action, persistence across
 relaunch, and manager-workflow override propagation.
+
+## Repository-gated composer
+
+`AgentSessionState.repositoryPath` is the UI source of truth for whether a chat
+can accept a new message. `ConversationView` passes that state to
+`ComposerView` separately from the existing send-readiness flag because agent
+status still disables sending while intentionally leaving the draft editor
+typeable.
+
+Keep that separation intact. A missing repository must disable the text editor,
+send button, and command-return submission, and the composer footer should
+direct users to choose a repository. Once a repository is set, the editor should
+remain editable during launching or working states while the send button
+continues to follow the normal status, plan-approval, and structured-answer
+gates.
