@@ -72,6 +72,11 @@ struct TranscriptScrollCoordinator {
         holdPosition()
     }
 
+    mutating func userDraggedTowardHistory(distance: Double) {
+        guard distance > Self.nearBottomTolerance else { return }
+        userBrowsedHistory()
+    }
+
     mutating func jumpToLatest(for sessionID: UUID) {
         if self.sessionID != sessionID {
             reset(for: sessionID, hasContent: true)
@@ -97,6 +102,8 @@ struct TranscriptScrollCoordinator {
     mutating func didPerformScroll(requestID: Int) {
         guard scheduledScrollRequestID == requestID else { return }
         scheduledScrollRequestID = nil
+        isNearBottom = true
+        isAutomaticLayoutPending = false
     }
 
     private mutating func resumeFollowing() {

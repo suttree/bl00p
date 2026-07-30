@@ -84,6 +84,40 @@ func transcriptScrollHoldsDeliberateHistoryBrowsingDuringUpdates() {
 }
 
 @Test
+func transcriptScrollIgnoresSmallBottomEdgeDrags() throws {
+    var state = TranscriptScrollCoordinator()
+    let sessionID = UUID()
+    state.reset(for: sessionID, hasContent: true)
+    let requestID = try #require(state.scheduledScrollRequestID)
+    state.didPerformScroll(requestID: requestID)
+
+    state.userDraggedTowardHistory(
+        distance: TranscriptScrollCoordinator.nearBottomTolerance
+    )
+
+    #expect(state.isFollowingLatest)
+    #expect(state.isNearBottom)
+    #expect(!state.showsJumpToLatest)
+}
+
+@Test
+func transcriptScrollHoldsAfterDeliberateHistoryDrag() throws {
+    var state = TranscriptScrollCoordinator()
+    let sessionID = UUID()
+    state.reset(for: sessionID, hasContent: true)
+    let requestID = try #require(state.scheduledScrollRequestID)
+    state.didPerformScroll(requestID: requestID)
+
+    state.userDraggedTowardHistory(
+        distance: TranscriptScrollCoordinator.nearBottomTolerance + 1
+    )
+
+    #expect(!state.isFollowingLatest)
+    #expect(!state.isNearBottom)
+    #expect(state.showsJumpToLatest)
+}
+
+@Test
 func transcriptScrollResumesWhenUserReturnsNearBottom() {
     var state = TranscriptScrollCoordinator()
     let sessionID = UUID()

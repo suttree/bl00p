@@ -771,11 +771,18 @@ private struct TranscriptView: View {
                         scrollCoordinator.contentChanged(for: sessionID)
                     }
                     #if !os(macOS)
-                    .onDrag(minimumDistance: 4) { value in
-                        if value.height > 4 {
-                            scrollCoordinator.userBrowsedHistory()
+                    // SwiftOpenUI does not expose scroll geometry. Use a
+                    // completed drag beyond the same near-bottom tolerance
+                    // so small bottom-edge gestures keep following.
+                    .onDrag(
+                        minimumDistance:
+                            TranscriptScrollCoordinator.nearBottomTolerance,
+                        onEnded: { value in
+                            scrollCoordinator.userDraggedTowardHistory(
+                                distance: value.height
+                            )
                         }
-                    }
+                    )
                     #endif
             }
 
