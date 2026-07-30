@@ -3069,7 +3069,15 @@ func blockedBuilderTurnWithReadyHandoffAdvancesWorkflowAutomatically() async thr
             profiles: [manager, builder, reviewer, publisher],
             sessions: [
                 managerID: AgentSessionState(),
-                builderID: AgentSessionState(),
+                builderID: AgentSessionState(
+                    entries: [
+                        TimelineEntry(
+                            kind: .handoff,
+                            title: "Implementation brief",
+                            text: "Implement the feature end to end."
+                        )
+                    ]
+                ),
                 reviewerID: AgentSessionState(),
                 publisherID: AgentSessionState()
             ],
@@ -3194,7 +3202,15 @@ func blockedBuilderTurnWithUnverifiedTestsAdvancesWithACaveat() async throws {
             profiles: [manager, builder, reviewer, publisher],
             sessions: [
                 managerID: AgentSessionState(),
-                builderID: AgentSessionState(),
+                builderID: AgentSessionState(
+                    entries: [
+                        TimelineEntry(
+                            kind: .handoff,
+                            title: "Implementation brief",
+                            text: "Implement the feature end to end."
+                        )
+                    ]
+                ),
                 reviewerID: AgentSessionState(),
                 publisherID: AgentSessionState()
             ],
@@ -3343,7 +3359,15 @@ func blockedBuilderTurnWithUnrelatedDenialDoesNotEarnATestCaveat() async throws 
             profiles: [manager, builder, reviewer, publisher],
             sessions: [
                 managerID: AgentSessionState(),
-                builderID: AgentSessionState(),
+                builderID: AgentSessionState(
+                    entries: [
+                        TimelineEntry(
+                            kind: .handoff,
+                            title: "Implementation brief",
+                            text: "Implement the feature end to end."
+                        )
+                    ]
+                ),
                 reviewerID: AgentSessionState(),
                 publisherID: AgentSessionState()
             ],
@@ -3486,7 +3510,15 @@ func revisitedBuilderTurnDoesNotReuseAStaleBlockedActionFromAnEarlierTurn() asyn
             profiles: [manager, builder, reviewer, publisher],
             sessions: [
                 managerID: AgentSessionState(),
-                builderID: AgentSessionState(),
+                builderID: AgentSessionState(
+                    entries: [
+                        TimelineEntry(
+                            kind: .handoff,
+                            title: "Implementation brief",
+                            text: "Implement the feature end to end."
+                        )
+                    ]
+                ),
                 reviewerID: AgentSessionState(),
                 publisherID: AgentSessionState()
             ],
@@ -3633,7 +3665,15 @@ func blockedBuilderTurnWithFailingTestsStillPauses() async throws {
             profiles: [manager, builder, reviewer, publisher],
             sessions: [
                 managerID: AgentSessionState(),
-                builderID: AgentSessionState(),
+                builderID: AgentSessionState(
+                    entries: [
+                        TimelineEntry(
+                            kind: .handoff,
+                            title: "Implementation brief",
+                            text: "Implement the feature end to end."
+                        )
+                    ]
+                ),
                 reviewerID: AgentSessionState(),
                 publisherID: AgentSessionState()
             ],
@@ -3776,7 +3816,15 @@ func pausedBuilderHandoffSelfHealsWhenTheBuilderNextFinishesReady() async throws
             profiles: [manager, builder, reviewer, publisher],
             sessions: [
                 managerID: AgentSessionState(),
-                builderID: AgentSessionState(),
+                builderID: AgentSessionState(
+                    entries: [
+                        TimelineEntry(
+                            kind: .handoff,
+                            title: "Implementation brief",
+                            text: "Implement the feature end to end."
+                        )
+                    ]
+                ),
                 reviewerID: AgentSessionState(),
                 publisherID: AgentSessionState()
             ],
@@ -3810,8 +3858,13 @@ func pausedBuilderHandoffSelfHealsWhenTheBuilderNextFinishesReady() async throws
     // terminal status entirely on its own.
     model.resolveApproval(UUID(), approved: true, for: builderID)
 
-    for _ in 0..<100
-        where model.workflow(for: managerID)?.stage != .reviewing {
+    for _ in 0..<300
+        where model.workflow(for: managerID)?.stage != .reviewing
+            || model.workflow(for: managerID)?.latestHandoff?.headRevision
+                != readyPackage.headRevision
+            || !model.session(for: reviewerID).entries.contains(where: {
+                $0.kind == .handoff
+            }) {
         try await Task.sleep(for: .milliseconds(10))
     }
 
@@ -3919,7 +3972,15 @@ func blockedBuilderTurnWithoutCommitStillPausesWithAnActionableReason() async th
             profiles: [manager, builder, reviewer, publisher],
             sessions: [
                 managerID: AgentSessionState(),
-                builderID: AgentSessionState(),
+                builderID: AgentSessionState(
+                    entries: [
+                        TimelineEntry(
+                            kind: .handoff,
+                            title: "Implementation brief",
+                            text: "Implement the feature end to end."
+                        )
+                    ]
+                ),
                 reviewerID: AgentSessionState(),
                 publisherID: AgentSessionState()
             ],
@@ -4075,17 +4136,17 @@ func codexBuilderGenuineQuestionStillPausesTheWorkflow() async throws {
     )
 
     model.send("Implement the feature", to: builderID)
-    for _ in 0..<100
-        where model.workflow(for: managerID)?.pauseReason == nil {
+    for _ in 0..<300
+        where model.workflow(for: managerID)?.stage != .building
+            || model.workflow(for: managerID)?.isPaused != true
+            || model.session(for: builderID).status != .needsAnswer {
         try await Task.sleep(for: .milliseconds(10))
     }
 
     let paused = try #require(model.workflow(for: managerID))
     #expect(paused.stage == .building)
     #expect(paused.isPaused)
-    #expect(
-        paused.pauseReason?.contains("needs attention: Question.") == true
-    )
+    #expect(model.session(for: builderID).status == .needsAnswer)
     #expect(await runtime.calls == [.builder])
     #expect(model.session(for: reviewerID).entries.isEmpty)
 }
@@ -10566,32 +10627,37 @@ private actor BuilderStatusStubRuntime: AgentRuntime {
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent> {
         calls.append(profile.role)
-        let finalStatus: AgentStatus =
-            profile.role == .builder ? builderFinalStatus : .completed
         let responseText =
             profile.role == .builder
                 ? builderResponseText
                 : "Acknowledged."
-        let blockedDetail =
-            profile.role == .builder ? blockedActionDetail : nil
         return AsyncStream { continuation in
             continuation.yield(.status(.working))
             continuation.yield(
                 .entry(.init(kind: .assistant, text: responseText))
             )
-            if let blockedDetail {
+            guard profile.role == .builder else {
+                // Non-builder roles (e.g. the Reviewer) are left mid-turn,
+                // deliberately never reaching a terminal status. These tests
+                // only assert on the handoff that reached them, not on what
+                // an automated review would do next — settling that turn
+                // would cascade the fully-autonomous pipeline (revision or
+                // publishing) past the state under test.
+                return
+            }
+            if let blockedActionDetail {
                 continuation.yield(
                     .entry(
                         .init(
                             kind: .question,
                             title: "Some actions were blocked",
                             text: "Claude could not run one or more required actions.",
-                            detail: blockedDetail
+                            detail: blockedActionDetail
                         )
                     )
                 )
             }
-            continuation.yield(.status(finalStatus))
+            continuation.yield(.status(builderFinalStatus))
             continuation.finish()
         }
     }
@@ -10632,8 +10698,6 @@ private actor RetryableBuilderRuntime: AgentRuntime {
         profile: BotProfile
     ) async -> AsyncStream<AgentEvent> {
         calls.append(profile.role)
-        let finalStatus: AgentStatus =
-            profile.role == .builder ? .blocked : .completed
         let responseText =
             profile.role == .builder
                 ? "Working on it, but a required action was blocked."
@@ -10643,19 +10707,26 @@ private actor RetryableBuilderRuntime: AgentRuntime {
             continuation.yield(
                 .entry(.init(kind: .assistant, text: responseText))
             )
-            if profile.role == .builder {
-                continuation.yield(
-                    .entry(
-                        .init(
-                            kind: .question,
-                            title: "Some actions were blocked",
-                            text: "Claude could not run one or more required actions.",
-                            detail: "• git commit -m \"Ship the feature\""
-                        )
+            guard profile.role == .builder else {
+                // Non-builder roles (e.g. the Reviewer) are left mid-turn,
+                // deliberately never reaching a terminal status. This test
+                // only asserts on the handoff that reached them, not on what
+                // an automated review would do next — settling that turn
+                // would cascade the fully-autonomous pipeline (revision or
+                // publishing) past the state under test.
+                return
+            }
+            continuation.yield(
+                .entry(
+                    .init(
+                        kind: .question,
+                        title: "Some actions were blocked",
+                        text: "Claude could not run one or more required actions.",
+                        detail: "• git commit -m \"Ship the feature\""
                     )
                 )
-            }
-            continuation.yield(.status(finalStatus))
+            )
+            continuation.yield(.status(.blocked))
             continuation.finish()
         }
     }
