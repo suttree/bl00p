@@ -334,12 +334,14 @@ enum HandoffTestStatus: String, Codable, Hashable, Sendable {
     case notRun
     case passed
     case failed
+    case unverified
 
     var label: String {
         switch self {
         case .notRun: "Not run"
         case .passed: "Passed"
         case .failed: "Failed"
+        case .unverified: "Unverified (blocked)"
         }
     }
 }
@@ -544,6 +546,11 @@ struct ManagerWorkflowDispatch: Identifiable, Codable, Hashable, Sendable {
     var targetProfileID: UUID
     var summary: String
     var handoff: GitHandoffPackage?
+    /// Readable detail of the permission denial(s) recorded when the Builder
+    /// turn that produced this dispatch ended `.blocked`, or nil for a normal
+    /// completed turn. Lets the readiness gate distinguish "tests didn't run
+    /// because the test command was blocked" from a genuine gap.
+    var builderTurnBlockedDetail: String?
 
     init(
         id: UUID = UUID(),
@@ -551,7 +558,8 @@ struct ManagerWorkflowDispatch: Identifiable, Codable, Hashable, Sendable {
         sourceProfileID: UUID,
         targetProfileID: UUID,
         summary: String,
-        handoff: GitHandoffPackage? = nil
+        handoff: GitHandoffPackage? = nil,
+        builderTurnBlockedDetail: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -559,6 +567,7 @@ struct ManagerWorkflowDispatch: Identifiable, Codable, Hashable, Sendable {
         self.targetProfileID = targetProfileID
         self.summary = summary
         self.handoff = handoff
+        self.builderTurnBlockedDetail = builderTurnBlockedDetail
     }
 }
 
@@ -586,6 +595,11 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     var revisionStartedAt: Date?
     var isPaused: Bool
     var pauseReason: String?
+    /// Set when the Builder handoff readiness gate hard-pauses this workflow
+    /// while it is `.building`/`.revising`. Lets the workflow re-run the gate
+    /// and auto-advance the next time the Builder reaches a terminal status,
+    /// instead of requiring a manual resume.
+    var awaitingBuilderHandoffRetry: Bool
     var startedAt: Date
     var updatedAt: Date
     var participantSessionIDs: [AgentRole: UUID]
@@ -614,6 +628,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         revisionStartedAt: Date? = nil,
         isPaused: Bool = false,
         pauseReason: String? = nil,
+        awaitingBuilderHandoffRetry: Bool = false,
         startedAt: Date = .now,
         updatedAt: Date = .now,
         participantSessionIDs: [AgentRole: UUID] = [:]
@@ -641,6 +656,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         self.revisionStartedAt = revisionStartedAt
         self.isPaused = isPaused
         self.pauseReason = pauseReason
+        self.awaitingBuilderHandoffRetry = awaitingBuilderHandoffRetry
         self.startedAt = startedAt
         self.updatedAt = updatedAt
         self.participantSessionIDs = participantSessionIDs
@@ -654,7 +670,8 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         case stage, branch, pullRequestURL
         case verificationSummary, publisherSummary, revisionRounds
         case latestHandoff, reviewSummary, revisionStartedAt
-        case isPaused, pauseReason, startedAt, updatedAt, participantSessionIDs
+        case isPaused, pauseReason, awaitingBuilderHandoffRetry
+        case startedAt, updatedAt, participantSessionIDs
     }
 
     init(from decoder: Decoder) throws {
@@ -715,6 +732,10 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         )
         isPaused = try container.decode(Bool.self, forKey: .isPaused)
         pauseReason = try container.decodeIfPresent(String.self, forKey: .pauseReason)
+        awaitingBuilderHandoffRetry = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .awaitingBuilderHandoffRetry
+        ) ?? false
         startedAt = try container.decode(Date.self, forKey: .startedAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
         participantSessionIDs = try container.decodeIfPresent(
