@@ -15,7 +15,8 @@ The current prototype includes:
 - Builder, reviewer, and PR-writer roles
 - Editable role prompts per bot and per chat, with fallback to bot default, plus a repository selected independently for each chat
 - Position-labeled conversation tabs with `⌘1`–`⌘9` switching on macOS
-- A Slack-like sidebar with attention badges
+- A Slack-like sidebar whose spinner and attention badges follow the bot's
+  current chat instead of stale or background chats
 - Automatic light and dark appearances that follow the system setting (macOS: live; Linux: read once at launch from `org.gnome.desktop.interface color-scheme`)
 - Consistent, legible typography across conversations, settings, and bot creation
 - Structured messages, commands, findings, and approval cards

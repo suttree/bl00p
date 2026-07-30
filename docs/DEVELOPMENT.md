@@ -56,6 +56,33 @@ XDG_CACHE_HOME="$PWD/.build/cache" \
 xcrun swift test --disable-sandbox
 ```
 
+## Sidebar indicators
+
+`BotRow` receives the sessions that are allowed to drive its avatar spinner and
+attention dot from `AppModel.sidebarIndicatorSessions(for:)`. Keep that
+selection scoped to the conversation currently visible for the row:
+standalone bots use their selected chat, Manager bots use the selected
+workflow's Manager session and participant sessions, and team-member rows use
+the participant session for the currently selected Manager workflow when one
+is visible.
+
+Do not pass every session for a profile into the sidebar row. Background chats
+may still need attention, remain unread, or be running, but those states belong
+to the conversation tab strip, Dock badge, and notifications rather than the
+sidebar avatar for an idle current chat.
+
+Model coverage should verify standalone background chats, selected-chat
+switching, and Manager workflow scoping. A focused verification run is:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-module-cache" \
+SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/swiftpm-module-cache" \
+XDG_CACHE_HOME="$PWD/.build/cache" \
+xcrun swift test --disable-sandbox \
+  --filter sidebarIndicatorSessions
+```
+
 ## Structured user questions
 
 Claude `AskUserQuestion` control requests and Codex
