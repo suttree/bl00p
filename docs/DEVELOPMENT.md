@@ -87,3 +87,38 @@ cancellation, persistence, and unchanged approval behavior. Manual checks
 should also cover selecting and submitting a fixture-backed question, resumed
 provider execution, a resolved card that cannot be edited twice, and readable
 option wrapping at a narrow conversation width.
+
+## Per-chat prompt overrides
+
+A chat session can override its bot's default `instructions` by setting
+`AgentSessionState.instructionsOverride`. When present and non-blank, the
+override is sent to the runtime; otherwise, the bot's default is used. This
+allows two chats of the same bot to run with different prompts without
+detaching them from future bot-default edits.
+
+The resolution logic lives in a pure, testable helper:
+`AgentSessionState.effectiveInstructions(profile:session:)`. It returns the
+override (trimmed and non-blank) when present, otherwise the profile default.
+Blank overrides are normalized to `nil` so the UI and runtime never disagree
+about whether an override is in use.
+
+The runtime wiring is one-off: `AppModel.runtimeProfile(for:sessionID:)` sets
+`runtimeProfile.instructions` after resolving the effective prompt. This single
+seam feeds both Claude (via `ClaudeInvocation.systemPrompt`) and Codex (via
+`CodexAppServerRuntime.parameters`), and covers standalone chats, manager
+workflow dispatches, and all provider delegation paths.
+
+UI binding in `ProfileInspectorView` distinguishes bot-level and chat-level
+editing with a segmented picker (when a chat is selected). The editor reads the
+effective prompt as starting text; edits write to whichever scope is being
+edited (the override when in chat mode, the profile default when in bot mode).
+A "Reset to bot default" button clears the override. The persisted
+`instructionsOverride` field is optional, so legacy chats without it decode
+correctly and inherit the bot default.
+
+Model coverage should verify: effective-prompt resolution with and without
+overrides, blank-override normalization to `nil`, Codable round-trip and
+backward-compatibility (legacy payloads lacking the field), and runtime
+wiring for both providers. UI coverage should test segmented picker scope
+switching, editor read/write behavior, reset action, persistence across
+relaunch, and manager-workflow override propagation.

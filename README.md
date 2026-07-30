@@ -13,7 +13,7 @@ The current prototype includes:
 - Claude and Codex bot profiles
 - Sidebar bot renaming with the name field focused as soon as the alert opens
 - Builder, reviewer, and PR-writer roles
-- Editable role prompts and a repository selected independently for each chat
+- Editable role prompts per bot and per chat, with fallback to bot default, plus a repository selected independently for each chat
 - Position-labeled conversation tabs with `⌘1`–`⌘9` switching on macOS
 - A Slack-like sidebar with attention badges
 - Automatic light and dark appearances that follow the system setting (macOS: live; Linux: read once at launch from `org.gnome.desktop.interface color-scheme`)
