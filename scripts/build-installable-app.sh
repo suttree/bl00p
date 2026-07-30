@@ -26,15 +26,16 @@ env \
     xcrun swift build -c release --disable-sandbox
 
 env DEVELOPER_DIR="$developer_dir" \
+    CODE_SIGN_IDENTITY=- \
     sh "$project_root/scripts/package-app.sh" release
 
 rm -rf "$install_app"
 rm -f "$archive"
 ditto "$project_root/.build/bl00p.app" "$install_app"
 
-codesign --verify --deep --strict --verbose=2 "$install_app"
 ditto -c -k --sequesterRsrc --keepParent "$install_app" "$archive"
 unzip -tq "$archive"
+sh "$project_root/scripts/verify-adhoc-signatures.sh" "$archive"
 
 echo "$install_app"
 echo "$archive"

@@ -1437,7 +1437,12 @@ func draftPersistenceIsDebouncedInsteadOfWritingOnEveryKeystroke() async throws 
     model.updateDraft("hello", for: profile.id)
 
     #expect(store.load()?.sessions[profile.id]?.draft == "")
-    try await Task.sleep(for: .milliseconds(500))
+    for _ in 0..<200 {
+        if store.load()?.sessions[profile.id]?.draft == "hello" {
+            break
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
     #expect(store.load()?.sessions[profile.id]?.draft == "hello")
 }
 
