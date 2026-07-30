@@ -11,6 +11,8 @@ the platform automatically.
 The current prototype includes:
 
 - Claude and Codex bot profiles
+- Seeded Builder, Reviewer, and PR-writer prompts that append the shared easol
+  working-guidelines block for new default and custom bots
 - Sidebar bot renaming with the name field focused as soon as the alert opens
 - Builder, reviewer, and PR-writer roles
 - Editable role prompts per bot and per chat, with fallback to bot default, plus a repository selected independently for each chat
@@ -224,6 +226,13 @@ continue to use their existing Approve and Decline controls.
 
 The persistence rules and restore invariants are documented in
 [docs/MANAGED_WORKFLOWS.md](docs/MANAGED_WORKFLOWS.md).
+
+Fresh installs seed the built-in Builder, Reviewer, and Documenter / PR Writer
+profiles from `BotProfile.defaults`, and each seeded prompt now appends
+`BotProfile.easolWorkingGuidelines`. The Add Bot sheet starts its instructions
+editor with that same shared guidelines block so custom bots begin from the
+same house rules. Existing saved profiles are not migrated in place; they keep
+their persisted instructions until edited manually or replaced.
 
 If bl00p restarts while a team handoff is being delivered, the saved dispatch
 is retried; if the dispatch was already recorded as delivered, the same saved

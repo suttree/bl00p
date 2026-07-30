@@ -123,6 +123,18 @@ override is sent to the runtime; otherwise, the bot's default is used. This
 allows two chats of the same bot to run with different prompts without
 detaching them from future bot-default edits.
 
+The built-in Builder, Reviewer, and Documenter / PR Writer prompts are seeded
+from `BotProfile.defaults`. Those defaults keep their role-specific prose and
+append the shared `BotProfile.easolWorkingGuidelines` block, which also
+prefills `NewBotDraft.instructions` on the Add Bot sheet. Keep that guidelines
+text centralized in `BotProfile` so prompt updates stay consistent across
+seeded profiles, new custom bots, and the associated tests.
+
+This remains seed-time behavior only. `AppModel` uses `BotProfile.defaults`
+when bootstrapping a fresh state store, but existing persisted profiles are not
+retroactively rewritten when the default prompt text changes. Document any
+future migration separately if prompt updates must backfill saved installs.
+
 The resolution logic lives in a pure, testable helper:
 `AgentSessionState.effectiveInstructions(profile:session:)`. It returns the
 override (trimmed and non-blank) when present, otherwise the profile default.
