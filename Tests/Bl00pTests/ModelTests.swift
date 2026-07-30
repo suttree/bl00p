@@ -245,9 +245,17 @@ func addBotDraftPreservesAnExplicitRoleAcrossProviderChanges() {
 func attentionStatesAreExplicit() {
     #expect(AgentStatus.needsApproval.needsAttention)
     #expect(AgentStatus.needsAnswer.needsAttention)
+    #expect(AgentStatus.blocked.needsAttention)
     #expect(AgentStatus.failed.needsAttention)
     #expect(!AgentStatus.working.needsAttention)
     #expect(!AgentStatus.completed.needsAttention)
+}
+
+@Test
+func blockedStatusIsLabeledDistinctlyFromAQuestion() {
+    #expect(AgentStatus.blocked.label == "Blocked")
+    #expect(AgentStatus.needsAnswer.label == "Question")
+    #expect(AgentStatus.blocked.allowsFailedMessageRetry)
 }
 
 @Test
@@ -259,6 +267,10 @@ func attentionNoticesOnlyFireOnRelevantStatusTransitions() {
     #expect(
         AgentAttentionNotice.transition(from: .working, to: .needsApproval)
             == .needsApproval
+    )
+    #expect(
+        AgentAttentionNotice.transition(from: .working, to: .blocked)
+            == .blocked
     )
     #expect(
         AgentAttentionNotice.transition(from: .working, to: .completed)
@@ -1769,6 +1781,78 @@ func worktreeManagerCreatesIsolatedBranchesAndHandoffSnapshots() async throws {
 }
 
 @Test
+func makeHandoffFallsBackToTheLatestHandoffEntryWhenNoUserEntryExists() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-worktrees-fallback-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    let repository = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: repository,
+        withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try runGit(["init", "-b", "main"], in: repository)
+    try Data("initial\n".utf8).write(
+        to: repository.appendingPathComponent("README.md")
+    )
+    try runGit(["add", "README.md"], in: repository)
+    try runGit(
+        [
+            "-c", "user.name=bl00p Tests",
+            "-c", "user.email=tests@bl00p.dev",
+            "commit", "-m", "Initial commit"
+        ],
+        in: repository
+    )
+
+    var builder = BotProfile(
+        id: UUID(),
+        name: "Handed-off Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "",
+        workingDirectory: repository.path
+    )
+    let manager = GitWorktreeManager()
+    let ownership = try await manager.prepareWorktree(
+        for: builder,
+        startingPoint: nil,
+        handoffID: nil
+    )
+    builder.worktree = ownership
+
+    let sessionWithNoUserEntry = AgentSessionState(
+        entries: [
+            .init(
+                kind: .handoff,
+                title: "Handoff from Manager",
+                text: "Implement isolated worktrees from a resumed handoff"
+            )
+        ]
+    )
+    let package = try await manager.makeHandoff(
+        from: builder,
+        session: sessionWithNoUserEntry
+    )
+    #expect(
+        package.taskContext
+            == "Implement isolated worktrees from a resumed handoff"
+    )
+
+    let sessionWithNoContextAtAll = AgentSessionState(
+        entries: [.init(kind: .system, text: "Session recovered")]
+    )
+    let fallbackPackage = try await manager.makeHandoff(
+        from: builder,
+        session: sessionWithNoContextAtAll
+    )
+    #expect(fallbackPackage.taskContext == "No task context was captured.")
+}
+
+@Test
 func handoffEvidenceRecognizesWrapperCommandsAndSuccessTitles() {
     let timestamp = Date()
     let evidence = HandoffTestEvidence.latest(
@@ -1981,6 +2065,97 @@ func handoffPackageIsDeliveredWithTheRecipientsNextMessage() async throws {
     #expect(delivered.contains("Next instruction:\nReview this implementation"))
     #expect(await runtime.respondedDirectories == [package.worktreePath])
     #expect(model.session(for: target.id).pendingHandoff == nil)
+}
+
+@MainActor
+@Test
+func manualHandoffButtonDeliversTheWorkflowPlanInsteadOfTheFallbackString() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-manual-handoff-workflow-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    var source = BotProfile.defaults[0]
+    source.workingDirectory = "/tmp/project"
+    source.worktree = GitWorktreeOwnership(
+        ownerProfileID: source.id,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/project-builder",
+        branch: "bl00p/source-12345678",
+        baseRevision: "abc123"
+    )
+    let target = BotProfile.defaults[1]
+    let managerID = UUID()
+    let team = ManagerTeamConfiguration(
+        builderProfileID: source.id,
+        reviewerProfileID: target.id
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        team: team,
+        request: "Ship the feature",
+        implementationPlan: "Implement the feature end to end, with tests.",
+        stage: .building,
+        participantSessionIDs: [.builder: source.id, .reviewer: target.id]
+    )
+    let package = GitHandoffPackage(
+        sourceProfileID: source.id,
+        sourceName: source.name,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/project-builder",
+        branch: "bl00p/source-12345678",
+        baseRevision: "abc123",
+        headRevision: "def456",
+        taskContext: "No task context was captured.",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        workingTreeSummary: "Clean"
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    try store.saveFixture(
+        PersistedAppState(
+            profiles: [manager, source, target],
+            sessions: [
+                source.id: AgentSessionState(status: .completed),
+                target.id: AgentSessionState()
+            ],
+            selectedBotID: source.id,
+            managerWorkflows: [managerID: workflow]
+        )
+    )
+    let runtime = HandoffRecordingRuntime()
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(package: package),
+        store: store
+    )
+
+    model.handoff(from: source.id, to: target.id)
+    for _ in 0..<30
+        where model.session(for: target.id).pendingHandoff == nil {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(
+        model.session(for: target.id).pendingHandoff?.taskContext
+            == "Implement the feature end to end, with tests."
+    )
+    #expect(
+        model.session(for: target.id).entries.last?.text
+            == "Implement the feature end to end, with tests."
+    )
 }
 
 @MainActor
@@ -2650,6 +2825,381 @@ func invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns() async throws {
             == [.builder, .builder, .builder, .builder, .builder]
     )
     #expect(model.session(for: publisherID).entries.isEmpty)
+}
+
+@MainActor
+@Test
+func blockedBuilderTurnWithReadyHandoffAdvancesWorkflowAutomatically() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-blocked-builder-ready-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/managed-feature",
+        baseRevision: "abc123"
+    )
+    let readyPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "def456",
+        taskContext: "This gets overwritten with the implementation plan.",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        testEvidenceAt: .distantFuture,
+        workingTreeSummary: "Clean"
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builderID,
+        reviewerProfileID: reviewerID,
+        publisherProfileID: publisherID
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement.",
+        workingDirectory: ownership.repositoryPath,
+        worktree: ownership
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Publish.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        repositoryPath: ownership.repositoryPath,
+        team: team,
+        request: "Ship the feature",
+        implementationPlan: "Implement the feature end to end.",
+        stage: .building,
+        branch: ownership.branch
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer, publisher],
+            sessions: [
+                managerID: AgentSessionState(),
+                builderID: AgentSessionState(),
+                reviewerID: AgentSessionState(),
+                publisherID: AgentSessionState()
+            ],
+            selectedBotID: builderID,
+            managerWorkflows: [managerID: workflow]
+        )
+    )
+    let runtime = BuilderStatusStubRuntime(builderFinalStatus: .blocked)
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            package: readyPackage,
+            preparedOwnership: ownership
+        ),
+        store: store
+    )
+
+    model.send("Implement the feature", to: builderID)
+    for _ in 0..<100 where await runtime.calls.count < 2 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let advanced = try #require(model.workflow(for: managerID))
+    #expect(advanced.stage == .reviewing)
+    #expect(!advanced.isPaused)
+    #expect(
+        advanced.latestHandoff?.taskContext
+            == "Implement the feature end to end."
+    )
+    #expect(await runtime.calls == [.builder, .reviewer])
+    #expect(model.session(for: reviewerID).entries.contains {
+        $0.kind == .handoff
+    })
+}
+
+@MainActor
+@Test
+func blockedBuilderTurnWithoutCommitStillPausesWithAnActionableReason() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-blocked-builder-no-commit-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/managed-feature",
+        baseRevision: "abc123"
+    )
+    let noCommitPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: ownership.baseRevision,
+        taskContext: "Ship the feature",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        testEvidenceAt: .distantFuture,
+        workingTreeSummary: "Clean"
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builderID,
+        reviewerProfileID: reviewerID,
+        publisherProfileID: publisherID
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement.",
+        workingDirectory: ownership.repositoryPath,
+        worktree: ownership
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Publish.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        repositoryPath: ownership.repositoryPath,
+        team: team,
+        request: "Ship the feature",
+        implementationPlan: "Implement the feature end to end.",
+        stage: .building,
+        branch: ownership.branch
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer, publisher],
+            sessions: [
+                managerID: AgentSessionState(),
+                builderID: AgentSessionState(),
+                reviewerID: AgentSessionState(),
+                publisherID: AgentSessionState()
+            ],
+            selectedBotID: builderID,
+            managerWorkflows: [managerID: workflow]
+        )
+    )
+    let runtime = BuilderStatusStubRuntime(builderFinalStatus: .blocked)
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            package: noCommitPackage,
+            preparedOwnership: ownership
+        ),
+        store: store
+    )
+
+    model.send("Implement the feature", to: builderID)
+    for _ in 0..<100
+        where model.workflow(for: managerID)?.pauseReason == nil {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let paused = try #require(model.workflow(for: managerID))
+    #expect(paused.stage == .building)
+    #expect(paused.isPaused)
+    #expect(paused.pauseReason == "The Builder handoff has no local commit.")
+    #expect(paused.latestHandoff == nil)
+    #expect(await runtime.calls == [.builder])
+    #expect(model.session(for: reviewerID).entries.isEmpty)
+}
+
+@MainActor
+@Test
+func codexBuilderGenuineQuestionStillPausesTheWorkflow() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-codex-builder-question-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/managed-feature",
+        baseRevision: "abc123"
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builderID,
+        reviewerProfileID: reviewerID,
+        publisherProfileID: publisherID
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .codex,
+        role: .builder,
+        instructions: "Implement.",
+        workingDirectory: ownership.repositoryPath,
+        worktree: ownership
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Publish.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        repositoryPath: ownership.repositoryPath,
+        team: team,
+        request: "Ship the feature",
+        implementationPlan: "Implement the feature end to end.",
+        stage: .building,
+        branch: ownership.branch
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: [manager, builder, reviewer, publisher],
+            sessions: [
+                managerID: AgentSessionState(),
+                builderID: AgentSessionState(),
+                reviewerID: AgentSessionState(),
+                publisherID: AgentSessionState()
+            ],
+            selectedBotID: builderID,
+            managerWorkflows: [managerID: workflow]
+        )
+    )
+    let runtime = BuilderStatusStubRuntime(
+        builderFinalStatus: .needsAnswer,
+        builderResponseText: "Which persistence layer should this use?"
+    )
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            package: GitHandoffPackage(
+                sourceProfileID: builderID,
+                sourceName: "Builder",
+                repositoryPath: ownership.repositoryPath,
+                worktreePath: ownership.worktreePath,
+                branch: ownership.branch,
+                baseRevision: ownership.baseRevision,
+                headRevision: "def456",
+                taskContext: "Ship the feature",
+                testStatus: .passed,
+                testSummary: "`swift test` — passed",
+                testEvidenceAt: .distantFuture,
+                workingTreeSummary: "Clean"
+            ),
+            preparedOwnership: ownership
+        ),
+        store: store
+    )
+
+    model.send("Implement the feature", to: builderID)
+    for _ in 0..<100
+        where model.workflow(for: managerID)?.pauseReason == nil {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let paused = try #require(model.workflow(for: managerID))
+    #expect(paused.stage == .building)
+    #expect(paused.isPaused)
+    #expect(
+        paused.pauseReason?.contains("needs attention: Question.") == true
+    )
+    #expect(await runtime.calls == [.builder])
+    #expect(model.session(for: reviewerID).entries.isEmpty)
 }
 
 @MainActor
@@ -7228,7 +7778,7 @@ func permissionDenialsProduceAReadableAttentionState() throws {
         ClaudeTurnOutcome.status(
             failed: false,
             permissionDenials: [denial]
-        ) == .needsAnswer
+        ) == .blocked
     )
     #expect(
         ClaudePermissionDenials.readableDetail(for: [denial])
@@ -7438,7 +7988,7 @@ func explicitPermissionDenialRemainsUnresolvedWithoutASuccessfulRetry() throws {
         ClaudeTurnOutcome.status(
             failed: false,
             permissionDenials: unresolved
-        ) == .needsAnswer
+        ) == .blocked
     )
 }
 
@@ -9088,6 +9638,65 @@ private actor OrchestrationRecordingRuntime: AgentRuntime {
     ) async -> AsyncStream<AgentEvent> {
         approvalResolutionCount += 1
         return AsyncStream { $0.finish() }
+    }
+
+    func stop(profile: BotProfile) async {}
+}
+
+private actor BuilderStatusStubRuntime: AgentRuntime {
+    let builderFinalStatus: AgentStatus
+    let builderResponseText: String
+    private(set) var calls: [AgentRole] = []
+
+    init(
+        builderFinalStatus: AgentStatus,
+        builderResponseText: String = "Implementation committed and tests passed."
+    ) {
+        self.builderFinalStatus = builderFinalStatus
+        self.builderResponseText = builderResponseText
+    }
+
+    func start(
+        profile: BotProfile,
+        resumeThreadID: String?
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(
+                .sessionID(resumeThreadID ?? "session-\(profile.id.uuidString)")
+            )
+            continuation.yield(.status(.needsAnswer))
+            continuation.finish()
+        }
+    }
+
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        calls.append(profile.role)
+        let finalStatus: AgentStatus =
+            profile.role == .builder ? builderFinalStatus : .completed
+        let responseText =
+            profile.role == .builder
+                ? builderResponseText
+                : "Acknowledged."
+        return AsyncStream { continuation in
+            continuation.yield(.status(.working))
+            continuation.yield(
+                .entry(.init(kind: .assistant, text: responseText))
+            )
+            continuation.yield(.status(finalStatus))
+            continuation.finish()
+        }
+    }
+
+    func resolveApproval(
+        entryID: UUID,
+        approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
     }
 
     func stop(profile: BotProfile) async {}

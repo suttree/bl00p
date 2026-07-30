@@ -953,12 +953,16 @@ actor ClaudeRuntime: AgentRuntime {
         }
 
         if !permissionDenialsRequiringAttention.isEmpty {
+            let blockedActionsText =
+                session.pendingTurn?.profile.role == .builder
+                    ? "Claude could not run one or more required actions. If the work is committed and tests are recorded, the workflow will continue automatically; otherwise retry and approve the bl00p prompt, or adjust the applicable Claude deny rule."
+                    : "Claude could not run one or more required actions. Retry and approve the bl00p prompt, or adjust the applicable Claude deny rule before continuing."
             yield(
                 .entry(
                     .init(
                         kind: .question,
                         title: "Some actions were blocked",
-                        text: "Claude could not run one or more required actions. Retry and approve the bl00p prompt, or adjust the applicable Claude deny rule before continuing.",
+                        text: blockedActionsText,
                         detail: ClaudePermissionDenials
                             .readableDetail(
                                 for: permissionDenialsRequiringAttention
@@ -1237,7 +1241,7 @@ enum ClaudeTurnOutcome {
         if failed {
             return .failed
         }
-        return permissionDenials.isEmpty ? .completed : .needsAnswer
+        return permissionDenials.isEmpty ? .completed : .blocked
     }
 }
 

@@ -159,10 +159,15 @@ persisted workflow with this sequence:
    evidence, Reviewer result, Documenter summary, and draft PR URL.
 
 Before each Reviewer pass, bl00p requires a clean Builder worktree, the
-appropriate committed revision, and passing test evidence. Revision passes
-must include fresh passing test evidence recorded after the review began.
-Saved workflows recover these handoff requirements across app restarts without
-discarding an already-running Documenter session.
+appropriate committed revision, and passing test evidence. If a Builder turn
+ends with blocked Claude actions but those handoff requirements are already
+satisfied, the status is shown as **Blocked** and the workflow still advances
+to the Reviewer automatically. If the handoff is not ready, the workflow pauses
+with the missing requirement so the Builder can retry or finish the commit and
+test evidence. Revision passes must include fresh passing test evidence
+recorded after the review began. Saved workflows recover these handoff
+requirements across app restarts without discarding an already-running
+Documenter session.
 
 Repository selection belongs to the chat, not the bot profile. New chats start
 without a repository, so two chats for the same bot can work in different
@@ -181,12 +186,14 @@ repository, while the Reviewer and Documenter use the Builder's handed-off
 worktree. This lets multiple Manager chats run concurrently against different
 repositories with the same configured team.
 
-Questions, failures, and approval requests pause the workflow for the user.
-The Manager's implementation plan approval is persisted with the workflow, so a
-relaunch can restore a missing or interrupted approval card without dispatching
-the Builder twice. Unrelated runtime permission approvals remain runtime
-approvals, and declining the plan leaves the workflow paused for revision
-feedback.
+Questions, failures, blocked Reviewer or Documenter actions, and approval
+requests pause the workflow for the user. Builder blocked-action turns are
+handoff-gated: ready handoffs continue automatically, while incomplete handoffs
+pause with an actionable reason. The Manager's implementation plan approval is
+persisted with the workflow, so a relaunch can restore a missing or interrupted
+approval card without dispatching the Builder twice. Unrelated runtime
+permission approvals remain runtime approvals, and declining the plan leaves
+the workflow paused for revision feedback.
 Leaving any team assignment unset keeps that Manager in standalone chat mode.
 Clean workflows use four agent turns; workflows with one requested-changes
 round use six, and workflows with two rounds use eight. If findings remain

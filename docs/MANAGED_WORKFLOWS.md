@@ -45,6 +45,28 @@ is considered locked once it has a runtime thread, an owned worktree, a pending
 handoff, or workflow membership. Closing a chat may clean up its own worktree,
 but must not unlock or change another chat's repository.
 
+## Builder handoffs
+
+Builder turns can finish as `blocked` when Claude reports one or more
+non-fatal permission denials after the turn. This is a terminal status, not an
+answerable question. Standalone chats still surface the blocked state as
+needing attention, but managed workflows treat it like a completed Builder turn
+for handoff preparation while keeping the normal readiness gate in charge.
+
+The readiness gate must still require a handoff from the workflow repository,
+a clean worktree, a local commit beyond the required base revision, and passing
+test evidence. A ready blocked Builder handoff advances to the Reviewer
+automatically. A blocked Builder turn without the required commit, clean tree,
+or passing tests must pause with the existing `Builder handoff is not ready`
+question card. `needsAnswer` remains reserved for real provider questions, such
+as Codex `requestUserInput` events, and those still pause the workflow.
+
+Workflow handoffs should carry the Manager's implementation plan when one was
+approved, falling back to the original workflow request. This applies to both
+automatic dispatch and the manual Hand off button. Generic fallback text such
+as `No task context was captured.` must not be delivered to workflow
+Reviewers.
+
 ## Approval state
 
 While a Manager workflow is in the `planning` stage, the persisted workflow

@@ -23,6 +23,7 @@ enum AppWindowActivity {
 enum AgentAttentionNotice: Equatable, Sendable {
     case needsAnswer
     case needsApproval
+    case blocked
     case failed
     case completed
 
@@ -37,6 +38,8 @@ enum AgentAttentionNotice: Equatable, Sendable {
             return .needsAnswer
         case .needsApproval:
             return .needsApproval
+        case .blocked:
+            return .blocked
         case .failed:
             return .failed
         case .completed:
@@ -58,6 +61,11 @@ enum AgentAttentionNotice: Equatable, Sendable {
                 "\(profile.name) needs approval",
                 "Review the requested action in bl00p."
             )
+        case .blocked:
+            return (
+                "\(profile.name) had actions blocked",
+                "Open bl00p to see what was blocked."
+            )
         case .failed:
             return (
                 "\(profile.name) needs attention",
@@ -75,7 +83,7 @@ enum AgentAttentionNotice: Equatable, Sendable {
     /// Maps to freedesktop notification urgency levels.
     var urgency: String {
         switch self {
-        case .needsAnswer, .needsApproval, .failed: "critical"
+        case .needsAnswer, .needsApproval, .blocked, .failed: "critical"
         case .completed: "normal"
         }
     }

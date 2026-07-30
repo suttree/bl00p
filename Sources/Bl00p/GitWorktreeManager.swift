@@ -270,6 +270,9 @@ actor GitWorktreeManager: GitWorktreeManaging {
         let task = session.entries
             .last(where: { $0.kind == .user && !$0.text.isEmpty })?
             .text
+            ?? session.entries
+                .last(where: { $0.kind == .handoff && !$0.text.isEmpty })?
+                .text
             ?? "No task context was captured."
         let evidence = HandoffTestEvidence.latest(in: session.entries)
 

@@ -1659,10 +1659,14 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             do {
                 let startedAt = ContinuousClock.now
-                let package = try await worktrees.makeHandoff(
+                var package = try await worktrees.makeHandoff(
                     from: sourceForHandoff,
                     session: sourceSession
                 )
+                if let workflow {
+                    package.taskContext =
+                        workflow.implementationPlan ?? workflow.request
+                }
                 PerformanceMetrics.record(
                     name: .handoffPreparation,
                     duration: startedAt.duration(to: .now),
@@ -2042,6 +2046,17 @@ final class AppModel: ObservableObject {
                     managerID,
                     reason: "\(profileNameForSession(profileID)) needs attention: \(status.label)."
                 )
+            case .blocked:
+                if let workflow = managerWorkflows[managerID],
+                   workflow.stage == .building || workflow.stage == .revising {
+                    resumeWorkflowIndicator(managerID)
+                    advanceWorkflow(managerID, completedBy: profileID)
+                } else {
+                    pauseWorkflow(
+                        managerID,
+                        reason: "\(profileNameForSession(profileID)) needs attention: \(status.label)."
+                    )
+                }
             case .failed:
                 planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
                 pauseWorkflow(
@@ -3824,6 +3839,7 @@ final class AppModel: ObservableObject {
             } else if status == .completed
                         || status == .needsApproval
                         || status == .needsAnswer
+                        || status == .blocked
                         || status == .stopped {
                 inFlightUserEntryIDs.removeValue(forKey: profileID)
             }
@@ -3876,6 +3892,7 @@ final class AppModel: ObservableObject {
             requiresImmediatePersistence =
                 status == .needsApproval
                     || status == .needsAnswer
+                    || status == .blocked
                     || status == .completed
                     || status == .failed
                     || status == .stopped
