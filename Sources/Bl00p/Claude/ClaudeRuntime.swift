@@ -1733,15 +1733,16 @@ enum ClaudeToolApprovalPolicy {
         workingDirectory: URL,
         stagedAttachmentDirectory: URL?
     ) -> ClaudeToolApprovalDecision {
-        if role == .manager {
-            return .deny(
-                "Claude Managers are read-only and cannot escalate permissions."
-            )
-        }
         if role == .reviewer,
            fileWriteTools.contains(approval.toolName) {
             return .deny(
                 "Claude Reviewers cannot use built-in file-edit tools."
+            )
+        }
+        if role == .manager,
+           fileWriteTools.contains(approval.toolName) {
+            return .deny(
+                "Claude Managers cannot edit files, commit, push, or publish."
             )
         }
 
@@ -1754,7 +1755,30 @@ enum ClaudeToolApprovalPolicy {
                 for: approval,
                 workingDirectory: workingDirectory,
                 roots: roots,
-                inspectionOnly: true
+                role: .reviewer
+            )
+            switch shellDecision {
+            case .allow:
+                return mode == .auto ? .allow : .ask
+            case .deny:
+                return shellDecision
+            case .ask:
+                return .ask
+            }
+        }
+
+        // Managers must never reach the file-write auto-allow branch below or
+        // get an unrestricted Ask-mode pass-through: classify Bash the same
+        // way Reviewers are classified so writes, redirects, and unsupported
+        // commands (e.g. `git commit`, `git push`, `cat x > y`) are denied in
+        // both modes, while supported test/inspection commands still surface
+        // as an approval card in Ask mode or auto-approve in Auto mode.
+        if role == .manager, approval.toolName == "Bash" {
+            let shellDecision = bashDecision(
+                for: approval,
+                workingDirectory: workingDirectory,
+                roots: roots,
+                role: .manager
             )
             switch shellDecision {
             case .allow:
@@ -1792,7 +1816,7 @@ enum ClaudeToolApprovalPolicy {
                 for: approval,
                 workingDirectory: workingDirectory,
                 roots: roots,
-                inspectionOnly: false
+                role: role
             )
 
         default:
@@ -1804,7 +1828,7 @@ enum ClaudeToolApprovalPolicy {
         for approval: ClaudeToolApprovalRequest,
         workingDirectory: URL,
         roots: [URL],
-        inspectionOnly: Bool
+        role: AgentRole
     ) -> ClaudeToolApprovalDecision {
         guard let command = approval.toolInput["command"]?.stringValue,
               !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -1826,7 +1850,7 @@ enum ClaudeToolApprovalPolicy {
             command,
             workingDirectory: workingDirectory,
             roots: roots,
-            inspectionOnly: inspectionOnly
+            role: role
         )
     }
 
@@ -1834,7 +1858,7 @@ enum ClaudeToolApprovalPolicy {
         _ command: String,
         workingDirectory: URL,
         roots: [URL],
-        inspectionOnly: Bool
+        role: AgentRole
     ) -> ClaudeToolApprovalDecision {
         let forbiddenSyntax = ["\n", ";", "&&", "||", "|", "`", "$(", ">", "<"]
         guard !forbiddenSyntax.contains(where: command.contains),
@@ -1969,7 +1993,7 @@ enum ClaudeToolApprovalPolicy {
         }
 
         let permittedForRole = supported
-            && (!inspectionOnly
+            && (role != .reviewer
                 || isInspectionCommand(
                     executable: executable,
                     arguments: arguments
@@ -1978,14 +2002,20 @@ enum ClaudeToolApprovalPolicy {
         if permittedForRole {
             return .allow
         }
-        if inspectionOnly {
+        switch role {
+        case .reviewer:
             return .deny(
                 "\(executable) is outside the Claude Reviewer's read-only inspection command set."
             )
+        case .manager:
+            return .deny(
+                "\(executable) is outside the Claude Manager's test and inspection command set."
+            )
+        case .builder, .publisher:
+            return .deny(
+                "\(executable) is outside Claude auto-approval's safe command set. Switch to Ask to review it explicitly."
+            )
         }
-        return .deny(
-            "\(executable) is outside Claude auto-approval's safe command set. Switch to Ask to review it explicitly."
-        )
     }
 
     private static func isInspectionCommand(

@@ -124,7 +124,7 @@ struct ClaudeInvocation: Sendable {
         case .publisher:
             "You update documentation, run final verification, commit the completed work, push the branch, and create a draft pull request when asked and approved."
         case .manager:
-            "You coordinate work and communicate with the user. Prepare task briefs and delivery summaries, but do not edit code, commit, push, or publish."
+            "You coordinate work and communicate with the user. You may run the test suite and read-only inspection commands to ground your plans, but do not edit code, commit, push, or publish."
         }
     }
 

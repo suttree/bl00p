@@ -192,7 +192,7 @@ struct BotProfile: Identifiable, Codable, Hashable, Sendable {
     var managerTeam: ManagerTeamConfiguration?
 
     var canSelectApprovalMode: Bool {
-        provider != .claude || role != .manager
+        true
     }
 
     init(

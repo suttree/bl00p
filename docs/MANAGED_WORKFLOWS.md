@@ -109,9 +109,18 @@ Reviewers.
 
 ## Approval state
 
-While a Manager workflow is in the `planning` stage, the persisted workflow
-stores the implementation plan and the ID of its approval timeline entry. The
-session stores the corresponding pending approval card with the title
+While a Manager workflow is in the `planning` stage, a Claude Manager may run
+the test suite and read-only inspection commands to ground the plan it
+produces. In Ask mode those commands still pause on an approval card; in Auto
+mode supported commands are approved automatically by
+`ClaudeToolApprovalPolicy.decision`. Managers still cannot edit files, commit,
+push, or publish in either mode. `allowedTools(for:)` intentionally keeps
+shell access out of the Manager's preapproved tool list so these requests keep
+flowing through the runtime policy. Codex Managers remain read-only.
+
+The persisted workflow stores the implementation plan and the ID of its
+approval timeline entry. The session stores the corresponding pending
+approval card with the title
 `Approve implementation plan`. The card is the user-facing source of truth for
 the action; the workflow fields connect it back to orchestration state.
 
