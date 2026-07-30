@@ -19,6 +19,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
+      - name: Verify account-free release configuration
+        run: sh scripts/check-release-config.sh
+
       - name: Run tests
         run: swift test --disable-sandbox
 
@@ -26,6 +29,7 @@ jobs:
         env:
           APP_VERSION: 0.0.0
           BUILD_NUMBER: ${{ github.run_id }}
+          CODE_SIGN_IDENTITY: "-"
         run: sh scripts/build-installable-app.sh
 
       - name: Upload installable app

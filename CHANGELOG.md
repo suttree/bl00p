@@ -36,6 +36,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Changed
 
+- Publish macOS updates with account-free ad-hoc code signing while retaining
+  Sparkle Ed25519 archive verification; Apple Developer signing and
+  notarization are now optional Gatekeeper usability hardening.
 - Keep repository ownership with chat sessions instead of bot profiles. Chats
   lock their repository after launch, worktree creation, or workflow
   participation, while each managed workflow receives dedicated Builder,

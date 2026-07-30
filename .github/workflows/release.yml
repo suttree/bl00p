@@ -101,94 +101,22 @@ jobs:
         with:
           ref: ${{ env.RELEASE_SHA }}
 
+      - name: Verify account-free release configuration
+        run: sh scripts/check-release-config.sh
+
       - name: Run tests
         run: swift test --disable-sandbox
 
-      - name: Import Developer ID certificate
-        env:
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_DEVELOPER_ID_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE }}
-        run: |
-          if [ -z "$APPLE_DEVELOPER_ID_CERTIFICATE" ] ||
-              [ -z "$APPLE_CERTIFICATE_PASSWORD" ]; then
-            echo "Developer ID certificate secrets are not configured" >&2
-            exit 1
-          fi
-
-          certificate_path="$RUNNER_TEMP/developer-id.p12"
-          keychain_path="$RUNNER_TEMP/bl00p-signing.keychain-db"
-          keychain_password=$(openssl rand -hex 32)
-
-          printf '%s' "$APPLE_DEVELOPER_ID_CERTIFICATE" |
-              openssl base64 -d -A > "$certificate_path"
-          chmod 600 "$certificate_path"
-          security create-keychain -p "$keychain_password" "$keychain_path"
-          security set-keychain-settings -lut 21600 "$keychain_path"
-          security unlock-keychain \
-              -p "$keychain_password" "$keychain_path"
-          security import "$certificate_path" \
-              -k "$keychain_path" \
-              -P "$APPLE_CERTIFICATE_PASSWORD" \
-              -T /usr/bin/codesign \
-              -T /usr/bin/security
-          security set-key-partition-list \
-              -S apple-tool:,apple: \
-              -s \
-              -k "$keychain_password" \
-              "$keychain_path"
-          security list-keychains -d user -s "$keychain_path"
-
-          identity=$(
-            security find-identity -v -p codesigning "$keychain_path" |
-                sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' |
-                head -n 1
-          )
-          if [ -z "$identity" ]; then
-            echo "No Developer ID Application identity was imported" >&2
-            exit 1
-          fi
-
-          echo "CODE_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
-
-      - name: Build Developer ID-signed app
+      - name: Build ad-hoc-signed app
         env:
           BUILD_NUMBER: ${{ github.run_id }}
+          CODE_SIGN_IDENTITY: "-"
         run: sh scripts/build-installable-app.sh
 
-      - name: Notarize and staple app
-        env:
-          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
-          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-          APPLE_NOTARY_PRIVATE_KEY: ${{ secrets.APPLE_NOTARY_PRIVATE_KEY }}
+      - name: Verify archived ad-hoc signatures
         run: |
-          if [ -z "$APPLE_NOTARY_PRIVATE_KEY" ] ||
-              [ -z "$APPLE_NOTARY_KEY_ID" ] ||
-              [ -z "$APPLE_NOTARY_ISSUER_ID" ]; then
-            echo "Apple notarization secrets are not configured" >&2
-            exit 1
-          fi
-
-          app=".build/install/bl00p.app"
-          archive=".build/install/bl00p-$APP_VERSION-macos-arm64.zip"
-          api_key="$RUNNER_TEMP/AuthKey_$APPLE_NOTARY_KEY_ID.p8"
-          printf '%s' "$APPLE_NOTARY_PRIVATE_KEY" > "$api_key"
-          chmod 600 "$api_key"
-
-          xcrun notarytool submit "$archive" \
-              --key "$api_key" \
-              --key-id "$APPLE_NOTARY_KEY_ID" \
-              --issuer "$APPLE_NOTARY_ISSUER_ID" \
-              --wait
-          xcrun stapler staple "$app"
-          xcrun stapler validate "$app"
-
-          rm -f "$archive"
-          ditto -c -k --sequesterRsrc --keepParent "$app" "$archive"
-          codesign --verify --deep --strict --verbose=2 "$app"
-          codesign -dv --verbose=4 "$app" 2>&1 |
-              grep -q '^Authority=Developer ID Application:'
-          spctl --assess --type execute --verbose=4 "$app"
-          unzip -tq "$archive"
+          sh scripts/verify-adhoc-signatures.sh \
+              ".build/install/bl00p-$APP_VERSION-macos-arm64.zip"
 
       - name: Generate and verify signed appcast
         env:

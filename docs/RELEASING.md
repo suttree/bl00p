@@ -15,22 +15,41 @@ copy of the app.
 
 The release job uses the protected GitHub Environment named `release`. That
 environment requires approval with administrator bypass disabled, accepts only
-the `main` branch and `v*` tags, and holds these environment secrets:
+the `main` branch and `v*` tags, and holds one environment secret:
 
 - `SPARKLE_PRIVATE_KEY`: the base64 Sparkle Ed25519 private seed.
-- `APPLE_DEVELOPER_ID_CERTIFICATE`: the Developer ID Application certificate
-  and private key exported as a `.p12` file, then base64 encoded.
-- `APPLE_CERTIFICATE_PASSWORD`: the password for the `.p12` file.
-- `APPLE_NOTARY_KEY_ID`: an App Store Connect API key ID.
-- `APPLE_NOTARY_ISSUER_ID`: the App Store Connect API issuer ID.
-- `APPLE_NOTARY_PRIVATE_KEY`: the complete contents of the API key `.p8` file.
 
 The app contains the matching public Sparkle Ed25519 key. The release workflow
 cryptographically verifies every generated archive signature against that
-embedded public key before it can publish.
+embedded public key before it can publish. The app, Sparkle framework, XPC
+services, updater, and autoupdate helper are signed inside-out with an ad-hoc
+identity. `scripts/verify-adhoc-signatures.sh` extracts the final ZIP and checks
+that every component is structurally intact, validly signed, and reports
+`Signature=adhoc`.
 
 Never commit or print the private seed. Keep a separate secure backup outside
 the repository; the GitHub secret cannot be read back after it is saved.
+
+## Gatekeeper tradeoff
+
+This release path does not use an Apple Developer account, Developer ID
+certificate, or Apple notarization. macOS therefore does not identify or
+notarize bl00p, and Gatekeeper blocks the normal first double-click after a
+download.
+
+For the first installation, drag `bl00p.app` into `/Applications`,
+Control-click it, choose **Open**, then confirm **Open**. Alternatively, try
+opening it once and choose **Open Anyway** in **System Settings → Privacy &
+Security**. Only do this for an archive downloaded from the project's GitHub
+Releases page.
+
+This manual approval affects the first installation. Later updates still use
+Sparkle's in-app download, install, and relaunch flow. Sparkle's Ed25519
+signature protects the update archive independently of Apple code signing, and
+`SUVerifyUpdateBeforeExtraction` keeps verification ahead of extraction.
+Developer ID signing and notarization can be added later to remove the
+first-launch warning; they are usability hardening, not prerequisites for
+publishing authenticated Sparkle updates.
 
 ## Publish an update
 
@@ -50,12 +69,14 @@ The Release workflow:
 1. verifies that both the workflow and release commits are contained in
    `origin/main`;
 2. waits for approval through the protected `release` environment;
-3. runs the test suite;
-4. signs Sparkle's nested helpers and the app with Developer ID;
-5. notarizes the ZIP with Apple, staples the ticket, and rebuilds the ZIP;
+3. checks that the workflow has no Apple credential or notarization dependency;
+4. runs the test suite;
+5. ad-hoc signs Sparkle's nested helpers and the app, then verifies the
+   signatures again after extracting the final ZIP;
 6. signs the archive with Sparkle Ed25519 and verifies that signature against
    the public key embedded in the archived app; and
-7. publishes the notarized ZIP and verified `appcast.xml` in a GitHub Release.
+7. publishes the ad-hoc-signed ZIP and verified `appcast.xml` in a GitHub
+   Release.
 
 Manual workflow dispatches must be run from `main` and name an existing,
 protected version tag. They cannot select and release an arbitrary branch.
@@ -66,5 +87,6 @@ Installed apps read the latest release feed from:
 https://github.com/suttree/bl00p/releases/latest/download/appcast.xml
 ```
 
-The first Sparkle-enabled version must still be installed manually. Versions
-after that can be downloaded, installed, and relaunched by the app.
+The first Sparkle-enabled version must still be installed and approved
+manually. Versions after that can be downloaded, installed, and relaunched by
+the app.

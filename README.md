@@ -113,9 +113,17 @@ sh scripts/build-installable-app.sh
 ```
 
 The script writes `bl00p.app` and a bundle-preserving ZIP to
-`.build/install/`. The app is ad-hoc signed for local installation: drag the
-app into `/Applications`. GitHub releases use Developer ID signing and Apple
-notarization before the stapled app is archived for distribution.
+`.build/install/`. Both local and GitHub release builds are ad-hoc signed, so
+no Apple Developer account is required. Drag the app into `/Applications`,
+then approve its first launch through macOS: Control-click the app, choose
+**Open**, then confirm **Open**. You can also try opening it normally and use
+**Open Anyway** in **System Settings → Privacy & Security**.
+
+Because the app is not Developer ID signed or notarized, macOS will not
+identify its developer and the normal double-click first launch is blocked.
+Sparkle update archives remain independently protected by Ed25519 signatures;
+the release workflow verifies each signature against the public key embedded
+in the archived app before publishing.
 
 Release cadence, Sparkle signing, and GitHub Actions setup are documented in
 [docs/RELEASING.md](docs/RELEASING.md). This applies to the macOS build only —

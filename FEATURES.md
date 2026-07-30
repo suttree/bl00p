@@ -9,9 +9,10 @@ _No items currently queued._
 
 ## Later
 
-- Set up Apple Developer signing and notarization for the first public release.
-  - Prerequisite: enroll in the Apple Developer Program.
-  - Acceptance: add the Developer ID certificate and App Store Connect
-    notarization credentials to the protected `release` environment, then
-    confirm the release workflow signs, notarizes, staples, and publishes the
-    app successfully.
+- Optionally add Apple Developer signing and notarization to improve Gatekeeper
+  usability for public releases.
+  - This is not a release prerequisite: current releases are ad-hoc signed and
+    Sparkle update archives are authenticated independently with Ed25519.
+  - Acceptance: after enrolling in the Apple Developer Program, add a separate
+    opt-in release path that signs, notarizes, and staples the app while
+    retaining Sparkle signature verification.
