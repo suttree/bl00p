@@ -1,23 +1,54 @@
 # Releasing bl00p
 
-bl00p uses Sparkle 2 and GitHub Releases for signed application updates.
+bl00p uses Sparkle 2 and GitHub Releases for authenticated macOS updates.
 
-## Release cadence
+## Release contract
 
-Pull requests and pushes to `main` run the full test and installable-app build.
-They do not publish updates. Stable updates are published from semantic version
-tags such as `v0.2.0`, or from the manual **Release** workflow.
+Every reviewed push or merge to protected `main` is release-ready. The
+**Release** workflow validates that commit and publishes it automatically as
+the latest stable GitHub Release. Incomplete, experimental, or otherwise
+unreleasable work must not be merged to `main`.
 
-This separation keeps ordinary merges from immediately updating every installed
-copy of the app.
+The repository version in `Resources/Info.plist` defines the release series.
+For a base version `major.minor.patch`, a workflow with
+`github.run_number = N` publishes:
 
-## Signing setup
+```text
+display version: major.minor.(patch + N)
+tag:             vmajor.minor.(patch + N)
+bundle build:    github.run_id
+```
 
-The release job uses the protected GitHub Environment named `release`. That
-environment requires approval with administrator bypass disabled, accepts only
-the `main` branch and `v*` tags, and holds one environment secret:
+The run number and run ID do not change when GitHub retries the same workflow
+run. The run ID is a strictly increasing numeric `CFBundleVersion`, which is
+the value Sparkle uses to order builds. Before packaging, the workflow checks
+it against the repository baseline and the newest published appcast. It also
+rejects a malformed base version or a release tag owned by another commit.
 
-- `SPARKLE_PRIVATE_KEY`: the base64 Sparkle Ed25519 private seed.
+The workflow has no tag trigger, so the tag it creates cannot recursively
+start another release.
+
+## Signing and GitHub setup
+
+The release job uses the protected GitHub Environment named `release`. Configure
+that environment to:
+
+- allow deployments only from `main` through a custom deployment branch
+  policy;
+- have no required deployment reviewers, so a successful `main` build can
+  publish without a manual gate; and
+- hold one environment secret, `SPARKLE_PRIVATE_KEY`, containing the base64
+  Sparkle Ed25519 private seed.
+
+Keep the repository's active **Protect release tags** ruleset scoped to
+`refs/tags/v*`, but do not enable its tag-creation restriction: the Release
+workflow's `GITHUB_TOKEN` must be able to create each new version tag. Keep the
+update and deletion restrictions enabled, with the repository owner as the
+always-allowed bypass actor. This lets automation create a new release tag
+without allowing it to move or delete an existing one. GitHub does not permit
+this user-owned repository to add the official GitHub Actions integration as a
+ruleset bypass actor, so permitting creation while protecting updates and
+deletions is the supported account-free configuration.
 
 The app contains the matching public Sparkle Ed25519 key. The release workflow
 cryptographically verifies every generated archive signature against that
@@ -44,49 +75,52 @@ Security**. Only do this for an archive downloaded from the project's GitHub
 Releases page.
 
 This manual approval affects the first installation. Later updates still use
-Sparkle's in-app download, install, and relaunch flow. Sparkle's Ed25519
-signature protects the update archive independently of Apple code signing, and
-`SUVerifyUpdateBeforeExtraction` keeps verification ahead of extraction.
-Developer ID signing and notarization can be added later to remove the
-first-launch warning; they are usability hardening, not prerequisites for
-publishing authenticated Sparkle updates.
+Sparkle's in-app flow. Sparkle's Ed25519 signature protects the update archive
+independently of Apple code signing, and `SUVerifyUpdateBeforeExtraction` keeps
+verification ahead of extraction. Developer ID signing and notarization can be
+added later to remove the first-launch warning; they are usability hardening,
+not prerequisites for authenticated updates.
 
-## Publish an update
-
-Create and push a semantic version tag from the protected `main` branch. The
-`v*` tag ruleset permits only the repository owner to create, move, or delete
-release tags:
-
-```sh
-git switch main
-git pull --ff-only origin main
-git tag v0.2.0
-git push origin v0.2.0
-```
+## What happens after a merge
 
 The Release workflow:
 
-1. verifies that both the workflow and release commits are contained in
-   `origin/main`;
-2. waits for approval through the protected `release` environment;
-3. checks that the workflow has no Apple credential or notarization dependency;
-4. runs the test suite;
-5. ad-hoc signs Sparkle's nested helpers and the app, then verifies the
-   signatures again after extracting the final ZIP;
-6. signs the archive with Sparkle Ed25519 and verifies that signature against
-   the public key embedded in the archived app; and
-7. publishes the ad-hoc-signed ZIP and verified `appcast.xml` in a GitHub
-   Release.
+1. verifies that the workflow commit is contained in `origin/main`;
+2. derives a unique tag, display version, and monotonic bundle build;
+3. checks that any existing release tag belongs to the same commit;
+4. validates both Actions workflows and the account-free release policy;
+5. runs the complete macOS test suite;
+6. builds the installable ZIP, ad-hoc signs Sparkle's nested helpers and the
+   app, and verifies the signatures after extracting the final archive;
+7. generates the appcast with the Sparkle private key and verifies its asset
+   URL, bundle build, display version, and Ed25519 signature; and
+8. only then creates the tag and publishes the ZIP and `appcast.xml`, explicitly
+   marking the non-draft, non-prerelease GitHub Release as latest.
 
-Manual workflow dispatches must be run from `main` and name an existing,
-protected version tag. They cannot select and release an arbitrary branch.
+A failure in steps 1–7 creates no tag or release. Publication is safe to retry:
+an existing tag must resolve to the same commit, and assets are replaced only
+on that exact release. A native retry reuses the original run number and run
+ID.
 
-Installed apps read the latest release feed from:
+Installed apps read:
 
 ```text
 https://github.com/suttree/bl00p/releases/latest/download/appcast.xml
 ```
 
-The first Sparkle-enabled version must still be installed and approved
-manually. Versions after that can be downloaded, installed, and relaunched by
-the app.
+Sparkle checks that feed while the app is running at a one-hour interval, its
+supported minimum. **Check for Updates…** performs an immediate manual check.
+With automatic updates enabled, Sparkle may download the authenticated update
+in the background and install it when the app quits or is relaunched; the app
+does not force-restart an active session.
+
+## First controlled automatic release
+
+After merging this release automation:
+
+1. confirm the workflow finishes and exactly one release is marked latest;
+2. confirm that release contains the ZIP and `appcast.xml`;
+3. open the latest appcast URL and verify it resolves to that release;
+4. install the preceding build, use **Check for Updates…**, and complete an
+   end-to-end update; and
+5. confirm the updated app reports the new display version and bundle build.

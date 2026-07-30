@@ -22,20 +22,61 @@ metadata=$(
         abort "Appcast has no update item" unless item
         enclosure = REXML::XPath.first(item, "enclosure")
         abort "Appcast update has no enclosure" unless enclosure
+        namespace = {
+          "sparkle" =>
+            "http://www.andymatuschak.org/xml-namespaces/sparkle"
+        }
         signature = enclosure.attributes.get_attribute_ns(
-          "http://www.andymatuschak.org/xml-namespaces/sparkle",
+          namespace.fetch("sparkle"),
           "edSignature"
         )
+        version = REXML::XPath.first(
+          item,
+          "sparkle:version",
+          namespace
+        )
+        display_version = REXML::XPath.first(
+          item,
+          "sparkle:shortVersionString",
+          namespace
+        )
         abort "Appcast enclosure has no Ed25519 signature" unless signature
+        abort "Appcast item has no Sparkle version" unless version
+        abort "Appcast item has no display version" unless display_version
         puts enclosure.attributes.fetch("url")
         puts signature.value
+        puts version.text
+        puts display_version.text
     ' "$appcast"
 )
 enclosure_url=$(printf '%s\n' "$metadata" | sed -n '1p')
 signature=$(printf '%s\n' "$metadata" | sed -n '2p')
+sparkle_version=$(printf '%s\n' "$metadata" | sed -n '3p')
+display_version=$(printf '%s\n' "$metadata" | sed -n '4p')
 
 if [ "$(basename "$enclosure_url")" != "$(basename "$archive")" ]; then
     echo "Appcast enclosure does not reference the supplied archive" >&2
+    exit 1
+fi
+
+if [ -n "${EXPECTED_ASSET_URL:-}" ] &&
+    [ "$enclosure_url" != "$EXPECTED_ASSET_URL" ]
+then
+    echo "Unexpected appcast asset URL: $enclosure_url" >&2
+    exit 1
+fi
+
+if [ -n "${EXPECTED_SPARKLE_VERSION:-}" ] &&
+    [ "$sparkle_version" != "$EXPECTED_SPARKLE_VERSION" ]
+then
+    echo "Unexpected appcast build version: $sparkle_version" >&2
+    exit 1
+fi
+
+if [ -n "${EXPECTED_DISPLAY_VERSION:-}" ] &&
+    [ "$display_version" != "$EXPECTED_DISPLAY_VERSION" ]
+then
+    echo "Unexpected appcast display version: $display_version" >&2
     exit 1
 fi
 
