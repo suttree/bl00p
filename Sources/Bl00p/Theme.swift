@@ -293,7 +293,7 @@ extension AgentStatus {
         case .stopped: .secondary
         case .launching: .orange
         case .working: .blue
-        case .needsApproval, .needsAnswer: .bl00pPinkText
+        case .needsApproval, .needsAnswer, .blocked: .bl00pPinkText
         case .completed: .green
         case .failed: .bl00pPinkText
         }

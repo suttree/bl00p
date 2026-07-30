@@ -137,6 +137,7 @@ enum AgentStatus: String, Codable, Sendable {
     case working
     case needsApproval
     case needsAnswer
+    case blocked
     case completed
     case failed
 
@@ -147,17 +148,18 @@ enum AgentStatus: String, Codable, Sendable {
         case .working: "Working"
         case .needsApproval: "Approval needed"
         case .needsAnswer: "Question"
+        case .blocked: "Blocked"
         case .completed: "Finished"
         case .failed: "Failed"
         }
     }
 
     var needsAttention: Bool {
-        self == .needsApproval || self == .needsAnswer || self == .failed
+        self == .needsApproval || self == .needsAnswer || self == .blocked || self == .failed
     }
 
     var allowsFailedMessageRetry: Bool {
-        self == .stopped || self == .completed || self == .failed
+        self == .stopped || self == .completed || self == .blocked || self == .failed
     }
 }
 
