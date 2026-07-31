@@ -258,7 +258,12 @@ actor GitWorktreeManager: GitWorktreeManaging {
         let branch = try git(["branch", "--show-current"], in: worktree)
             .stdout
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard branch == ownership.branch else {
+        let repository = URL(fileURLWithPath: ownership.repositoryPath)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        let registered = try registeredWorktrees(in: repository)
+        guard !branch.isEmpty,
+              registered[canonicalPath(ownership.worktreePath)] == branch else {
             throw GitWorktreeError.conflictingWorktree(ownership.worktreePath)
         }
         let head = try git(["rev-parse", "HEAD"], in: worktree)
@@ -281,7 +286,7 @@ actor GitWorktreeManager: GitWorktreeManaging {
             sourceName: profile.name,
             repositoryPath: ownership.repositoryPath,
             worktreePath: ownership.worktreePath,
-            branch: ownership.branch,
+            branch: branch,
             baseRevision: ownership.baseRevision,
             headRevision: head,
             taskContext: task,

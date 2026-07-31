@@ -81,6 +81,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Recover managed workflow handoffs when a Builder renames bl00p's checked-out
+  branch, persist the registered replacement branch, and tell Builders to keep
+  the managed branch even when an implementation plan requests another name.
 - Select and smoke-test OpenSSL 3 explicitly in macOS CI and releases so
   Sparkle Ed25519 appcast verification does not fall back to the runner's
   incompatible OpenSSL 1.1 command.
