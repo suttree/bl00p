@@ -1,6 +1,6 @@
 {
   "fill" : {
-    "solid" : "extended-srgb:1.00000,0.41176,0.70588,1.00000"
+    "solid" : "extended-srgb:0.90980,0.23922,0.56863,1.00000"
   },
   "groups" : [
     {
@@ -15,8 +15,8 @@
         "opacity" : 0.5
       },
       "translucency" : {
-        "enabled" : true,
-        "value" : 0.5
+        "enabled" : false,
+        "value" : 1.0
       }
     }
   ],
