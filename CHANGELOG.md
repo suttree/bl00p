@@ -6,9 +6,11 @@ All notable changes to bl00p are documented in this file.
 
 ### Added
 
-- Record structured Builder test-command outcomes and completion times, and
-  automatically issue up to two persisted, targeted Builder handoff repairs
-  before pausing with the unmet requirement and latest evidence.
+- Record structured Builder test-command outcomes and completion times, classify
+  only recognized test invocations, and automatically issue up to two persisted,
+  targeted Builder handoff repairs before pausing with the unmet requirement
+  and latest evidence. Permission-denied test runs can advance as unverified;
+  denied commit actions remain approval-gated.
 
 - Add compact, structured Manager workflow cards for completed Builder,
   revision, Reviewer, and Documenter / PR Writer stages, plus a prominent
