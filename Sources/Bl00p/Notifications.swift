@@ -121,7 +121,13 @@ final class AppNotificationController:
 
     func requestAuthorization() {
         center.delegate = self
-        center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        center.requestAuthorization(
+            options: [.alert, .sound, .badge]
+        ) { @Sendable _, _ in
+            // UserNotifications may invoke this on a private queue. Keeping
+            // the capture-free callback explicitly Sendable prevents it from
+            // inheriting this method's main-actor isolation.
+        }
     }
 
     func post(_ notice: AgentAttentionNotice, for profile: BotProfile) {

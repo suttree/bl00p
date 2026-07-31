@@ -83,6 +83,8 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Prevent macOS launch crashes after an update when the notification
+  authorization result is delivered on a background callback queue.
 - Recover managed workflow handoffs when a Builder renames bl00p's checked-out
   branch, persist the registered replacement branch, and tell Builders to keep
   the managed branch even when an implementation plan requests another name.
