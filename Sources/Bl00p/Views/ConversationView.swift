@@ -29,6 +29,7 @@ struct ConversationView: View {
             VStack(spacing: 0) {
                 #if !os(macOS)
                 ConversationHeader(
+                    profile: profile,
                     session: session,
                     displayStatus: model.conversationDisplayStatus(
                         for: profile.id,
@@ -147,6 +148,7 @@ struct ConversationView: View {
             .toolbar {
                 ToolbarItem(placement: .navigation) {
                     ConversationHeaderIdentity(
+                        profile: profile,
                         session: session,
                         displayStatus: model.conversationDisplayStatus(
                             for: profile.id,
@@ -650,6 +652,7 @@ private struct WorkflowStageIndicator: View {
 }
 
 private struct ConversationHeader: View {
+    let profile: BotProfile
     let session: AgentSessionState
     let displayStatus: AgentStatus
     let stop: () -> Void
@@ -661,6 +664,7 @@ private struct ConversationHeader: View {
     var body: some View {
         HStack(spacing: 12) {
             ConversationHeaderIdentity(
+                profile: profile,
                 session: session,
                 displayStatus: displayStatus
             )
@@ -684,19 +688,27 @@ private struct ConversationHeader: View {
 }
 
 private struct ConversationHeaderIdentity: View {
+    let profile: BotProfile
     let session: AgentSessionState
     let displayStatus: AgentStatus
 
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                StatusPill(status: displayStatus)
-
-                Text(directoryLabel)
-                    .font(.bl00p(.caption1))
-                    .foregroundStyle(.secondary)
+                Text(profile.name)
+                    .font(.bl00p(.headline, weight: .semibold))
                     .lineLimit(1)
-                    .truncationMode(.middle)
+
+                HStack(spacing: 8) {
+                    StatusPill(status: displayStatus)
+
+                    Text(directoryLabel)
+                        .font(.bl00p(.caption1))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(minWidth: 0, alignment: .leading)
+                }
             }
             .frame(minWidth: 0, alignment: .leading)
         }
