@@ -208,7 +208,9 @@ remain available in the corresponding participant conversation.
 Sidebar notifications follow the action required: a successful managed stage
 badges only the Manager, while a blocked, failed, approval, or question state
 badges only the participant that needs attention. Standalone bot completions
-continue to badge their own row.
+continue to badge their own row. Completion notices for Builder, Reviewer, and
+Publisher bots simply report that the agent finished its turn; Manager notices
+invite the user to review the Manager's update in bl00p.
 
 Before each Reviewer pass, bl00p requires a clean Builder worktree, the
 appropriate committed revision, and passing test evidence. If a Builder turn
