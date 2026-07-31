@@ -2352,6 +2352,48 @@ func handoffEvidenceIgnoresGenericToolOutputThatMentionsTests() {
 }
 
 @Test
+func handoffEvidencePrefersStructuredOutcomesAndCompletionTimes() {
+    let startedAt = Date(timeIntervalSince1970: 10)
+    let completedAt = Date(timeIntervalSince1970: 20)
+
+    let passed = HandoffTestEvidence.latest(in: [
+        .init(
+            kind: .command,
+            title: "Running command",
+            text: "env CI=1 npm exec vitest run && bundle exec rspec",
+            detail: "tests passed",
+            timestamp: startedAt,
+            commandOutcome: .succeeded,
+            commandCompletedAt: completedAt
+        )
+    ])
+    #expect(passed.status == .passed)
+    #expect(passed.recordedAt == completedAt)
+
+    let failed = HandoffTestEvidence.latest(in: [
+        .init(
+            kind: .command,
+            title: "Command finished successfully",
+            text: "swift test",
+            detail: "0 failures",
+            commandOutcome: .failed,
+            commandCompletedAt: completedAt
+        )
+    ])
+    #expect(failed.status == .failed)
+
+    let running = HandoffTestEvidence.latest(in: [
+        .init(
+            kind: .command,
+            title: "Command finished",
+            text: "npx jest",
+            commandOutcome: .running
+        )
+    ])
+    #expect(running.status == .notRun)
+}
+
+@Test
 func oneBuilderProfileGetsUniqueSessionWorktreesAndCleanupRetainsBranches() async throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("bl00p-session-worktrees-\(UUID().uuidString)")
@@ -3065,7 +3107,9 @@ func invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns() async throws {
             managerWorkflows: [managerID: workflow]
         )
     )
-    let runtime = OrchestrationRecordingRuntime()
+    // Keep this legacy rejection matrix focused on blocked-turn behavior;
+    // ordinary completed turns now receive automatic repair attempts.
+    let runtime = BuilderStatusStubRuntime(builderFinalStatus: .blocked)
     let model = AppModel(
         runtime: runtime,
         worktrees: StubWorktreeManager(
@@ -3096,7 +3140,7 @@ func invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns() async throws {
             == "The Builder revision pass has no new local commit."
     )
     #expect(paused.latestHandoff?.headRevision == initialPackage.headRevision)
-    #expect(await runtime.calls.map(\.role) == [.builder])
+    #expect(await runtime.calls == [.builder])
     #expect(model.session(for: publisherID).entries.isEmpty)
 
     model.send("Commit the remaining changes", to: builderID)
@@ -3114,7 +3158,7 @@ func invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns() async throws {
             == "The Builder handoff still has uncommitted changes."
     )
     #expect(dirty.latestHandoff?.headRevision == initialPackage.headRevision)
-    #expect(await runtime.calls.map(\.role) == [.builder, .builder])
+    #expect(await runtime.calls == [.builder, .builder])
     #expect(model.session(for: publisherID).entries.isEmpty)
 
     model.send("Fix the tests", to: builderID)
@@ -3133,7 +3177,7 @@ func invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns() async throws {
     )
     #expect(failing.latestHandoff?.headRevision == initialPackage.headRevision)
     #expect(
-        await runtime.calls.map(\.role)
+        await runtime.calls
             == [.builder, .builder, .builder]
     )
     #expect(model.session(for: publisherID).entries.isEmpty)
@@ -3155,7 +3199,7 @@ func invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns() async throws {
             == initialPackage.headRevision
     )
     #expect(
-        await runtime.calls.map(\.role)
+        await runtime.calls
             == [.builder, .builder, .builder, .builder]
     )
     #expect(model.session(for: publisherID).entries.isEmpty)
@@ -3174,7 +3218,7 @@ func invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns() async throws {
     )
     #expect(stale.latestHandoff?.headRevision == initialPackage.headRevision)
     #expect(
-        await runtime.calls.map(\.role)
+        await runtime.calls
             == [.builder, .builder, .builder, .builder, .builder]
     )
     #expect(model.session(for: publisherID).entries.isEmpty)
@@ -5810,7 +5854,10 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
         workingTreeSummary: "Clean"
     )
     let workflowWorktrees = StubWorktreeManager(
-        packages: [unfinishedPackage],
+        // The Builder runtime completes immediately in this plan-card test.
+        // Supply the bounded repair budget so its unrelated background
+        // handoff validation cannot exhaust the fixture.
+        packages: [unfinishedPackage, unfinishedPackage, unfinishedPackage],
         preparedOwnership: workflowOwnership
     )
     let model = AppModel(

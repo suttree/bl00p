@@ -850,9 +850,14 @@ actor ClaudeRuntime: AgentRuntime {
 
             let result = readableContent(block["content"])
             var entry = previous
-            entry.title = (block["is_error"]?.boolValue == true)
+            let failed = block["is_error"]?.boolValue == true
+            entry.title = failed
                 ? "Tool failed"
                 : "Tool finished"
+            if entry.kind == .command {
+                entry.commandOutcome = failed ? .failed : .succeeded
+                entry.commandCompletedAt = .now
+            }
             if !result.isEmpty {
                 entry.detail = result.trimmedForClaudeTimeline
             }
@@ -1103,7 +1108,11 @@ actor ClaudeRuntime: AgentRuntime {
             kind: kind,
             title: title,
             text: text,
-            detail: result?.trimmedForClaudeTimeline ?? input.compactDescription
+            detail: result?.trimmedForClaudeTimeline ?? input.compactDescription,
+            commandOutcome: kind == .command
+                ? (isError ? .failed : .running)
+                : nil,
+            commandCompletedAt: isError && kind == .command ? .now : nil
         )
     }
 

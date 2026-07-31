@@ -589,6 +589,11 @@ struct ManagerWorkflowDispatch: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+enum BuilderHandoffRepairPass: String, Codable, Hashable, Sendable {
+    case initial
+    case revision
+}
+
 struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var managerProfileID: UUID
@@ -618,6 +623,10 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     /// and auto-advance the next time the Builder reaches a terminal status,
     /// instead of requiring a manual resume.
     var awaitingBuilderHandoffRetry: Bool
+    /// Persisted automatic-repair state prevents duplicate retries after a
+    /// relaunch and bounds recovery for each initial or revision pass.
+    var builderHandoffRepairAttempts: Int
+    var builderHandoffRepairPass: BuilderHandoffRepairPass?
     var startedAt: Date
     var updatedAt: Date
     var participantSessionIDs: [AgentRole: UUID]
@@ -647,6 +656,8 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         isPaused: Bool = false,
         pauseReason: String? = nil,
         awaitingBuilderHandoffRetry: Bool = false,
+        builderHandoffRepairAttempts: Int = 0,
+        builderHandoffRepairPass: BuilderHandoffRepairPass? = nil,
         startedAt: Date = .now,
         updatedAt: Date = .now,
         participantSessionIDs: [AgentRole: UUID] = [:]
@@ -675,6 +686,8 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         self.isPaused = isPaused
         self.pauseReason = pauseReason
         self.awaitingBuilderHandoffRetry = awaitingBuilderHandoffRetry
+        self.builderHandoffRepairAttempts = builderHandoffRepairAttempts
+        self.builderHandoffRepairPass = builderHandoffRepairPass
         self.startedAt = startedAt
         self.updatedAt = updatedAt
         self.participantSessionIDs = participantSessionIDs
@@ -689,6 +702,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         case verificationSummary, publisherSummary, revisionRounds
         case latestHandoff, reviewSummary, revisionStartedAt
         case isPaused, pauseReason, awaitingBuilderHandoffRetry
+        case builderHandoffRepairAttempts, builderHandoffRepairPass
         case startedAt, updatedAt, participantSessionIDs
     }
 
@@ -754,6 +768,14 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
             Bool.self,
             forKey: .awaitingBuilderHandoffRetry
         ) ?? false
+        builderHandoffRepairAttempts = try container.decodeIfPresent(
+            Int.self,
+            forKey: .builderHandoffRepairAttempts
+        ) ?? 0
+        builderHandoffRepairPass = try container.decodeIfPresent(
+            BuilderHandoffRepairPass.self,
+            forKey: .builderHandoffRepairPass
+        )
         startedAt = try container.decode(Date.self, forKey: .startedAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
         participantSessionIDs = try container.decodeIfPresent(
@@ -796,6 +818,14 @@ enum ApprovalState: String, Codable, Sendable {
 
 enum TimelineContentFormat: String, Codable, Sendable {
     case markdown
+}
+
+/// Structured lifecycle state for a shell command.  This lets workflow gates
+/// consume runtime evidence rather than inferring success from UI titles.
+enum CommandOutcome: String, Codable, Hashable, Sendable {
+    case running
+    case succeeded
+    case failed
 }
 
 enum WorkflowUpdateOutcome: String, Codable, Hashable, Sendable {
@@ -1033,6 +1063,11 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
     var questions: [StructuredQuestion]?
     var questionResolution: QuestionResolution?
     var workflowUpdate: WorkflowUpdate?
+    /// Omitted by older persisted timelines, which retain legacy title-based
+    /// evidence classification.
+    var commandOutcome: CommandOutcome?
+    /// Terminal command time, separate from the card creation timestamp.
+    var commandCompletedAt: Date?
 
     init(
         id: UUID = UUID(),
@@ -1047,7 +1082,9 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
         contentFormat: TimelineContentFormat? = nil,
         questions: [StructuredQuestion]? = nil,
         questionResolution: QuestionResolution? = nil,
-        workflowUpdate: WorkflowUpdate? = nil
+        workflowUpdate: WorkflowUpdate? = nil,
+        commandOutcome: CommandOutcome? = nil,
+        commandCompletedAt: Date? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -1062,6 +1099,8 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
         self.questions = questions
         self.questionResolution = questionResolution
         self.workflowUpdate = workflowUpdate
+        self.commandOutcome = commandOutcome
+        self.commandCompletedAt = commandCompletedAt
     }
 }
 

@@ -6,6 +6,10 @@ All notable changes to bl00p are documented in this file.
 
 ### Added
 
+- Record structured Builder test-command outcomes and completion times, and
+  automatically issue up to two persisted, targeted Builder handoff repairs
+  before pausing with the unmet requirement and latest evidence.
+
 - Add compact, structured Manager workflow cards for completed Builder,
   revision, Reviewer, and Documenter / PR Writer stages, plus a prominent
   **Draft PR created** card with branch, verification, reviewer result, and

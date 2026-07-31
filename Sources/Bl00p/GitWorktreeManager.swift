@@ -442,58 +442,93 @@ struct HandoffTestEvidence: Equatable {
     let summary: String
     let recordedAt: Date?
 
-    /// Shared with the Builder handoff readiness gate so it can recognize a
-    /// blocked test command instead of trusting any recorded denial.
-    static let knownTestCommands = [
-        "swift test",
-        "xcodebuild test",
-        "npm test",
-        "npm run test",
-        "pnpm test",
-        "yarn test",
-        "pytest",
-        "cargo test",
-        "go test",
-        "bundle exec rspec",
-        "make test",
-        "make check",
-        "just test",
-        "ctest",
-        "dotnet test",
-        "mvn test",
-        "gradle test",
-        "gradlew test",
-        "mix test",
-        "phpunit",
-        "composer test",
-        "deno test",
-        "bun test",
-        "rake test",
-        "bin/test",
-        "scripts/test",
-        "scripts/check"
-    ]
+    /// Shared by completed-command and permission-denial classification. It
+    /// intentionally only examines a command invocation, never tool output:
+    /// `Read`/`Grep` cards mentioning passing tests are not test evidence.
+    static func isTestCommand(_ command: String) -> Bool {
+        let normalized = command.lowercased()
+            .replacingOccurrences(of: "\n", with: " ")
+        let segments = normalized.split(whereSeparator: { character in
+            character == ";" || character == "|" || character == "&"
+        })
+        return segments.contains { segment in
+            looksLikeTestInvocation(String(segment))
+        }
+    }
+
+    private static func looksLikeTestInvocation(_ command: String) -> Bool {
+        let cleaned = command.trimmingCharacters(
+            in: CharacterSet(charactersIn: "•- ")
+        )
+        let tokens = cleaned.split(whereSeparator: \.isWhitespace)
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\"'")) }
+        guard !tokens.isEmpty else { return false }
+
+        var index = 0
+        // Common wrappers can precede a runner, including `env FOO=bar`,
+        // timing/priority wrappers, and package-manager executors.
+        while index < tokens.count {
+            let token = tokens[index]
+            if token == "env" || token == "command" || token == "time"
+                || token == "nice" || token == "nohup" {
+                index += 1
+                while index < tokens.count, tokens[index].contains("=") {
+                    index += 1
+                }
+                continue
+            }
+            if token == "timeout" {
+                index += min(2, tokens.count - index)
+                continue
+            }
+            break
+        }
+        guard index < tokens.count else { return false }
+
+        let executable = tokens[index]
+            .split(separator: "/").last.map(String.init) ?? tokens[index]
+        let arguments = Array(tokens.dropFirst(index + 1))
+        let firstArgument = arguments.first ?? ""
+        let secondArgument = arguments.dropFirst().first ?? ""
+
+        if ["pytest", "ctest", "phpunit", "rspec", "vitest", "jest",
+            "ava", "mocha", "tap", "phpunit", "phpstan"].contains(executable) {
+            return true
+        }
+        if executable == "swift" || executable == "xcodebuild"
+            || executable == "cargo" || executable == "go"
+            || executable == "dotnet" || executable == "deno"
+            || executable == "bun" || executable == "mix"
+            || executable == "rake" || executable == "mvn" {
+            return firstArgument == "test"
+        }
+        if executable == "gradle" || executable == "gradlew" {
+            return arguments.contains { $0 == "test" || $0.hasPrefix("test") }
+        }
+        if executable == "make" || executable == "just" {
+            return ["test", "check", "verify"].contains(firstArgument)
+        }
+        if executable == "bundle" {
+            return firstArgument == "exec" && ["rspec", "cucumber"].contains(secondArgument)
+        }
+        if executable == "npm" || executable == "pnpm" || executable == "yarn" {
+            return firstArgument == "test"
+                || (firstArgument == "run" && ["test", "check", "verify"].contains(secondArgument))
+                || (firstArgument == "exec" && ["vitest", "jest", "mocha"].contains(secondArgument))
+        }
+        if executable == "npx" {
+            return ["vitest", "jest", "mocha", "ava", "cypress"].contains(firstArgument)
+        }
+        // Project-owned test wrappers are allowed; arbitrary shell commands
+        // are not inferred from their output.
+        return executable == "test" || executable == "check" || executable == "verify"
+            || executable.hasPrefix("test-") || executable.hasPrefix("check-")
+            || executable.hasPrefix("verify-")
+    }
 
     static func latest(in entries: [TimelineEntry]) -> HandoffTestEvidence {
-        let testEntry = entries.last { entry in
-            guard entry.kind == .command else { return false }
-            let command = entry.text.lowercased()
-            let detail = entry.detail?.lowercased() ?? ""
-            let outputReportsTests = [
-                "test passed",
-                "tests passed",
-                "test suite passed",
-                "test suites passed",
-                "0 failures",
-                "0 failed"
-            ].contains(where: detail.contains)
-            let commandLooksLikeShellCommand =
-                command.contains(" ")
-                    || command.contains("/")
-                    || command.contains(".")
-                    || command.contains("-")
-            return knownTestCommands.contains(where: command.contains)
-                || (outputReportsTests && commandLooksLikeShellCommand)
+        let testEntry = entries.last {
+            $0.kind == .command && isTestCommand($0.text)
         }
 
         guard let testEntry else {
@@ -504,11 +539,11 @@ struct HandoffTestEvidence: Equatable {
             )
         }
 
-        let failed = testEntry.title?
+        let legacyFailed = testEntry.title?
             .localizedCaseInsensitiveContains("failed") == true
             || testEntry.title?
                 .localizedCaseInsensitiveContains("error") == true
-        let explicitlyCompleted = testEntry.title?
+        let legacyCompleted = testEntry.title?
             .localizedCaseInsensitiveContains("finished") == true
             || testEntry.title?
                 .localizedCaseInsensitiveContains("completed") == true
@@ -518,16 +553,29 @@ struct HandoffTestEvidence: Equatable {
                 .localizedCaseInsensitiveContains("success") == true
             || testEntry.title?
                 .localizedCaseInsensitiveContains("passed") == true
-        let stillRunning = testEntry.title?
+            || testEntry.title?
+                .localizedCaseInsensitiveContains("exited 0") == true
+        let legacyRunning = testEntry.title?
             .localizedCaseInsensitiveContains("running") == true
             || testEntry.title?
                 .localizedCaseInsensitiveContains("requested") == true
-        let completed =
-            explicitlyCompleted
-                || (testEntry.title != nil && !failed && !stillRunning)
-        let status: HandoffTestStatus = failed
-            ? .failed
-            : (completed ? .passed : .notRun)
+        let status: HandoffTestStatus
+        switch testEntry.commandOutcome {
+        case .failed:
+            status = .failed
+        case .succeeded:
+            // A terminal failure marker is safety-critical even when a
+            // provider has emitted contradictory success state.
+            status = legacyFailed ? .failed : .passed
+        case .running:
+            status = .notRun
+        case nil:
+            // Old persisted entries have no structured state. Explicit
+            // failures always win over success-looking text or generic titles.
+            status = legacyFailed
+                ? .failed
+                : (legacyCompleted && !legacyRunning ? .passed : .notRun)
+        }
         let detail = testEntry.detail?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let summary = [
@@ -540,7 +588,7 @@ struct HandoffTestEvidence: Equatable {
         return .init(
             status: status,
             summary: summary,
-            recordedAt: testEntry.timestamp
+            recordedAt: testEntry.commandCompletedAt ?? testEntry.timestamp
         )
     }
 }
