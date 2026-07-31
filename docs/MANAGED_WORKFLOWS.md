@@ -123,10 +123,9 @@ There is exactly one readiness-gate implementation
 passes and used from the same `validate` call on the live auto-advance path.
 
 Workflow handoffs should carry the Manager's implementation plan when one was
-approved, falling back to the original workflow request. This applies to both
-automatic dispatch and the manual Hand off button. Generic fallback text such
-as `No task context was captured.` must not be delivered to workflow
-Reviewers.
+approved, falling back to the original workflow request. Generic fallback text
+such as `No task context was captured.` must not be delivered to workflow
+Reviewers during automatic dispatch.
 
 ## Approval state
 

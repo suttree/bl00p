@@ -30,16 +30,8 @@ struct ConversationView: View {
                 ConversationHeader(
                     profile: profile,
                     session: session,
-                    handoffTargets: model.profiles.filter { $0.id != profile.id },
                     stop: {
                         model.stop(profile.id, sessionID: sessionID)
-                    },
-                    handoff: { targetID in
-                        model.handoff(
-                            from: profile.id,
-                            to: targetID,
-                            sourceSessionID: sessionID
-                        )
                     },
                     chooseRepository: {
                         model.chooseRepository(for: sessionID)
@@ -608,9 +600,7 @@ private struct WorkflowStageIndicator: View {
 private struct ConversationHeader: View {
     let profile: BotProfile
     let session: AgentSessionState
-    let handoffTargets: [BotProfile]
     let stop: () -> Void
-    let handoff: (UUID) -> Void
     let chooseRepository: () -> Void
     let repositoryCanBeChanged: Bool
     let openInTerminal: () -> Void
@@ -675,29 +665,6 @@ private struct ConversationHeader: View {
                 }
                 .buttonStyle(.bordered)
                 .help("Open \(terminalTargetPath) in a terminal")
-            }
-
-            if profile.role == .builder,
-               session.worktree != nil,
-               !handoffTargets.isEmpty {
-                Menu {
-                    ForEach(handoffTargets) { target in
-                        Button {
-                            handoff(target.id)
-                        } label: {
-                            Label(
-                                "\(target.name) · \(target.role.displayName)",
-                                systemImage: "arrowshape.turn.up.right"
-                            )
-                        }
-                    }
-                } label: {
-                    Label("Hand off", systemImage: "arrowshape.turn.up.right")
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .disabled(isRunning)
-                .help("Package this branch, task, and test state for another bot")
             }
 
             if isRunning {

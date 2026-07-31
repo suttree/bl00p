@@ -47,6 +47,8 @@ All notable changes to bl00p are documented in this file.
 
 ### Changed
 
+- Remove the manual **Hand off** control from Builder conversations; managed
+  workflows continue to deliver Builder context to Reviewers automatically.
 - Publish macOS updates with account-free ad-hoc code signing while retaining
   Sparkle Ed25519 archive verification; Apple Developer signing and
   notarization are now optional Gatekeeper usability hardening.
