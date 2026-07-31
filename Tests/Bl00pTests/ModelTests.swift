@@ -4745,6 +4745,18 @@ func workflowUpdateSummariesRemoveProtocolCommandsAndDuplicates() throws {
             "No assistant summary was captured."
         ) == nil
     )
+    let bounded = try #require(
+        WorkflowUpdateSummarizer.concise(
+            """
+            Implementation and tests completed successfully.
+
+            Caveat: deployment verification still needs production access.
+            """,
+            maximumLength: 60
+        )
+    )
+    #expect(bounded.count <= 60)
+    #expect(bounded.hasSuffix("…"))
 }
 
 @MainActor

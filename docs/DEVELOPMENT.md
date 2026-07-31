@@ -116,6 +116,8 @@ Viewing the Manager chat clears its unread state through the normal
 `markSessionViewed` path.
 
 Model coverage should verify standalone background chats, selected-chat
+switching, Manager workflow scoping, attention routing, and single-count Dock
+badges. A focused verification run is:
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \

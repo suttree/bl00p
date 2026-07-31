@@ -926,6 +926,7 @@ enum WorkflowUpdateSummarizer {
         guard !unique.isEmpty else { return nil }
 
         var summary = ""
+        var includedParagraphCount = 0
         for paragraph in unique {
             let candidate = summary.isEmpty
                 ? paragraph
@@ -934,16 +935,19 @@ enum WorkflowUpdateSummarizer {
                 break
             }
             summary = candidate
+            includedParagraphCount += 1
             if summary.count >= maximumLength / 2 {
                 break
             }
         }
         if summary.isEmpty {
             summary = String(unique[0].prefix(maximumLength))
+            if unique[0].count <= maximumLength {
+                includedParagraphCount = 1
+            }
         }
-        if summary.count == maximumLength
-            && unique[0].count > maximumLength {
-            summary = String(summary.dropLast())
+        if includedParagraphCount < unique.count {
+            summary = String(summary.prefix(max(0, maximumLength - 1)))
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 + "…"
         }

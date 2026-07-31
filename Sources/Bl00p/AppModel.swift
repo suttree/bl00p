@@ -2100,9 +2100,11 @@ final class AppModel: ObservableObject {
             switch status {
             case .needsAnswer:
                 if let workflow = managerWorkflows[managerID],
-                   workflow.stage == .reviewing
-                    || workflow.stage == .verifying,
-                   latestReviewOutput(for: profileID).disposition != nil {
+                   isStructuredReviewCompletion(
+                       sessionID: profileID,
+                       reportedStatus: status,
+                       workflow: workflow
+                   ) {
                     if var participant = sessions[profileID] {
                         participant.status = .completed
                         participant.hasUnreadCompletion = false
@@ -2168,17 +2170,17 @@ final class AppModel: ObservableObject {
 
     private func isStructuredReviewCompletion(
         sessionID: UUID,
-        reportedStatus: AgentStatus
+        reportedStatus: AgentStatus,
+        workflow: ManagerWorkflow
     ) -> Bool {
         guard reportedStatus == .needsAnswer,
+              workflow.stage == .reviewing
+                || workflow.stage == .verifying,
+              expectedProfileID(for: workflow) == sessionID,
               latestReviewOutput(for: sessionID).disposition != nil else {
             return false
         }
-        return managerWorkflows.contains { _, workflow in
-            (workflow.stage == .reviewing
-                || workflow.stage == .verifying)
-                && expectedProfileID(for: workflow) == sessionID
-        }
+        return true
     }
 
     private func clearManagerWorkflowUnread(_ managerID: UUID) {
@@ -4074,10 +4076,13 @@ final class AppModel: ObservableObject {
         case .status(let status):
             let previousStatus = state.status
             let structuredReviewCompleted =
-                isStructuredReviewCompletion(
-                    sessionID: profileID,
-                    reportedStatus: status
-                )
+                managerWorkflows.values.contains {
+                    isStructuredReviewCompletion(
+                        sessionID: profileID,
+                        reportedStatus: status,
+                        workflow: $0
+                    )
+                }
             let storedStatus: AgentStatus =
                 structuredReviewCompleted ? .completed : status
             notice = AgentAttentionNotice.transition(
