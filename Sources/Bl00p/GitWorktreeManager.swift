@@ -492,7 +492,7 @@ struct HandoffTestEvidence: Equatable {
         let secondArgument = arguments.dropFirst().first ?? ""
 
         if ["pytest", "ctest", "phpunit", "rspec", "vitest", "jest",
-            "ava", "mocha", "tap", "phpunit", "phpstan"].contains(executable) {
+            "ava", "mocha", "tap", "phpunit"].contains(executable) {
             return true
         }
         if executable == "swift" || executable == "xcodebuild"

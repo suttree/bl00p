@@ -191,7 +191,9 @@ The Builder handoff readiness gate is covered by:
 - `revisitedBuilderTurnDoesNotReuseAStaleBlockedActionFromAnEarlierTurn`
 - `blockedBuilderTurnWithFailingTestsStillPauses`
 - `blockedBuilderTurnWithoutCommitStillPausesWithAnActionableReason`
-- `pausedBuilderHandoffSelfHealsWhenTheBuilderNextFinishesReady`
+- `completedBuilderHandoffAutomaticallyRepairsAndAdvances`
+- `completedBuilderHandoffStopsAfterBoundedAutomaticRepairs`
+- `builderHandoffRepairStateSurvivesWorkflowPersistence`
 - `invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns`
 
 When a test seeds a persisted workflow directly at stage `building` or
