@@ -121,15 +121,12 @@ final class AppNotificationController:
 
     func requestAuthorization() {
         center.delegate = self
-        Task {
-            // The completion-handler API may invoke its closure on a private
-            // UserNotifications queue. In Swift 6, a closure created from
-            // this main-actor-isolated method inherits that isolation and
-            // traps when the framework calls it off the main actor. The async
-            // overlay resumes this task on the correct executor instead.
-            _ = try? await center.requestAuthorization(
-                options: [.alert, .sound, .badge]
-            )
+        center.requestAuthorization(
+            options: [.alert, .sound, .badge]
+        ) { @Sendable _, _ in
+            // UserNotifications may invoke this on a private queue. Keeping
+            // the capture-free callback explicitly Sendable prevents it from
+            // inheriting this method's main-actor isolation.
         }
     }
 
