@@ -81,6 +81,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Recreate and re-pin the transcript scroll container when switching chats so
+  outgoing scroll offsets, lazy-layout state, and late viewport callbacks
+  cannot leave the incoming chat blank.
 - Route successful managed-stage badges only to the selected Manager chat and
   route blocked, failed, approval, and question badges only to the participant
   that needs attention, avoiding duplicate sidebar and Dock counts.

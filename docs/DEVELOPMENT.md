@@ -7,6 +7,9 @@ conversation. The coordinator owns the session identity, latest-content
 following state, near-bottom tolerance, and one coalesced scroll request. The
 view scrolls only to its session-specific bottom sentinel; it must not retain a
 per-entry scroll-position binding alongside imperative `scrollTo` calls.
+The `ScrollViewReader` subtree also has session-specific identity so SwiftUI
+recreates the native scroll container rather than carrying an outgoing chat's
+offset or lazy-layout state into the incoming chat.
 
 Content changes include both a new timeline entry and in-place mutation of the
 final entry, which is required for streamed assistant text. While following,
@@ -16,7 +19,10 @@ When a user deliberately moves beyond the 80-point near-bottom tolerance,
 following is suspended and **Jump to Latest** is shown. Explicitly jumping to
 latest, sending a message, or returning within the tolerance resumes following.
 Changing sessions resets the coordinator and invalidates pending requests so a
-previous chat cannot affect the new chat.
+previous chat cannot affect the new chat. The reset deliberately does not
+schedule its initial scroll until the replacement transcript reports that it
+has mounted. Viewport reports and scroll completions include their session
+identity and are ignored after that session is no longer current.
 
 macOS observes scroll geometry through `TranscriptScrollObserver`. Linux and
 SwiftOpenUI do not expose equivalent geometry, so the transcript uses a
@@ -26,7 +32,8 @@ that fallback threshold aligned with `TranscriptScrollCoordinator.nearBottomTole
 The UI-independent state machine has focused coverage for initial positioning,
 appends, streamed mutations, layout growth, near-bottom behavior, history
 browsing, explicit return to latest, message sends, small Linux drag gestures,
-and session resets. Run the focused tests with:
+session resets, rapid switching, and stale lifecycle callbacks. Run the focused
+tests with:
 
 ```sh
 swift test --disable-sandbox --filter TranscriptScrollCoordinatorTests
