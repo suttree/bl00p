@@ -103,6 +103,14 @@ protocol AgentNotificationDelivering {
 
 #if os(macOS)
 
+/// UserNotifications invokes authorization completions on an arbitrary queue.
+/// Keep this handler at file scope so it is not inferred to be main-actor
+/// isolated from `AgentNotificationDelivering.requestAuthorization()`.
+private func ignoreNotificationAuthorizationResult(
+    _: Bool,
+    _: (any Error)?
+) {}
+
 final class AppNotificationController:
     NSObject,
     AgentNotificationDelivering,
@@ -122,12 +130,9 @@ final class AppNotificationController:
     func requestAuthorization() {
         center.delegate = self
         center.requestAuthorization(
-            options: [.alert, .sound, .badge]
-        ) { @Sendable _, _ in
-            // UserNotifications may invoke this on a private queue. Keeping
-            // the capture-free callback explicitly Sendable prevents it from
-            // inheriting this method's main-actor isolation.
-        }
+            options: [.alert, .sound, .badge],
+            completionHandler: ignoreNotificationAuthorizationResult
+        )
     }
 
     func post(_ notice: AgentAttentionNotice, for profile: BotProfile) {
