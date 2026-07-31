@@ -2044,7 +2044,8 @@ final class AppModel: ObservableObject {
                 planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
                 pauseWorkflow(
                     managerID,
-                    reason: "\(profileNameForSession(profileID)) needs attention: \(status.label)."
+                    reason: "\(profileNameForSession(profileID)) needs attention: \(status.label).",
+                    presentation: .failure
                 )
             case .stopped:
                 planningTurnAssistantEntryIDs.removeValue(forKey: profileID)
@@ -2136,7 +2137,11 @@ final class AppModel: ObservableObject {
         save(immediately: true)
     }
 
-    private func pauseWorkflow(_ managerID: UUID, reason: String) {
+    private func pauseWorkflow(
+        _ managerID: UUID,
+        reason: String,
+        presentation: TimelineEntryPresentation? = nil
+    ) {
         guard var workflow = managerWorkflows[managerID],
               workflow.stage != .completed else { return }
         let shouldAnnounce = !workflow.isPaused || workflow.pauseReason != reason
@@ -2150,7 +2155,8 @@ final class AppModel: ObservableObject {
                 .init(
                     kind: .system,
                     text: "Workflow paused",
-                    detail: reason
+                    detail: reason,
+                    presentation: presentation
                 ),
                 to: managerID
             )

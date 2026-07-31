@@ -3464,6 +3464,106 @@ func blockedBuilderTurnWithReadyHandoffAdvancesWorkflowAutomatically() async thr
 
 @MainActor
 @Test
+func failedManagedParticipantAddsFailureWarningToManagerThread() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-managed-failure-warning-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let fixture = managedWorkflowFixture()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: fixture.builder.id,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/managed-failure-warning",
+        baseRevision: "abc123"
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: fixture.manager.id,
+        repositoryPath: ownership.repositoryPath,
+        team: fixture.team,
+        request: "Ship the warning card",
+        stage: .building
+    )
+    let store = AppStateStore(
+        fileURL: directory.appendingPathComponent("state.json")
+    )
+    store.save(
+        PersistedAppState(
+            profiles: fixture.profiles,
+            sessions: Dictionary(
+                uniqueKeysWithValues: fixture.profiles.map { profile in
+                    (
+                        profile.id,
+                        AgentSessionState(repositoryPath: ownership.repositoryPath)
+                    )
+                }
+            ),
+            selectedBotID: fixture.manager.id,
+            managerWorkflows: [fixture.manager.id: workflow]
+        )
+    )
+    let model = AppModel(
+        runtime: BuilderStatusStubRuntime(builderFinalStatus: .failed),
+        worktrees: StubWorktreeManager(
+            package: GitHandoffPackage(
+                sourceProfileID: fixture.builder.id,
+                sourceName: fixture.builder.name,
+                repositoryPath: ownership.repositoryPath,
+                worktreePath: ownership.worktreePath,
+                branch: ownership.branch,
+                baseRevision: ownership.baseRevision,
+                headRevision: "def456",
+                taskContext: "Ship the warning card",
+                testStatus: .passed,
+                testSummary: "swift test — passed",
+                testEvidenceAt: .distantFuture,
+                workingTreeSummary: "Clean"
+            ),
+            preparedOwnership: ownership
+        ),
+        store: store
+    )
+
+    model.send("Implement the warning card", to: fixture.builder.id)
+    for _ in 0..<100
+        where model.workflow(for: fixture.manager.id)?.isPaused != true {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let paused = try #require(model.workflow(for: fixture.manager.id))
+    let warning = try #require(
+        model.session(for: fixture.manager.id).entries.last(where: {
+            $0.kind == .system && $0.text == "Workflow paused"
+        })
+    )
+    #expect(paused.pauseReason == "Builder needs attention: Failed.")
+    #expect(warning.detail == "Builder needs attention: Failed.")
+    #expect(warning.presentation == .failure)
+
+    for _ in 0..<100
+        where store.load()?.sessions[fixture.manager.id]?.entries.last(where: {
+            $0.id == warning.id
+        })?.presentation != .failure {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let relaunched = AppModel(
+        runtime: ImmediateRecordingRuntime(),
+        store: store
+    )
+    let reloadedWarning = try #require(
+        relaunched.session(for: fixture.manager.id).entries.first(where: {
+            $0.id == warning.id
+        })
+    )
+    #expect(reloadedWarning.presentation == .failure)
+}
+
+@MainActor
+@Test
 func blockedBuilderTurnWithUnverifiedTestsAdvancesWithACaveat() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(
@@ -6382,6 +6482,7 @@ func managerPlanningWithoutAPlanPausesWithoutAdoptingOlderMessages() async throw
         #expect(entries.contains(where: { $0.kind == .approval }) == false)
         #expect(entries.last?.kind == .system)
         #expect(entries.last?.text == "Workflow paused")
+        #expect(entries.last?.presentation == nil)
         #expect(
             entries.last?.detail?
                 .contains("without returning an implementation plan") == true
@@ -8353,6 +8454,39 @@ func workflowUpdatePayloadPersistsAndLegacyEntriesStillDecode() throws {
         )
     )
     #expect(legacy.workflowUpdate == nil)
+}
+
+@Test
+func timelineEntryFailurePresentationRoundTripsAndLegacyEntriesDecode() throws {
+    let entry = TimelineEntry(
+        kind: .system,
+        text: "Workflow paused",
+        detail: "QA needs attention: Failed.",
+        presentation: .failure
+    )
+
+    let decoded = try JSONDecoder().decode(
+        TimelineEntry.self,
+        from: JSONEncoder().encode(entry)
+    )
+    #expect(decoded == entry)
+    #expect(decoded.presentation == .failure)
+
+    let legacy = try JSONDecoder().decode(
+        TimelineEntry.self,
+        from: Data(
+            """
+            {
+              "id": "BD1F67B4-F1B8-48EE-89B9-D68B3510A0A7",
+              "kind": "system",
+              "text": "Workflow paused",
+              "detail": "Builder needs attention: Blocked.",
+              "timestamp": 0
+            }
+            """.utf8
+        )
+    )
+    #expect(legacy.presentation == nil)
 }
 
 @Test

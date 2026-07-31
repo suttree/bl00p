@@ -1049,6 +1049,10 @@ struct QuestionResolution: Codable, Hashable, Sendable {
     static let cancelled = QuestionResolution(state: .cancelled, selections: [])
 }
 
+enum TimelineEntryPresentation: String, Codable, Hashable, Sendable {
+    case failure
+}
+
 struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var kind: TimelineKind
@@ -1068,6 +1072,7 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
     var commandOutcome: CommandOutcome?
     /// Terminal command time, separate from the card creation timestamp.
     var commandCompletedAt: Date?
+    var presentation: TimelineEntryPresentation?
 
     init(
         id: UUID = UUID(),
@@ -1084,7 +1089,8 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
         questionResolution: QuestionResolution? = nil,
         workflowUpdate: WorkflowUpdate? = nil,
         commandOutcome: CommandOutcome? = nil,
-        commandCompletedAt: Date? = nil
+        commandCompletedAt: Date? = nil,
+        presentation: TimelineEntryPresentation? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -1101,6 +1107,7 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
         self.workflowUpdate = workflowUpdate
         self.commandOutcome = commandOutcome
         self.commandCompletedAt = commandCompletedAt
+        self.presentation = presentation
     }
 }
 
