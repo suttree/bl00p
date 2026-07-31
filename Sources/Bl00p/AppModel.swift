@@ -2687,6 +2687,10 @@ final class AppModel: ObservableObject {
         workflow.revisionRounds = revisionRounds + 1
         workflow.reviewSummary = reviewSummary
         workflow.revisionStartedAt = .now
+        // A reviewer has started a distinct revision pass, so it receives a
+        // fresh bounded repair budget independent of the initial build.
+        workflow.builderHandoffRepairAttempts = 0
+        workflow.builderHandoffRepairPass = .revision
         workflow.updatedAt = .now
         managerWorkflows[managerID] = workflow
         queueWorkflowDispatch(
@@ -3266,20 +3270,38 @@ final class AppModel: ObservableObject {
             blockedActionsDetail: dispatch.builderTurnBlockedDetail
         ) {
         case .ready:
+            resetBuilderHandoffRepairState(for: managerID)
             return true
         case .readyWithCaveat(let caveat):
+            resetBuilderHandoffRepairState(for: managerID)
             applyHandoffCaveat(caveat, to: &package)
             return true
-        case .notReady(_, let reason):
+        case .notReady(let category, let reason):
+            if scheduleBuilderHandoffRepair(
+                category: category,
+                reason: reason,
+                dispatch: dispatch,
+                workflow: workflow,
+                managerID: managerID
+            ) {
+                return false
+            }
+            let currentWorkflow = managerWorkflows[managerID] ?? workflow
+            let terminalReason = terminalBuilderHandoffReason(
+                reason,
+                workflow: currentWorkflow
+            )
+            let exhausted = currentWorkflow.builderHandoffRepairAttempts
+                >= Self.maximumBuilderHandoffRepairAttempts
             return rejectWorkflowHandoff(
                 dispatch: dispatch,
                 managerID: managerID,
                 fallbackStage: pass.fallbackStage,
-                reason: reason,
-                questionText: dispatch.builderTurnBlockedDetail == nil
-                    ? nil
-                    : reason,
-                marksAwaitingRetry: true
+                reason: terminalReason,
+                questionText: exhausted
+                    ? terminalReason
+                    : (dispatch.builderTurnBlockedDetail == nil ? nil : reason),
+                marksAwaitingRetry: !exhausted
             )
         }
     }
@@ -3295,6 +3317,103 @@ final class AppModel: ObservableObject {
         case ready
         case readyWithCaveat(String)
         case notReady(category: BuilderHandoffReadinessCategory, reason: String)
+    }
+
+    private static let maximumBuilderHandoffRepairAttempts = 2
+
+    private func resetBuilderHandoffRepairState(for managerID: UUID) {
+        guard var workflow = managerWorkflows[managerID],
+              workflow.builderHandoffRepairAttempts != 0
+                || workflow.builderHandoffRepairPass != nil else { return }
+        workflow.builderHandoffRepairAttempts = 0
+        workflow.builderHandoffRepairPass = nil
+        workflow.awaitingBuilderHandoffRetry = false
+        workflow.updatedAt = .now
+        managerWorkflows[managerID] = workflow
+        save(immediately: true)
+    }
+
+    /// Starts one targeted repair turn for a recoverable handoff. Permission
+    /// denials that plausibly blocked committing still pause: the user must
+    /// approve them before the Builder can make meaningful progress.
+    private func scheduleBuilderHandoffRepair(
+        category: BuilderHandoffReadinessCategory,
+        reason: String,
+        dispatch: ManagerWorkflowDispatch,
+        workflow: ManagerWorkflow,
+        managerID: UUID
+    ) -> Bool {
+        let pass: BuilderHandoffRepairPass = dispatch.kind == .initialReview
+            ? .initial : .revision
+        let commitWasDenied = (category == .missingCommit || category == .dirtyTree)
+            && dispatch.builderTurnBlockedDetail.map(denialLooksCommitRelated) == true
+        // Only an ordinary completed turn is automatically re-dispatched.
+        // A blocked turn retains the existing permission-denial path: tests
+        // may advance with a caveat, while commit denials pause for approval.
+        let completedNormally = participantSessionID(.builder, in: workflow)
+            .flatMap { sessions[$0]?.status } == .completed
+        guard completedNormally,
+              !commitWasDenied,
+              var current = managerWorkflows[managerID],
+              current.pendingDispatch?.id == dispatch.id else {
+            return false
+        }
+
+        if current.builderHandoffRepairPass != pass {
+            current.builderHandoffRepairPass = pass
+            current.builderHandoffRepairAttempts = 0
+        }
+        guard current.builderHandoffRepairAttempts < Self.maximumBuilderHandoffRepairAttempts,
+              let builderSessionID = participantSessionID(.builder, in: current),
+              let builderProfileID = sessions[builderSessionID]?.ownerProfileID
+                ?? current.team.builderProfileID else {
+            return false
+        }
+
+        current.builderHandoffRepairAttempts += 1
+        current.pendingDispatch = nil
+        current.stage = dispatch.kind == .initialReview ? .building : .revising
+        current.isPaused = false
+        current.pauseReason = nil
+        current.awaitingBuilderHandoffRetry = false
+        current.resumeAvailableAfterRestart = false
+        current.updatedAt = .now
+        managerWorkflows[managerID] = current
+        // Persist before sending: a relaunch sees the consumed dispatch and
+        // repair counter instead of emitting a duplicate repair turn.
+        save(immediately: true)
+
+        let attempt = current.builderHandoffRepairAttempts
+        let instruction = """
+        Repair the managed Builder handoff (automatic attempt \(attempt) of \(Self.maximumBuilderHandoffRepairAttempts)).
+
+        The last handoff cannot advance because: \(reason)
+
+        Inspect the existing worktree; do not start over. Resolve that exact requirement, run the relevant tests after the final change, ensure the tree is clean, and create a local commit. Do not push or open a pull request.
+        """
+        append(
+            .init(
+                kind: .system,
+                text: "Builder handoff repair requested",
+                detail: "Attempt \(attempt) of \(Self.maximumBuilderHandoffRepairAttempts): \(reason)"
+            ),
+            to: builderSessionID,
+            immediately: true
+        )
+        performSend(instruction, to: builderProfileID, sessionID: builderSessionID)
+        return true
+    }
+
+    private func terminalBuilderHandoffReason(
+        _ reason: String,
+        workflow: ManagerWorkflow
+    ) -> String {
+        guard workflow.builderHandoffRepairAttempts >= Self.maximumBuilderHandoffRepairAttempts else {
+            return reason
+        }
+        let evidence = workflow.latestHandoff?.testSummary
+            ?? "No handoff package was accepted."
+        return "Builder handoff repair failed after \(workflow.builderHandoffRepairAttempts) automatic attempts: \(reason) Latest evidence: \(evidence)"
     }
 
     /// The single readiness gate for a Builder -> Reviewer/QA handoff. A
@@ -3408,10 +3527,8 @@ final class AppModel: ObservableObject {
     /// not an unrelated denial (e.g. `rm -rf build`) that happens to
     /// coincide with untested evidence.
     private func denialLooksTestRelated(_ detail: String) -> Bool {
-        let lowered = detail.lowercased()
-        return HandoffTestEvidence.knownTestCommands.contains {
-            lowered.contains($0)
-        }
+        detail.split(separator: "\n", omittingEmptySubsequences: false)
+            .contains { HandoffTestEvidence.isTestCommand(String($0)) }
     }
 
     /// Whether a recorded denial plausibly explains a missing commit or a

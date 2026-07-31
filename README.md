@@ -218,10 +218,18 @@ ends with blocked Claude actions but those handoff requirements are already
 satisfied, the status is shown as **Blocked** and the workflow still advances
 to the Reviewer automatically. If the handoff is not ready, the workflow pauses
 with the missing requirement so the Builder can retry or finish the commit and
-test evidence. Revision passes must include fresh passing test evidence
-recorded after the review began. Saved workflows recover these handoff
-requirements across app restarts without discarding an already-running
-Documenter session.
+test evidence. For a normally completed but incomplete handoff, bl00p sends the
+Builder a targeted repair request automatically, up to two times per build or
+revision pass. The retry state is saved before the request is sent, so an app
+restart cannot duplicate a repair or create an unbounded loop. After the limit,
+the workflow pauses with the exact unmet requirement, latest test evidence, and
+attempt count. Revision passes must include fresh passing test evidence recorded
+after the review began. Test evidence comes from recognized command invocations
+and their structured running/succeeded/failed outcomes; text from a read or
+search result that merely mentions tests cannot satisfy the gate. A blocked
+test command may advance as **Unverified**, while a blocked commit action still
+requires approval. Saved workflows recover these handoff requirements across
+app restarts without discarding an already-running Documenter session.
 
 Repository selection belongs to the chat, not the bot profile. New chats start
 without a repository, so two chats for the same bot can work in different

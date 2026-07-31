@@ -847,7 +847,11 @@ actor CodexAppServerRuntime: AgentRuntime {
                     ? (failed ? "Command failed" : "Command finished")
                     : "Running command",
                 text: command,
-                detail: detail.isEmpty ? nil : detail
+                detail: detail.isEmpty ? nil : detail,
+                commandOutcome: completed
+                    ? (failed ? .failed : .succeeded)
+                    : .running,
+                commandCompletedAt: completed ? .now : nil
             )
 
         case "mcpToolCall":

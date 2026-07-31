@@ -2349,6 +2349,67 @@ func handoffEvidenceIgnoresGenericToolOutputThatMentionsTests() {
 
     #expect(evidence.status == .notRun)
     #expect(evidence.recordedAt == nil)
+    #expect(!HandoffTestEvidence.isTestCommand("phpstan analyse Sources"))
+}
+
+@Test
+func handoffEvidencePrefersStructuredOutcomesAndCompletionTimes() {
+    let startedAt = Date(timeIntervalSince1970: 10)
+    let completedAt = Date(timeIntervalSince1970: 20)
+
+    let passed = HandoffTestEvidence.latest(in: [
+        .init(
+            kind: .command,
+            title: "Running command",
+            text: "env CI=1 npm exec vitest run && bundle exec rspec",
+            detail: "tests passed",
+            timestamp: startedAt,
+            commandOutcome: .succeeded,
+            commandCompletedAt: completedAt
+        )
+    ])
+    #expect(passed.status == .passed)
+    #expect(passed.recordedAt == completedAt)
+
+    let failed = HandoffTestEvidence.latest(in: [
+        .init(
+            kind: .command,
+            title: "Command finished successfully",
+            text: "swift test",
+            detail: "0 failures",
+            commandOutcome: .failed,
+            commandCompletedAt: completedAt
+        )
+    ])
+    #expect(failed.status == .failed)
+
+    let running = HandoffTestEvidence.latest(in: [
+        .init(
+            kind: .command,
+            title: "Command finished",
+            text: "npx jest",
+            commandOutcome: .running
+        )
+    ])
+    #expect(running.status == .notRun)
+}
+
+@Test
+func builderHandoffRepairStateSurvivesWorkflowPersistence() throws {
+    let workflow = ManagerWorkflow(
+        managerProfileID: UUID(),
+        team: .init(),
+        request: "Ship the feature",
+        stage: .revising,
+        builderHandoffRepairAttempts: 2,
+        builderHandoffRepairPass: .revision
+    )
+    let decoded = try JSONDecoder().decode(
+        ManagerWorkflow.self,
+        from: JSONEncoder().encode(workflow)
+    )
+    #expect(decoded.builderHandoffRepairAttempts == 2)
+    #expect(decoded.builderHandoffRepairPass == .revision)
 }
 
 @Test
@@ -3065,7 +3126,9 @@ func invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns() async throws {
             managerWorkflows: [managerID: workflow]
         )
     )
-    let runtime = OrchestrationRecordingRuntime()
+    // Keep this legacy rejection matrix focused on blocked-turn behavior;
+    // ordinary completed turns now receive automatic repair attempts.
+    let runtime = BuilderStatusStubRuntime(builderFinalStatus: .blocked)
     let model = AppModel(
         runtime: runtime,
         worktrees: StubWorktreeManager(
@@ -3096,7 +3159,7 @@ func invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns() async throws {
             == "The Builder revision pass has no new local commit."
     )
     #expect(paused.latestHandoff?.headRevision == initialPackage.headRevision)
-    #expect(await runtime.calls.map(\.role) == [.builder])
+    #expect(await runtime.calls == [.builder])
     #expect(model.session(for: publisherID).entries.isEmpty)
 
     model.send("Commit the remaining changes", to: builderID)
@@ -3114,7 +3177,7 @@ func invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns() async throws {
             == "The Builder handoff still has uncommitted changes."
     )
     #expect(dirty.latestHandoff?.headRevision == initialPackage.headRevision)
-    #expect(await runtime.calls.map(\.role) == [.builder, .builder])
+    #expect(await runtime.calls == [.builder, .builder])
     #expect(model.session(for: publisherID).entries.isEmpty)
 
     model.send("Fix the tests", to: builderID)
@@ -3133,7 +3196,7 @@ func invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns() async throws {
     )
     #expect(failing.latestHandoff?.headRevision == initialPackage.headRevision)
     #expect(
-        await runtime.calls.map(\.role)
+        await runtime.calls
             == [.builder, .builder, .builder]
     )
     #expect(model.session(for: publisherID).entries.isEmpty)
@@ -3155,7 +3218,7 @@ func invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns() async throws {
             == initialPackage.headRevision
     )
     #expect(
-        await runtime.calls.map(\.role)
+        await runtime.calls
             == [.builder, .builder, .builder, .builder]
     )
     #expect(model.session(for: publisherID).entries.isEmpty)
@@ -3174,7 +3237,7 @@ func invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns() async throws {
     )
     #expect(stale.latestHandoff?.headRevision == initialPackage.headRevision)
     #expect(
-        await runtime.calls.map(\.role)
+        await runtime.calls
             == [.builder, .builder, .builder, .builder, .builder]
     )
     #expect(model.session(for: publisherID).entries.isEmpty)
@@ -3917,7 +3980,7 @@ func blockedBuilderTurnWithFailingTestsStillPauses() async throws {
 
 @MainActor
 @Test
-func pausedBuilderHandoffSelfHealsWhenTheBuilderNextFinishesReady() async throws {
+func completedBuilderHandoffAutomaticallyRepairsAndAdvances() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(
             "bl00p-self-healing-handoff-\(UUID().uuidString)",
@@ -4035,7 +4098,7 @@ func pausedBuilderHandoffSelfHealsWhenTheBuilderNextFinishesReady() async throws
             managerWorkflows: [managerID: workflow]
         )
     )
-    let runtime = RetryableBuilderRuntime()
+    let runtime = BuilderStatusStubRuntime(builderFinalStatus: .completed)
     let model = AppModel(
         runtime: runtime,
         worktrees: StubWorktreeManager(
@@ -4046,21 +4109,6 @@ func pausedBuilderHandoffSelfHealsWhenTheBuilderNextFinishesReady() async throws
     )
 
     model.send("Implement the feature", to: builderID)
-    for _ in 0..<100
-        where model.workflow(for: managerID)?.pauseReason == nil {
-        try await Task.sleep(for: .milliseconds(10))
-    }
-
-    let paused = try #require(model.workflow(for: managerID))
-    #expect(paused.stage == .building)
-    #expect(paused.isPaused)
-    #expect(paused.awaitingBuilderHandoffRetry)
-
-    // The user approves the previously blocked action directly (not an
-    // explicit chat "send"); the Builder's session then reaches a new
-    // terminal status entirely on its own.
-    model.resolveApproval(UUID(), approved: true, for: builderID)
-
     for _ in 0..<300
         where model.workflow(for: managerID)?.stage != .reviewing
             || model.workflow(for: managerID)?.latestHandoff?.headRevision
@@ -4075,6 +4123,8 @@ func pausedBuilderHandoffSelfHealsWhenTheBuilderNextFinishesReady() async throws
     #expect(healed.stage == .reviewing)
     #expect(!healed.isPaused)
     #expect(!healed.awaitingBuilderHandoffRetry)
+    #expect(healed.builderHandoffRepairAttempts == 0)
+    #expect(healed.builderHandoffRepairPass == nil)
     #expect(healed.latestHandoff?.headRevision == readyPackage.headRevision)
     #expect(
         healed.latestHandoff?.taskContext
@@ -4083,6 +4133,127 @@ func pausedBuilderHandoffSelfHealsWhenTheBuilderNextFinishesReady() async throws
     #expect(model.session(for: reviewerID).entries.contains {
         $0.kind == .handoff
     })
+    #expect((await runtime.calls).filter { $0 == .builder } == [.builder, .builder])
+    #expect(model.session(for: builderID).entries.contains {
+        $0.text == "Builder handoff repair requested"
+            && $0.detail?.contains("no local commit") == true
+    })
+}
+
+@MainActor
+@Test
+func completedBuilderHandoffStopsAfterBoundedAutomaticRepairs() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-bounded-handoff-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/bounded-feature",
+        baseRevision: "abc123"
+    )
+    let incompletePackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: ownership.baseRevision,
+        taskContext: "Ship the feature",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        testEvidenceAt: .distantFuture,
+        workingTreeSummary: "Clean"
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builderID,
+        reviewerProfileID: reviewerID,
+        publisherProfileID: publisherID
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement.",
+        workingDirectory: ownership.repositoryPath,
+        worktree: ownership
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review."
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Publish."
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        repositoryPath: ownership.repositoryPath,
+        team: team,
+        request: "Ship the feature",
+        implementationPlan: "Implement the feature.",
+        stage: .building,
+        branch: ownership.branch
+    )
+    let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    store.save(PersistedAppState(
+        profiles: [manager, builder, reviewer, publisher],
+        sessions: [
+            managerID: AgentSessionState(),
+            builderID: AgentSessionState(entries: [
+                .init(kind: .handoff, title: "Implementation brief", text: "Implement the feature.")
+            ]),
+            reviewerID: AgentSessionState(),
+            publisherID: AgentSessionState()
+        ],
+        selectedBotID: builderID,
+        managerWorkflows: [managerID: workflow]
+    ))
+    let runtime = BuilderStatusStubRuntime(builderFinalStatus: .completed)
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            packages: [incompletePackage, incompletePackage, incompletePackage],
+            preparedOwnership: ownership
+        ),
+        store: store
+    )
+
+    model.send("Implement the feature", to: builderID)
+    for _ in 0..<300 where !((model.workflow(for: managerID)?.isPaused) ?? false) {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let paused = try #require(model.workflow(for: managerID))
+    #expect(paused.builderHandoffRepairAttempts == 2)
+    #expect(paused.builderHandoffRepairPass == .initial)
+    #expect(!paused.awaitingBuilderHandoffRetry)
+    #expect(paused.pauseReason?.contains("repair failed after 2 automatic attempts") == true)
+    #expect(paused.pauseReason?.contains("no local commit") == true)
+    #expect(await runtime.calls == [.builder, .builder, .builder])
+    #expect(model.session(for: reviewerID).entries.isEmpty)
 }
 
 @MainActor
@@ -5810,7 +5981,10 @@ func decliningAManagerPlanPausesBeforeAnyBuilderHandoff() async throws {
         workingTreeSummary: "Clean"
     )
     let workflowWorktrees = StubWorktreeManager(
-        packages: [unfinishedPackage],
+        // The Builder runtime completes immediately in this plan-card test.
+        // Supply the bounded repair budget so its unrelated background
+        // handoff validation cannot exhaust the fixture.
+        packages: [unfinishedPackage, unfinishedPackage, unfinishedPackage],
         preparedOwnership: workflowOwnership
     )
     let model = AppModel(

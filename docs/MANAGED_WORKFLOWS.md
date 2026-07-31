@@ -191,7 +191,9 @@ The Builder handoff readiness gate is covered by:
 - `revisitedBuilderTurnDoesNotReuseAStaleBlockedActionFromAnEarlierTurn`
 - `blockedBuilderTurnWithFailingTestsStillPauses`
 - `blockedBuilderTurnWithoutCommitStillPausesWithAnActionableReason`
-- `pausedBuilderHandoffSelfHealsWhenTheBuilderNextFinishesReady`
+- `completedBuilderHandoffAutomaticallyRepairsAndAdvances`
+- `completedBuilderHandoffStopsAfterBoundedAutomaticRepairs`
+- `builderHandoffRepairStateSurvivesWorkflowPersistence`
 - `invalidRevisedBuilderHandoffPausesBeforeDocumenterRuns`
 
 When a test seeds a persisted workflow directly at stage `building` or
@@ -211,3 +213,28 @@ Run the complete suite with:
 ```sh
 xcrun swift test --disable-sandbox
 ```
+## Structured evidence and automatic repair
+
+Builder-to-Reviewer handoffs require a new local commit, a clean worktree,
+and a successfully completed relevant test command. Runtime command outcomes
+are recorded structurally (`running`, `succeeded`, or `failed`) with a
+completion time; timelines saved by older releases still use the legacy
+command-title fallback. Read/search/tool output that merely mentions tests is
+never treated as test evidence.
+
+The gate recognizes common runners and project wrappers, including Swift,
+Vitest, Jest, RSpec, package-manager wrappers, and compound commands. A
+failed or running test command cannot be promoted by success-looking output.
+
+When a normal Builder completion is recoverably incomplete, bl00p sends a
+targeted repair instruction automatically. The instruction names the exact
+failed readiness category (missing commit, dirty tree, failed tests, or missing
+or stale test evidence) and asks the Builder to repair the existing worktree,
+run the relevant tests, clean the tree, and commit locally. Repairs are
+persisted before dispatch and bounded to two attempts per initial build or
+revision pass, so relaunching cannot duplicate turns or create a loop. A
+successful repair clears the counter and resumes normal handoff validation.
+Once exhausted, the workflow pauses with the unmet requirement, retry count,
+and latest evidence. A denied test action continues with an unverified caveat;
+a denied commit action remains paused so the required approval can be
+resolved, and permission-denial pauses do not consume automatic repair turns.
