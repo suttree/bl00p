@@ -356,11 +356,11 @@ help text, and repository/worktree path resolution shared by both platform
 presentations.
 
 The identity group must allow its path label to shrink and use middle
-truncation. Give the trailing action group priority over the identity width and
-keep the identity's maximum width bounded so the toolbar actions, sidebar
-toggle, inspector, and window controls remain usable at the 980×640 minimum
-window size as well as the 1240×780 default. When changing this layout, smoke
-test empty, selected, locked, and worktree-backed repositories; idle and
+truncation. Keep the identity's maximum width bounded and the trailing action
+group fixed-width so the toolbar actions, sidebar toggle, inspector, and window
+controls remain usable at the 980×640 minimum window size as well as the
+1240×780 default. When changing this layout, smoke test empty, selected, locked,
+and worktree-backed repositories; idle and
 running sessions; Manager and non-Manager conversations; both sidebar states;
 the inspector; and light and dark appearances on macOS. Verify that Linux still
 shows the inline header.

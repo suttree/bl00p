@@ -159,7 +159,6 @@ struct ConversationView: View {
                     // inspector, and toolbar actions at the minimum window
                     // width. The path itself truncates in the middle.
                     .frame(minWidth: 0, maxWidth: 360, alignment: .leading)
-                    .layoutPriority(-1)
                 }
 
                 ToolbarItem(id: "conversation-header-flexible-space") {
