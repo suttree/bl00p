@@ -4,6 +4,13 @@ All notable changes to bl00p are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Simplify the conversation header by removing its avatar, leading-aligning
+  the bot name, status, and repository/worktree path, and showing Manager
+  workflow activity from the selected chat while linked agents are launching
+  or working.
+
 ### Added
 
 - Record structured Builder test-command outcomes and completion times, classify

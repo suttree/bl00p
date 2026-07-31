@@ -354,3 +354,11 @@ every chat opens its owned worktree when present and otherwise falls back to the
 base repository. Keep the path-resolution logic pure and covered by focused
 tests; the platform-specific process launch remains intentionally untested and
 is verified by a manual smoke check.
+
+The shared macOS/Linux header intentionally has no avatar: its name, status,
+and repository or worktree path begin at the same leading edge. Its displayed
+status comes from `AppModel.conversationDisplayStatus(for:sessionID:)`. A
+standalone or participant conversation uses its own session status. A Manager
+conversation additionally reports **Working** or **Launching** when its own
+selected workflow has a linked session in that state; do not aggregate activity
+from another Manager tab or mutate persisted session status for this display.

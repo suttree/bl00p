@@ -31,6 +31,10 @@ struct ConversationView: View {
                 ConversationHeader(
                     profile: profile,
                     session: session,
+                    displayStatus: model.conversationDisplayStatus(
+                        for: profile.id,
+                        sessionID: sessionID
+                    ),
                     stop: {
                         model.stop(profile.id, sessionID: sessionID)
                     },
@@ -142,10 +146,14 @@ struct ConversationView: View {
             .background(Color.bl00pTextBackground)
             #if os(macOS)
             .toolbar {
-                ToolbarItem(placement: .principal) {
+                ToolbarItem(placement: .navigation) {
                     ConversationHeaderIdentity(
                         profile: profile,
-                        session: session
+                        session: session,
+                        displayStatus: model.conversationDisplayStatus(
+                            for: profile.id,
+                            sessionID: sessionID
+                        )
                     )
                     // Keep the title group small enough for the sidebar,
                     // inspector, and toolbar actions at the minimum window
@@ -638,6 +646,7 @@ private struct WorkflowStageIndicator: View {
 private struct ConversationHeader: View {
     let profile: BotProfile
     let session: AgentSessionState
+    let displayStatus: AgentStatus
     let stop: () -> Void
     let chooseRepository: () -> Void
     let repositoryCanBeChanged: Bool
@@ -646,7 +655,11 @@ private struct ConversationHeader: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            ConversationHeaderIdentity(profile: profile, session: session)
+            ConversationHeaderIdentity(
+                profile: profile,
+                session: session,
+                displayStatus: displayStatus
+            )
 
             Spacer()
 
@@ -669,22 +682,16 @@ private struct ConversationHeader: View {
 private struct ConversationHeaderIdentity: View {
     let profile: BotProfile
     let session: AgentSessionState
+    let displayStatus: AgentStatus
 
     var body: some View {
         HStack(spacing: 12) {
-            BotAvatar(
-                name: profile.name,
-                provider: profile.provider,
-                role: profile.role,
-                size: 38
-            )
-
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
                     Text(profile.name)
                         .font(.bl00p(.headline, weight: .semibold))
                         .lineLimit(1)
-                    StatusPill(status: session.status)
+                    StatusPill(status: displayStatus)
                 }
 
                 Text(directoryLabel)
