@@ -1153,6 +1153,14 @@ private struct WorkflowUpdateCard: View {
         }
     }
 
+    private var textRowAlignment: VerticalAlignment {
+        #if os(macOS)
+        .firstTextBaseline
+        #else
+        .top
+        #endif
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 13) {
             Image(systemName: icon)
@@ -1165,7 +1173,7 @@ private struct WorkflowUpdateCard: View {
                 )
 
             VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                HStack(alignment: textRowAlignment, spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(update.role.displayName)
                             .font(.bl00p(.caption1, weight: .semibold))
@@ -1254,7 +1262,7 @@ private struct WorkflowUpdateCard: View {
         value: String,
         monospaced: Bool = false
     ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: textRowAlignment, spacing: 8) {
             Text(label)
                 .font(.bl00p(.caption1, weight: .semibold))
                 .foregroundStyle(.secondary)
