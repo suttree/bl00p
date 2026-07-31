@@ -231,11 +231,15 @@ started a runtime thread, created a worktree, or joined a managed workflow, its
 repository is locked; create another chat to work elsewhere.
 
 The same conversation header also exposes shortcuts into the selected checkout.
-The folder button opens the chat's current repository or worktree in the system
-file browser, and the terminal button opens the same directory in a native
-terminal window. For managed workflows this means the Builder, Reviewer, and
-Documenter can jump directly into the active worktree without copying paths out
-of the UI.
+On macOS, the header is integrated into the unified window toolbar; on Linux it
+remains inline above the conversation. The toolbar keeps the bot identity,
+status, repository/worktree path, repository chooser, terminal, conditional
+Stop, and settings controls together. Long paths truncate in the middle so the
+toolbar remains usable at small window sizes. The folder button opens the
+chat's current repository or worktree in the system file browser, and the
+terminal button opens the same directory in a native terminal window. For
+managed workflows this means the Builder, Reviewer, and Documenter can jump
+directly into the active worktree without copying paths out of the UI.
 
 When you close a chat that owns a managed Git worktree, bl00p's confirmation
 explains the cleanup outcome. A worktree that can be removed safely is deleted
