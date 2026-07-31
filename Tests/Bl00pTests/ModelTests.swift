@@ -24,6 +24,8 @@ func updateFeedUsesSignedGitHubReleaseAssets() throws {
     let publicKey = try #require(info["SUPublicEDKey"] as? String)
     let decodedPublicKey = try #require(Data(base64Encoded: publicKey))
 
+    #expect(info["CFBundleIconName"] as? String == "AppIcon")
+    #expect(info["CFBundleIconFile"] as? String == "AppIcon")
     #expect(
         info["SUFeedURL"] as? String
             == "https://github.com/suttree/bl00p/releases/latest/download/appcast.xml"
@@ -1240,6 +1242,39 @@ func sidebarIndicatorSessionsIgnoreBackgroundChatsForStandaloneBots() async thro
     model.selectSession(backgroundID, for: profile.id)
     let switchedIndicator = model.sidebarIndicatorState(for: profile.id)
     #expect(switchedIndicator.showsBadge)
+}
+
+@MainActor
+@Test
+func dockBadgeIgnoresHiddenAttentionInBackgroundChats() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-dock-badge-background-chat-\(UUID().uuidString)"
+        )
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let notifications = RecordingNotificationDelivery()
+    let model = AppModel(
+        runtime: ImmediateRecordingRuntime(),
+        store: AppStateStore(
+            fileURL: directory.appendingPathComponent("state.json")
+        ),
+        notifications: notifications
+    )
+    let profile = try #require(model.profiles.first)
+    let backgroundID = try #require(model.selectedSessionID(for: profile.id))
+    _ = model.newChat(for: profile.id)
+
+    model.prepareNotifications()
+    model.sessions[backgroundID]?.status = .blocked
+    model.sessions[backgroundID]?.hasUnreadCompletion = true
+
+    // Any later save re-synchronizes the Dock badge. The hidden background
+    // chat must not produce a count that the sidebar cannot explain.
+    let otherProfile = try #require(model.profiles.dropFirst().first)
+    _ = model.newChat(for: otherProfile.id)
+
+    #expect(!model.sidebarIndicatorState(for: profile.id).showsBadge)
+    #expect(notifications.badgeCounts.last == 0)
 }
 
 @MainActor
@@ -8261,7 +8296,10 @@ func claudeCLIClientCompletesThePermissionRoundTrip() async throws {
                 "result": behavior,
                 "permission_denials": []
             }), flush=True)
-            break
+            # Keep stdout open until the test stops the client. Exiting here
+            # races the final output read against the process termination
+            # callback on heavily loaded CI runners.
+            continue
     """.write(to: executable, atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes(
         [.posixPermissions: 0o755],
