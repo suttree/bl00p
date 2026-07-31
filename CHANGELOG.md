@@ -84,6 +84,8 @@ All notable changes to bl00p are documented in this file.
 - Suppress notification banners and sounds while a bl00p window is active,
   while preserving sidebar and Dock attention state.
 - Increase the typography throughout the Add Bot sheet and its role-prompt editor for readability.
+- Increase app icon contrast and make its palm and sparkle artwork fully opaque
+  so the existing composition remains recognizable at Dock and launcher sizes.
 - Make Codex bots general-purpose agents instead of starting every conversation in review mode.
 - Start or reconnect a stopped bot automatically when its next message is sent, while preserving its transcript.
 - Keep bot profiles separate by applying each bot's model, prompt, and working directory to its own runtime session.

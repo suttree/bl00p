@@ -1,5 +1,23 @@
 # Development notes
 
+## App icon assets
+
+The icon's editable source is `Resources/IconComposer/AppIcon.icon`. Keep its
+`icon.json` fill and translucency settings, `Assets/Palm.png`,
+`Resources/BrandIcon.png`, and all ten renditions in
+`Resources/Assets.xcassets/AppIcon.appiconset` synchronized when artwork
+changes. Preserve the existing rounded-square composition, palette, filenames,
+dimensions, alpha behavior, and `Contents.json` mappings; do not change bundle
+icon configuration or packaging paths.
+
+The macOS package compiles `AppIcon.icns` from the asset catalog with `actool`
+and copies `BrandIcon.png` separately. The Linux package consumes
+`icon_512x512@2x.png` as its 1024×1024 hicolor icon. After an icon change,
+confirm the 16×16, 32×32, 128×128, 256×256, 512×512, and corresponding 2×
+renditions remain present, then inspect the packaged macOS icon at 16, 32, 64,
+128, and 512-point contexts and verify the Linux package contains the updated
+1024×1024 rendition.
+
 ## Transcript scrolling
 
 `TranscriptView` uses one `TranscriptScrollCoordinator` per visible
