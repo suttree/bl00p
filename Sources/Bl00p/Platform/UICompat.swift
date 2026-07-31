@@ -1,6 +1,38 @@
-#if !os(macOS)
-
+#if os(macOS)
+import SwiftUI
+#else
 import SwiftOpenUI
+#endif
+
+extension View {
+    /// Keeps shared workflow progress UI on the portable view surface while
+    /// preserving SwiftUI's richer accessibility grouping on macOS.
+    func bl00pAccessibilitySummary(
+        label: String,
+        value: String
+    ) -> some View {
+        #if os(macOS)
+        accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text(label))
+            .accessibilityValue(Text(value))
+        #else
+        self
+        #endif
+    }
+
+    /// Combines a card into one accessibility element where SwiftUI supports
+    /// it. SwiftOpenUI still receives the complete spoken label on Linux.
+    func bl00pCombinedAccessibilityLabel(_ label: String) -> some View {
+        #if os(macOS)
+        accessibilityElement(children: .combine)
+            .accessibilityLabel(Text(label))
+        #else
+        accessibilityLabel(label)
+        #endif
+    }
+}
+
+#if !os(macOS)
 
 // SwiftOpenUI covers the SwiftUI surface bl00p uses, with a few gaps. These
 // shims fill the ones that appear in otherwise portable view code so those

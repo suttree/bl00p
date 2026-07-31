@@ -179,6 +179,21 @@ window sizes in light and dark appearances; on Linux, also confirm the GTK
 window title is not populated with the application name and that **Add Bot**
 still opens its sheet.
 
+SwiftOpenUI's `WindowGroup` requires an explicit title even though SwiftUI also
+offers a title-less initializer. Keep the Linux entry point on
+`WindowGroup("")`; the empty title is what produces the intended untitled GTK
+window. Shared views must route accessibility child grouping through the
+helpers in `Platform/UICompat.swift` instead of calling
+`.accessibilityElement(children:)` directly, because SwiftOpenUI does not
+provide that modifier. Run the portable source contract locally with:
+
+```sh
+sh scripts/check-portable-ui.sh
+```
+
+Both CI platforms run this check before compiling so these known API gaps fail
+quickly even when a change was developed only against SwiftUI on macOS.
+
 ## Managed workflow update cards
 
 Manager-only stage summaries are stored in `TimelineEntry.workflowUpdate`.

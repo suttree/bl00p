@@ -19,6 +19,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
+      - name: Verify portable UI contracts
+        run: sh scripts/check-portable-ui.sh
+
       - name: Install OpenSSL 3
         run: |
           brew install openssl@3
@@ -54,6 +57,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+
+      - name: Verify portable UI contracts
+        run: sh scripts/check-portable-ui.sh
 
       - name: Verify automatic release configuration
         run: sh scripts/check-release-config.sh
