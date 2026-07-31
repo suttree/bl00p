@@ -470,7 +470,7 @@ struct HandoffTestEvidence: Equatable {
         while index < tokens.count {
             let token = tokens[index]
             if token == "env" || token == "command" || token == "time"
-                || token == "nice" || token == "nohup" {
+                || token == "nice" || token == "nohup" || token == "xcrun" {
                 index += 1
                 while index < tokens.count, tokens[index].contains("=") {
                     index += 1

@@ -2397,6 +2397,7 @@ func handoffEvidenceRecognizesWrapperCommandsAndSuccessTitles() {
     #expect(evidence.status == .passed)
     #expect(evidence.summary.contains("./ci/verify"))
     #expect(evidence.recordedAt == timestamp)
+    #expect(HandoffTestEvidence.isTestCommand("xcrun swift test --disable-sandbox"))
 
     let makeEvidence = HandoffTestEvidence.latest(
         in: [

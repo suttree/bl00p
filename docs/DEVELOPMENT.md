@@ -173,8 +173,8 @@ remain unchanged.
 
 The application window itself is intentionally untitled on Linux, and macOS
 continues to hide the native window title. The conversation header remains the
-place for the active bot name, status, repository or worktree details, and
-actions. When changing either layout, smoke test the default and minimum
+place for status, repository or worktree details, and actions. When changing
+either layout, smoke test the default and minimum
 window sizes in light and dark appearances; on Linux, also confirm the GTK
 window title is not populated with the application name and that **Add Bot**
 still opens its sheet.
@@ -379,17 +379,17 @@ still flow through the runtime policy.
 
 `ConversationView` keeps the complete conversation header inline on Linux,
 where the SwiftOpenUI/GTK4 backend has no native macOS toolbar. On macOS, the
-identity group is placed in the unified window toolbar's `.navigation` slot. A
+status-and-path group is placed in the unified window toolbar's `.navigation` slot. A
 uniquely identified `ToolbarItem` containing `Spacer()` follows it; on macOS
-that becomes an AppKit flexible-space item and separates the leading identity
+that becomes an AppKit flexible-space item and separates the leading status and path
 from the repository, terminal, Stop, and settings controls in `.primaryAction`
 at the trailing edge. The duplicate inline row and divider stay excluded from
 the macOS content column. Keep the existing action closures, enablement rules,
 help text, and repository/worktree path resolution shared by both platform
 presentations.
 
-The identity group must allow its path label to shrink and use middle
-truncation. Keep the identity's maximum width bounded and the trailing action
+The status-and-path group must allow its path label to shrink and use middle
+truncation. Keep the group's maximum width bounded and the trailing action
 group fixed-width so the toolbar actions, sidebar toggle, inspector, and window
 controls remain usable at the 980×640 minimum window size as well as the
 1240×780 default. When changing this layout, smoke test empty, selected, locked,
@@ -422,9 +422,9 @@ base repository. Keep the path-resolution logic pure and covered by focused
 tests; the platform-specific process launch remains intentionally untested and
 is verified by a manual smoke check.
 
-The shared macOS/Linux header intentionally has no avatar: its name, status,
-and repository or worktree path begin at the same leading edge. Its displayed
-status comes from `AppModel.conversationDisplayStatus(for:sessionID:)`. A
+The shared macOS/Linux header intentionally has no avatar or bot-name title:
+its status and repository or worktree path begin at the same leading edge. Its
+displayed status comes from `AppModel.conversationDisplayStatus(for:sessionID:)`. A
 standalone or participant conversation uses its own session status. A Manager
 conversation additionally reports **Working** or **Launching** when its own
 selected workflow has a linked session in that state; do not aggregate activity
