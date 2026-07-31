@@ -6,6 +6,7 @@ struct TranscriptScrollCoordinator {
     private(set) var sessionID: UUID?
     private(set) var isFollowingLatest = true
     private(set) var isNearBottom = false
+    private(set) var isTranscriptMounted = false
     private(set) var scrollRequestID = 0
     private(set) var scheduledScrollRequestID: Int?
 
@@ -19,18 +20,29 @@ struct TranscriptScrollCoordinator {
         self.sessionID = sessionID
         isFollowingLatest = true
         isNearBottom = !hasContent
+        isTranscriptMounted = false
         isAutomaticLayoutPending = hasContent
         cancelScheduledScroll()
-        if hasContent {
+    }
+
+    mutating func transcriptMounted(for sessionID: UUID) {
+        guard self.sessionID == sessionID else { return }
+
+        isTranscriptMounted = true
+        if isFollowingLatest, isAutomaticLayoutPending {
             scheduleScroll()
         }
     }
 
+    mutating func transcriptUnmounted(for sessionID: UUID) {
+        guard self.sessionID == sessionID else { return }
+
+        isTranscriptMounted = false
+        cancelScheduledScroll()
+    }
+
     mutating func contentChanged(for sessionID: UUID) {
-        guard self.sessionID == sessionID else {
-            reset(for: sessionID, hasContent: true)
-            return
-        }
+        guard self.sessionID == sessionID else { return }
         guard isFollowingLatest else { return }
 
         isAutomaticLayoutPending = true
@@ -38,9 +50,12 @@ struct TranscriptScrollCoordinator {
     }
 
     mutating func viewportChanged(
+        for sessionID: UUID,
         distanceToBottom: Double,
         userInitiated: Bool
     ) {
+        guard self.sessionID == sessionID, isTranscriptMounted else { return }
+
         let isNearBottom =
             distanceToBottom <= Self.nearBottomTolerance
         self.isNearBottom = isNearBottom
@@ -67,29 +82,28 @@ struct TranscriptScrollCoordinator {
         }
     }
 
-    mutating func userBrowsedHistory() {
+    mutating func userBrowsedHistory(in sessionID: UUID) {
+        guard self.sessionID == sessionID, isTranscriptMounted else { return }
+
         isNearBottom = false
         holdPosition()
     }
 
-    mutating func userDraggedTowardHistory(distance: Double) {
+    mutating func userDraggedTowardHistory(
+        distance: Double,
+        in sessionID: UUID
+    ) {
         guard distance > Self.nearBottomTolerance else { return }
-        userBrowsedHistory()
+        userBrowsedHistory(in: sessionID)
     }
 
     mutating func jumpToLatest(for sessionID: UUID) {
-        if self.sessionID != sessionID {
-            reset(for: sessionID, hasContent: true)
-            return
-        }
+        guard self.sessionID == sessionID else { return }
         resumeFollowing()
     }
 
     mutating func userSentMessage(in sessionID: UUID) {
-        if self.sessionID != sessionID {
-            reset(for: sessionID, hasContent: true)
-            return
-        }
+        guard self.sessionID == sessionID else { return }
         resumeFollowing()
     }
 
@@ -99,8 +113,9 @@ struct TranscriptScrollCoordinator {
             && scheduledScrollRequestID == requestID
     }
 
-    mutating func didPerformScroll(requestID: Int) {
-        guard scheduledScrollRequestID == requestID else { return }
+    mutating func didPerformScroll(requestID: Int, for sessionID: UUID) {
+        guard self.sessionID == sessionID,
+              scheduledScrollRequestID == requestID else { return }
         scheduledScrollRequestID = nil
         isNearBottom = true
         isAutomaticLayoutPending = false
@@ -119,7 +134,8 @@ struct TranscriptScrollCoordinator {
     }
 
     private mutating func scheduleScroll() {
-        guard scheduledScrollRequestID == nil else { return }
+        guard isTranscriptMounted,
+              scheduledScrollRequestID == nil else { return }
         scrollRequestID &+= 1
         scheduledScrollRequestID = scrollRequestID
     }

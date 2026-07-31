@@ -753,6 +753,14 @@ private struct TranscriptView: View {
                             for: sessionID,
                             hasContent: !entries.isEmpty
                         )
+                        await Task.yield()
+                        guard !Task.isCancelled else { return }
+                        scrollCoordinator.transcriptMounted(for: sessionID)
+                    }
+                    .onDisappear {
+                        scrollCoordinator.transcriptUnmounted(
+                            for: sessionID
+                        )
                     }
                     .task(id: scrollCoordinator.scrollRequestID) {
                         let requestID = scrollCoordinator.scrollRequestID
@@ -773,7 +781,8 @@ private struct TranscriptView: View {
                             anchor: .bottom
                         )
                         scrollCoordinator.didPerformScroll(
-                            requestID: requestID
+                            requestID: requestID,
+                            for: sessionID
                         )
                     }
                     .onChange(of: contentVersion) { _, _ in
@@ -788,14 +797,17 @@ private struct TranscriptView: View {
                             TranscriptScrollCoordinator.nearBottomTolerance,
                         onEnded: { value in
                             scrollCoordinator.userDraggedTowardHistory(
-                                distance: value.height
+                                distance: value.height,
+                                in: sessionID
                             )
                         }
                     )
                     #endif
             }
+            .id(sessionID)
 
-            if scrollCoordinator.showsJumpToLatest {
+            if scrollCoordinator.sessionID == sessionID,
+               scrollCoordinator.showsJumpToLatest {
                 Button {
                     scrollCoordinator.jumpToLatest(for: sessionID)
                 } label: {
@@ -858,6 +870,7 @@ private struct TranscriptView: View {
         userInitiated: Bool
     ) {
         scrollCoordinator.viewportChanged(
+            for: sessionID,
             distanceToBottom: distanceToBottom,
             userInitiated: userInitiated
         )

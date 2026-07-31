@@ -73,6 +73,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Recreate and re-pin the transcript scroll container when switching chats so
+  outgoing scroll offsets, lazy-layout state, and late viewport callbacks
+  cannot leave the incoming chat blank.
 - Clarify the close-chat warning so managed worktree deletion, retained Git
   branches, uncommitted changes, and unsafe worktrees left on disk are each
   described accurately.
