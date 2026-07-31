@@ -584,6 +584,32 @@ final class AppModel: ObservableObject {
         return participantID
     }
 
+    /// Returns the status shown by the conversation header. A Manager header
+    /// represents its selected workflow, so it remains active while one of
+    /// that workflow's linked sessions is launching or working. Other
+    /// conversations always show their own session status.
+    func conversationDisplayStatus(
+        for profileID: UUID,
+        sessionID: UUID
+    ) -> AgentStatus {
+        let sessionStatus = sessions[sessionID]?.status ?? .stopped
+        guard profiles.first(where: { $0.id == profileID })?.role == .manager,
+              let workflow = managerWorkflows[sessionID] else {
+            return sessionStatus
+        }
+
+        let linkedStatuses = workflow.participantSessionIDs.values.compactMap {
+            sessions[$0]?.status
+        }
+        if sessionStatus == .working || linkedStatuses.contains(.working) {
+            return .working
+        }
+        if sessionStatus == .launching || linkedStatuses.contains(.launching) {
+            return .launching
+        }
+        return sessionStatus
+    }
+
     /// Explicitly routes the selected workflow's sidebar signal. Successful
     /// managed participant turns notify the Manager; participant rows only
     /// signal running or attention states that require action.

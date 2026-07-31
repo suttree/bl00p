@@ -1373,6 +1373,89 @@ func sidebarIndicatorSessionsForManagerScopeToTheSelectedWorkflow() throws {
 
 @MainActor
 @Test
+func managerConversationDisplayStatusReflectsAWorkingLinkedAgent() {
+    let fixture = conversationDisplayStatusFixture()
+    fixture.model.sessions[fixture.managerSessionID]?.status = .completed
+    fixture.model.sessions[fixture.builderSessionID]?.status = .working
+
+    #expect(
+        fixture.model.conversationDisplayStatus(
+            for: fixture.managerID,
+            sessionID: fixture.managerSessionID
+        ) == .working
+    )
+}
+
+@MainActor
+@Test
+func managerConversationDisplayStatusReflectsALaunchingLinkedAgent() {
+    let fixture = conversationDisplayStatusFixture()
+    fixture.model.sessions[fixture.managerSessionID]?.status = .completed
+    fixture.model.sessions[fixture.builderSessionID]?.status = .launching
+
+    #expect(
+        fixture.model.conversationDisplayStatus(
+            for: fixture.managerID,
+            sessionID: fixture.managerSessionID
+        ) == .launching
+    )
+}
+
+@MainActor
+@Test
+func inactiveManagerWorkflowRetainsTheManagersTerminalDisplayStatus() {
+    let fixture = conversationDisplayStatusFixture()
+    fixture.model.sessions[fixture.managerSessionID]?.status = .completed
+    fixture.model.sessions[fixture.builderSessionID]?.status = .stopped
+    fixture.model.managerWorkflows[fixture.managerSessionID]?.stage = .completed
+
+    #expect(
+        fixture.model.conversationDisplayStatus(
+            for: fixture.managerID,
+            sessionID: fixture.managerSessionID
+        ) == .completed
+    )
+}
+
+@MainActor
+@Test
+func managerConversationDisplayStatusIgnoresBackgroundWorkflowActivity() {
+    let fixture = conversationDisplayStatusFixture()
+    fixture.model.sessions[fixture.managerSessionID]?.status = .completed
+    fixture.model.sessions[fixture.builderSessionID]?.status = .stopped
+    fixture.model.sessions[fixture.backgroundBuilderSessionID]?.status = .working
+
+    #expect(
+        fixture.model.conversationDisplayStatus(
+            for: fixture.managerID,
+            sessionID: fixture.managerSessionID
+        ) == .completed
+    )
+}
+
+@MainActor
+@Test
+func standaloneAndParticipantConversationDisplayStatusesStaySessionScoped() {
+    let fixture = conversationDisplayStatusFixture()
+    fixture.model.sessions[fixture.builderSessionID]?.status = .blocked
+    fixture.model.sessions[fixture.standaloneSessionID]?.status = .needsApproval
+
+    #expect(
+        fixture.model.conversationDisplayStatus(
+            for: fixture.builderID,
+            sessionID: fixture.builderSessionID
+        ) == .blocked
+    )
+    #expect(
+        fixture.model.conversationDisplayStatus(
+            for: fixture.standaloneID,
+            sessionID: fixture.standaloneSessionID
+        ) == .needsApproval
+    )
+}
+
+@MainActor
+@Test
 func newChatsRequireARepositoryAndLockItAfterStarting() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("bl00p-chat-repository-\(UUID().uuidString)")
@@ -10774,6 +10857,123 @@ private actor HandoffRecordingRuntime: AgentRuntime {
     }
 
     func stop(profile: BotProfile) async {}
+}
+
+@MainActor
+private func conversationDisplayStatusFixture() -> (
+    model: AppModel,
+    managerID: UUID,
+    builderID: UUID,
+    standaloneID: UUID,
+    managerSessionID: UUID,
+    builderSessionID: UUID,
+    backgroundBuilderSessionID: UUID,
+    standaloneSessionID: UUID
+) {
+    let managerID = UUID()
+    let builderID = UUID()
+    let standaloneID = UUID()
+    let managerSessionID = UUID()
+    let backgroundManagerSessionID = UUID()
+    let builderSessionID = UUID()
+    let backgroundBuilderSessionID = UUID()
+    let standaloneSessionID = UUID()
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: ManagerTeamConfiguration(builderProfileID: builderID)
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement."
+    )
+    let standalone = BotProfile(
+        id: standaloneID,
+        name: "Standalone",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review independently."
+    )
+    let model = AppModel(
+        runtime: ImmediateRecordingRuntime(),
+        store: AppStateStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("bl00p-header-status-\(UUID().uuidString)")
+        )
+    )
+    model.profiles = [manager, builder, standalone]
+    model.sessions = [
+        managerSessionID: AgentSessionState(
+            id: managerSessionID,
+            ownerProfileID: managerID,
+            status: .completed
+        ),
+        backgroundManagerSessionID: AgentSessionState(
+            id: backgroundManagerSessionID,
+            ownerProfileID: managerID,
+            status: .completed
+        ),
+        builderSessionID: AgentSessionState(
+            id: builderSessionID,
+            ownerProfileID: builderID,
+            status: .stopped
+        ),
+        backgroundBuilderSessionID: AgentSessionState(
+            id: backgroundBuilderSessionID,
+            ownerProfileID: builderID,
+            status: .stopped
+        ),
+        standaloneSessionID: AgentSessionState(
+            id: standaloneSessionID,
+            ownerProfileID: standaloneID,
+            status: .stopped
+        )
+    ]
+    model.sessionOrder = [
+        managerID: [managerSessionID, backgroundManagerSessionID],
+        builderID: [builderSessionID],
+        standaloneID: [standaloneSessionID]
+    ]
+    model.selectedSessionIDs = [managerID: managerSessionID]
+    model.selectedBotID = managerID
+    model.managerWorkflows = [
+        managerSessionID: ManagerWorkflow(
+            managerProfileID: managerID,
+            team: manager.managerTeam ?? ManagerTeamConfiguration(),
+            request: "Current workflow",
+            stage: .building,
+            participantSessionIDs: [
+                .manager: managerSessionID,
+                .builder: builderSessionID
+            ]
+        ),
+        backgroundManagerSessionID: ManagerWorkflow(
+            managerProfileID: managerID,
+            team: manager.managerTeam ?? ManagerTeamConfiguration(),
+            request: "Background workflow",
+            stage: .building,
+            participantSessionIDs: [
+                .manager: backgroundManagerSessionID,
+                .builder: backgroundBuilderSessionID
+            ]
+        )
+    ]
+    return (
+        model,
+        managerID,
+        builderID,
+        standaloneID,
+        managerSessionID,
+        builderSessionID,
+        backgroundBuilderSessionID,
+        standaloneSessionID
+    )
 }
 
 private func managedWorkflowFixture() -> (
