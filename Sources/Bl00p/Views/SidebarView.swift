@@ -9,6 +9,9 @@ import SwiftOpenUI
 
 struct SidebarView: View {
     @ObservedObject var model: AppModel
+    #if os(macOS)
+    @ObservedObject var updateController: UpdateController
+    #endif
     let windowColorScheme: ColorScheme
     @State private var renameTargetID: UUID?
     @State private var renameDraft = ""
@@ -34,7 +37,9 @@ struct SidebarView: View {
             .buttonStyle(.bordered)
             .padding(14)
 
-            #if !os(macOS)
+            #if os(macOS)
+            macOSUpdateFooter
+            #else
             updateFooter
             #endif
         }
@@ -55,6 +60,41 @@ struct SidebarView: View {
             rename: { id, name in model.rename(id, to: name) }
         ))
     }
+
+    #if os(macOS)
+    @ViewBuilder
+    private var macOSUpdateFooter: some View {
+        if updateController.isUpdateAvailable {
+            Button {
+                updateController.requestInstallation()
+            } label: {
+                if updateController.isInstallationRequested {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.bl00p(.title3, weight: .semibold))
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.bl00pInk)
+            .disabled(updateController.isInstallationRequested)
+            .help(
+                updateController.isInstallationRequested
+                    ? "Preparing Update…"
+                    : "Update and Relaunch"
+            )
+            .accessibilityLabel(
+                updateController.isInstallationRequested
+                    ? "Preparing Update"
+                    : "Update and Relaunch"
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 12)
+        }
+    }
+    #endif
 
     private var sidebarColors: [Color] {
         #if os(macOS)
@@ -102,7 +142,7 @@ struct SidebarView: View {
             ForEach(model.profiles) { profile in
                 BotRow(
                     profile: profile,
-                    sessions: model.sidebarIndicatorSessions(for: profile.id),
+                    indicator: model.sidebarIndicatorState(for: profile.id),
                     windowColorScheme: windowColorScheme
                 )
                 .tag(Optional(profile.id))
@@ -145,7 +185,7 @@ struct SidebarView: View {
                 } label: {
                     BotRow(
                         profile: profile,
-                        sessions: model.sidebarIndicatorSessions(for: profile.id),
+                        indicator: model.sidebarIndicatorState(for: profile.id),
                         windowColorScheme: windowColorScheme
                     )
                     .padding(.horizontal, 10)
@@ -380,14 +420,8 @@ private final class RenameTextFieldControl: NSTextField {
 
 private struct BotRow: View {
     let profile: BotProfile
-    let sessions: [AgentSessionState]
+    let indicator: SidebarIndicatorState
     let windowColorScheme: ColorScheme
-
-    private var showsAttention: Bool {
-        sessions.contains {
-            $0.status.needsAttention || $0.hasUnreadCompletion
-        }
-    }
 
     private var sidebarTop: Color {
         #if os(macOS)
@@ -406,7 +440,7 @@ private struct BotRow: View {
                 size: 32
             )
                 .overlay(alignment: .topTrailing) {
-                    if showsAttention {
+                    if indicator.showsBadge {
                         Circle()
                             .fill(Color.bl00pPink)
                             .frame(width: 10, height: 10)
@@ -434,9 +468,7 @@ private struct BotRow: View {
 
             Spacer(minLength: 2)
 
-            if sessions.contains(where: {
-                $0.status == .working || $0.status == .launching
-            }) {
+            if indicator.isRunning {
                 ProgressView()
                     .controlSize(.small)
             }

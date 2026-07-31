@@ -584,13 +584,13 @@ final class AppModel: ObservableObject {
         return participantID
     }
 
-    /// Sessions whose status drives the sidebar row indicators for a bot:
-    /// only the chat currently in view, so stale/background chats don't
-    /// signal attention on the avatar.
-    func sidebarIndicatorSessions(for profileID: UUID) -> [AgentSessionState] {
+    /// Explicitly routes the selected workflow's sidebar signal. Successful
+    /// managed participant turns notify the Manager; participant rows only
+    /// signal running or attention states that require action.
+    func sidebarIndicatorState(for profileID: UUID) -> SidebarIndicatorState {
         guard let profile = profiles.first(where: { $0.id == profileID })
         else {
-            return []
+            return .idle
         }
 
         if profile.role == .manager {
@@ -598,14 +598,41 @@ final class AppModel: ObservableObject {
             let participantSessions = managerWorkflows[managerSession.id]?
                 .participantSessionIDs.values
                 .compactMap { sessions[$0] } ?? []
-            return [managerSession] + participantSessions
+            return SidebarIndicatorState(
+                showsBadge: managerSession.status.needsAttention
+                    || managerSession.hasUnreadCompletion,
+                isRunning:
+                    managerSession.status == .working
+                    || managerSession.status == .launching
+                    || participantSessions.contains {
+                        $0.status == .working || $0.status == .launching
+                    }
+            )
         }
 
         guard let sessionID = conversationSessionID(for: profileID),
               let currentSession = sessions[sessionID] else {
-            return [session(for: profileID)]
+            let standalone = session(for: profileID)
+            let isManagedParticipant =
+                tabOwnerProfileID(for: profileID) != profileID
+            return SidebarIndicatorState(
+                showsBadge: standalone.status.needsAttention
+                    || (!isManagedParticipant
+                        && standalone.hasUnreadCompletion),
+                isRunning: standalone.status == .working
+                    || standalone.status == .launching
+            )
         }
-        return [currentSession]
+
+        let isManagedParticipant =
+            tabOwnerProfileID(for: profileID) != profileID
+        return SidebarIndicatorState(
+            showsBadge: currentSession.status.needsAttention
+                || (!isManagedParticipant
+                    && currentSession.hasUnreadCompletion),
+            isRunning: currentSession.status == .working
+                || currentSession.status == .launching
+        )
     }
 
     func selectTab(_ sessionID: UUID, viewing profileID: UUID) {
@@ -2067,12 +2094,22 @@ final class AppModel: ObservableObject {
         }
 
         for managerID in matchingManagerIDs {
+            if status.needsAttention {
+                clearManagerWorkflowUnread(managerID)
+            }
             switch status {
             case .needsAnswer:
                 if let workflow = managerWorkflows[managerID],
-                   workflow.stage == .reviewing
-                    || workflow.stage == .verifying,
-                   latestReviewOutput(for: profileID).disposition != nil {
+                   isStructuredReviewCompletion(
+                       sessionID: profileID,
+                       reportedStatus: status,
+                       workflow: workflow
+                   ) {
+                    if var participant = sessions[profileID] {
+                        participant.status = .completed
+                        participant.hasUnreadCompletion = false
+                        sessions[profileID] = participant
+                    }
                     resumeWorkflowIndicator(managerID)
                     advanceWorkflow(managerID, completedBy: profileID)
                 } else {
@@ -2118,6 +2155,79 @@ final class AppModel: ObservableObject {
                 advanceWorkflow(managerID, completedBy: profileID)
             }
         }
+    }
+
+    private func managerWorkflowID(
+        containingParticipantSession sessionID: UUID
+    ) -> UUID? {
+        managerWorkflows.first(where: {
+            $0.value.participantSessionIDs
+                .filter { $0.key != .manager }
+                .values
+                .contains(sessionID)
+        })?.key
+    }
+
+    private func isStructuredReviewCompletion(
+        sessionID: UUID,
+        reportedStatus: AgentStatus,
+        workflow: ManagerWorkflow
+    ) -> Bool {
+        guard reportedStatus == .needsAnswer,
+              workflow.stage == .reviewing
+                || workflow.stage == .verifying,
+              expectedProfileID(for: workflow) == sessionID,
+              latestReviewOutput(for: sessionID).disposition != nil else {
+            return false
+        }
+        return true
+    }
+
+    private func clearManagerWorkflowUnread(_ managerID: UUID) {
+        guard var managerSession = sessions[managerID],
+              managerSession.hasUnreadCompletion else {
+            return
+        }
+        managerSession.hasUnreadCompletion = false
+        sessions[managerID] = managerSession
+    }
+
+    private func managerWorkflowUpdateIsUnread(_ managerID: UUID) -> Bool {
+        guard let ownerProfileID = sessions[managerID]?.ownerProfileID
+                ?? managerWorkflows[managerID]?.managerProfileID else {
+            return true
+        }
+        return selectedBotID != ownerProfileID
+            || selectedSessionID(for: ownerProfileID) != managerID
+            || !isAppWindowActive()
+    }
+
+    private func appendWorkflowUpdate(
+        _ update: WorkflowUpdate,
+        to managerID: UUID,
+        id: UUID = UUID(),
+        marksUnread: Bool = true
+    ) {
+        guard var managerSession = sessions[managerID],
+              !managerSession.entries.contains(where: { $0.id == id })
+        else {
+            return
+        }
+        managerSession.entries.append(
+            TimelineEntry(
+                id: id,
+                kind: .system,
+                text: update.headline,
+                workflowUpdate: update
+            )
+        )
+        if marksUnread {
+            managerSession.hasUnreadCompletion =
+                managerWorkflowUpdateIsUnread(managerID)
+        }
+        managerSession.updatedAt = .now
+        sessions[managerID] = managerSession
+        save(immediately: true)
     }
 
     private func pauseWorkflow(_ managerID: UUID, reason: String) {
@@ -2259,6 +2369,11 @@ final class AppModel: ObservableObject {
             )
 
         case .reviewing:
+            appendReviewWorkflowUpdate(
+                to: managerID,
+                stage: .reviewing,
+                output: reviewOutput
+            )
             if reviewOutput?.disposition == .clean {
                 beginPublishing(
                     managerID,
@@ -2294,6 +2409,11 @@ final class AppModel: ObservableObject {
             )
 
         case .verifying:
+            appendReviewWorkflowUpdate(
+                to: managerID,
+                stage: .verifying,
+                output: reviewOutput
+            )
             if reviewOutput?.disposition == .clean {
                 beginPublishing(
                     managerID,
@@ -2349,6 +2469,33 @@ final class AppModel: ObservableObject {
         case .completed:
             break
         }
+    }
+
+    private func appendReviewWorkflowUpdate(
+        to managerID: UUID,
+        stage: ManagerWorkflowStage,
+        output: ReviewOutput?
+    ) {
+        let passed = output?.disposition == .clean
+        let headline: String
+        if stage == .verifying {
+            headline = passed
+                ? "Revision verified"
+                : "Further changes requested"
+        } else {
+            headline = passed ? "Review passed" : "Changes requested"
+        }
+        appendWorkflowUpdate(
+            WorkflowUpdate(
+                role: .reviewer,
+                outcome: passed ? .success : .attention,
+                headline: headline,
+                summary: WorkflowUpdateSummarizer.concise(
+                    output?.summary ?? ""
+                )
+            ),
+            to: managerID
+        )
     }
 
     private static let workflowPlanApprovalTitle =
@@ -2729,24 +2876,6 @@ final class AppModel: ObservableObject {
         completed.updatedAt = .now
         managerWorkflows[managerID] = completed
 
-        let testEvidence = completed.latestHandoff.map {
-            "Verification: \($0.testStatus.label) — \($0.testSummary)"
-        }
-        let completionEntry = TimelineEntry(
-            kind: .system,
-            text: "Managed workflow complete",
-            detail: [
-                completed.branch.map { "Branch: \($0)" },
-                testEvidence,
-                completed.verificationSummary.map {
-                    "Reviewer: \($0)"
-                },
-                "Publisher: \(publisherSummary)",
-                "Draft PR: \(draftURL)"
-            ]
-            .compactMap { $0 }
-            .joined(separator: "\n")
-        )
         var managerSession =
             sessions[managerID]
                 ?? AgentSessionState(
@@ -2755,9 +2884,30 @@ final class AppModel: ObservableObject {
                     repositoryPath: completed.repositoryPath
                 )
         managerSession.status = .completed
-        managerSession.entries.append(completionEntry)
         sessions[managerID] = managerSession
-        save(immediately: true)
+        let testSummary = completed.latestHandoff.map {
+            "\($0.testStatus.label) — \($0.testSummary)"
+        }
+        appendWorkflowUpdate(
+            WorkflowUpdate(
+                role: .publisher,
+                outcome: .success,
+                headline: "Draft PR created",
+                summary: WorkflowUpdateSummarizer.concise(
+                    publisherSummary.replacingOccurrences(
+                        of: draftURL,
+                        with: ""
+                    )
+                ),
+                branch: completed.branch,
+                testSummary: testSummary,
+                reviewSummary: WorkflowUpdateSummarizer.concise(
+                    completed.verificationSummary ?? ""
+                ),
+                pullRequestURL: draftURL
+            ),
+            to: managerID
+        )
         workflowStageStartedAt[managerID] = nil
         let elapsedMilliseconds = Int64(
             Date.now.timeIntervalSince(completed.startedAt) * 1_000
@@ -3462,6 +3612,40 @@ final class AppModel: ObservableObject {
         workflow.updatedAt = .now
         managerWorkflows[managerID] = workflow
         save()
+        let builderSessionID = participantSessionID(
+            .builder,
+            in: workflow
+        )
+        let builderNeedsAttention = builderSessionID.flatMap {
+            sessions[$0]?.status.needsAttention
+        } ?? false
+        appendWorkflowUpdate(
+            WorkflowUpdate(
+                role: .builder,
+                outcome: builderNeedsAttention ? .attention : .success,
+                headline: {
+                    if dispatch.kind == .verification {
+                        return builderNeedsAttention
+                            ? "Revision ready with a caveat"
+                            : "Revision ready"
+                    }
+                    return builderNeedsAttention
+                        ? "Implementation ready with a caveat"
+                        : "Implementation ready"
+                }(),
+                summary: builderSessionID.flatMap {
+                    WorkflowUpdateSummarizer.concise(
+                        latestAssistantText(for: $0)
+                    )
+                },
+                branch: package.branch,
+                testSummary:
+                    "\(package.testStatus.label) — \(package.testSummary)"
+            ),
+            to: managerID,
+            id: dispatchID,
+            marksUnread: !builderNeedsAttention
+        )
         return true
     }
 
@@ -3891,11 +4075,21 @@ final class AppModel: ObservableObject {
         switch event {
         case .status(let status):
             let previousStatus = state.status
+            let structuredReviewCompleted =
+                managerWorkflows.values.contains {
+                    isStructuredReviewCompletion(
+                        sessionID: profileID,
+                        reportedStatus: status,
+                        workflow: $0
+                    )
+                }
+            let storedStatus: AgentStatus =
+                structuredReviewCompleted ? .completed : status
             notice = AgentAttentionNotice.transition(
                 from: previousStatus,
-                to: status
+                to: storedStatus
             )
-            state.status = status
+            state.status = storedStatus
             statusTransition = (previousStatus, status)
             if status == .failed || status == .stopped {
                 connectedProfileIDs.remove(profileID)
@@ -3917,10 +4111,16 @@ final class AppModel: ObservableObject {
                 inFlightUserEntryIDs.removeValue(forKey: profileID)
             }
             if status == .completed {
-                state.hasUnreadCompletion =
-                    selectedBotID != ownerProfileID
-                        || selectedSessionID(for: ownerProfileID) != profileID
-                        || !AppWindowActivity.isActive
+                if managerWorkflowID(
+                    containingParticipantSession: profileID
+                ) != nil {
+                    state.hasUnreadCompletion = false
+                } else {
+                    state.hasUnreadCompletion =
+                        selectedBotID != ownerProfileID
+                            || selectedSessionID(for: ownerProfileID) != profileID
+                            || !AppWindowActivity.isActive
+                }
             }
         case .entry(let entry):
             state.entries.append(entry)

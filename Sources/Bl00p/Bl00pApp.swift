@@ -13,6 +13,9 @@ import SwiftOpenUI
 
 struct RootView: View {
     @ObservedObject var model: AppModel
+    #if os(macOS)
+    @ObservedObject var updateController: UpdateController
+    #endif
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -78,8 +81,17 @@ struct RootView: View {
 
     private var splitView: some View {
         NavigationSplitView {
+            #if os(macOS)
+            SidebarView(
+                model: model,
+                updateController: updateController,
+                windowColorScheme: colorScheme
+            )
+                .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 300)
+            #else
             SidebarView(model: model, windowColorScheme: colorScheme)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 300)
+            #endif
         } detail: {
             detail
         }

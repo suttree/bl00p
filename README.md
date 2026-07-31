@@ -41,7 +41,9 @@ The current prototype includes:
   can resume with the original plan, review findings, publishing context, and
   draft PR details intact
 - Automatic macOS releases from every validated `main` merge, with signed
-  Sparkle updates discovered hourly or immediately from **Check for Updates…**
+  Sparkle updates discovered hourly or immediately from **Check for Updates…**,
+  plus an optional sidebar control to install and relaunch when an update is
+  available
 
 ## Run the prototype (Linux)
 
@@ -131,9 +133,12 @@ signature checks, and appcast verification pass, so incomplete work must not be
 merged to `main`.
 
 While bl00p is running, Sparkle looks for a newer build at least once per hour;
-**Check for Updates…** starts an immediate check. Authenticated updates can
-download automatically and install when bl00p quits or is relaunched without
-forcing an active session to restart.
+**Check for Updates…** starts an immediate check. When Sparkle finds an
+authenticated update, an update icon appears at the bottom-left of the sidebar.
+Choose it to install the update and relaunch bl00p; if the download is still
+being prepared, bl00p waits and completes the request when Sparkle is ready.
+Background checks never force an active session to restart, and downloaded
+updates can still install when bl00p next quits.
 
 Release cadence, Sparkle signing, and GitHub Actions setup are documented in
 [docs/RELEASING.md](docs/RELEASING.md). This applies to the macOS build only —
@@ -191,6 +196,19 @@ persisted workflow with this sequence:
 6. The Documenter updates documentation, commits, pushes, and opens a draft PR.
 7. bl00p completes the workflow directly from the recorded branch, test
    evidence, Reviewer result, Documenter summary, and draft PR URL.
+
+The Manager transcript presents each completed stage as a compact status card
+instead of copying the participant's full response. Builder, revision, Reviewer,
+and Documenter / PR Writer cards show the role outcome with a bounded summary
+and any available branch, test, review, or publishing evidence. The final
+**Draft PR created** card highlights the clickable pull-request link. Cards stay
+useful when a participant provides no optional summary, and full responses
+remain available in the corresponding participant conversation.
+
+Sidebar notifications follow the action required: a successful managed stage
+badges only the Manager, while a blocked, failed, approval, or question state
+badges only the participant that needs attention. Standalone bot completions
+continue to badge their own row.
 
 Before each Reviewer pass, bl00p requires a clean Builder worktree, the
 appropriate committed revision, and passing test evidence. If a Builder turn

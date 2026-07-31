@@ -6,6 +6,11 @@ All notable changes to bl00p are documented in this file.
 
 ### Added
 
+- Add compact, structured Manager workflow cards for completed Builder,
+  revision, Reviewer, and Documenter / PR Writer stages, plus a prominent
+  **Draft PR created** card with branch, verification, reviewer result, and
+  clickable pull-request link. Summaries are bounded and omit protocol or
+  command noise while preserving compatibility with older saved sessions.
 - Add positional conversation-tab labels and `⌘1`–`⌘9` shortcuts on macOS,
   available only in the Manager view, with shortcuts and labels reindexing as
   tabs are added or closed.
@@ -13,6 +18,9 @@ All notable changes to bl00p are documented in this file.
   Repository…** action in the conversation header for new chats.
 - Add signed automatic update checks, installation, and relaunch through
   Sparkle and GitHub Releases.
+- Show an optional macOS sidebar update icon after Sparkle finds a newer
+  release, allowing the user to install and relaunch immediately or queue the
+  action while the update is still being prepared.
 - Add automatic stable GitHub Releases for every validated merge to `main`,
   with retry-safe tags and assets, monotonic Sparkle build numbers, and
   verified appcast metadata.
@@ -76,6 +84,9 @@ All notable changes to bl00p are documented in this file.
 - Recreate and re-pin the transcript scroll container when switching chats so
   outgoing scroll offsets, lazy-layout state, and late viewport callbacks
   cannot leave the incoming chat blank.
+- Route successful managed-stage badges only to the selected Manager chat and
+  route blocked, failed, approval, and question badges only to the participant
+  that needs attention, avoiding duplicate sidebar and Dock counts.
 - Clarify the close-chat warning so managed worktree deletion, retained Git
   branches, uncommitted changes, and unsafe worktrees left on disk are each
   described accurately.
