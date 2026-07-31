@@ -978,6 +978,8 @@ private struct TimelineEntryView: View {
                     update: update,
                     timestamp: entry.timestamp
                 )
+            } else if entry.presentation == .failure {
+                workflowFailureWarning
             } else {
                 systemMessage
             }
@@ -1089,6 +1091,44 @@ private struct TimelineEntryView: View {
         .font(.bl00p(.callout))
         .foregroundStyle(.secondary)
         .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    private var workflowFailureWarning: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(.red)
+                .frame(width: 32, height: 32)
+                .background(.red.opacity(0.16), in: RoundedRectangle(cornerRadius: 9))
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Workflow paused")
+                    .font(.bl00p(.callout, weight: .bold))
+                    .foregroundStyle(.red)
+
+                if let detail = entry.detail {
+                    Text(detail)
+                        .font(.bl00p(.callout))
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+                }
+
+                TimelineTimestamp(entry.timestamp)
+            }
+        }
+        .padding(14)
+        .background(.red.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(.red.opacity(0.75), lineWidth: 2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        #if os(macOS)
+        .accessibilityElement(children: .combine)
+        #endif
+        .accessibilityLabel(
+            "Workflow paused due to agent failure. \(entry.detail ?? entry.text). \(TimelineTimestampFormatter.fullString(for: entry.timestamp))"
+        )
     }
 
     private func eventCard(icon: String, tint: Color) -> some View {

@@ -173,6 +173,18 @@ optional summaries must not produce placeholder text. `TimelineEntryView` uses
 the payload to render a normal-sized success or attention card; the full
 participant transcript remains in its private workflow chat.
 
+Managed participant failures use the optional
+`TimelineEntry.presentation` marker with the `.failure` value. Only the
+participant status transition to `AgentStatus.failed` sets this marker; blocked,
+stopped, approval, planning, and handoff pauses continue to use the normal
+system-entry path. In `ConversationView`, a failure-marked system entry renders
+as the full-width red **Workflow paused** warning with the participant name,
+reason, timestamp, selectable detail text, and a combined accessibility label.
+Keep this field optional so transcripts saved before failure presentation was
+introduced decode with `presentation == nil`. The focused regression coverage
+also verifies failure persistence across relaunch, ordinary pause behavior,
+Codable round-tripping, and legacy entries without the field.
+
 Use `WorkflowUpdateSummarizer` only on final assistant response text. It
 deterministically removes protocol markers, fenced code, labelled command
 output, and repeated paragraphs before enforcing the length bound, adding an

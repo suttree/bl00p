@@ -18,7 +18,10 @@ All notable changes to bl00p are documented in this file.
   targeted Builder handoff repairs before pausing with the unmet requirement
   and latest evidence. Permission-denied test runs can advance as unverified;
   denied commit actions remain approval-gated.
-
+- Add prominent, persisted red **Workflow paused** warning cards to Manager
+  threads when a managed Builder, Reviewer / QA, or Publisher fails, including
+  the failing agent, reason, timestamp, selectable details, and accessibility
+  text; ordinary workflow pauses retain their grey system-message appearance.
 - Add compact, structured Manager workflow cards for completed Builder,
   revision, Reviewer, and Documenter / PR Writer stages, plus a prominent
   **Draft PR created** card with branch, verification, reviewer result, and
