@@ -153,6 +153,15 @@ jobs:
           ref: ${{ env.RELEASE_SHA }}
           fetch-depth: 0
 
+      - name: Install OpenSSL 3
+        run: |
+          brew install openssl@3
+          echo "OPENSSL_BIN=$(brew --prefix openssl@3)/bin/openssl" \
+              >> "$GITHUB_ENV"
+
+      - name: Verify OpenSSL Ed25519 support
+        run: sh scripts/check-openssl-ed25519.sh
+
       - name: Verify automatic release configuration
         run: sh scripts/check-release-config.sh
 

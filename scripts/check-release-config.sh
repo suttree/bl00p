@@ -53,6 +53,9 @@ done
 for required in \
     'CODE_SIGN_IDENTITY: "-"' \
     'SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}' \
+    'brew install openssl@3' \
+    'OPENSSL_BIN=$(brew --prefix openssl@3)/bin/openssl' \
+    'scripts/check-openssl-ed25519.sh' \
     'scripts/verify-adhoc-signatures.sh' \
     'scripts/verify-update-signature.sh' \
     'EXPECTED_SPARKLE_VERSION' \
@@ -80,6 +83,14 @@ policy_check_count=$(
 )
 if [ "$policy_check_count" -ne 2 ]; then
     echo "Both CI platforms must run the release-policy check" >&2
+    exit 1
+fi
+
+openssl_check_count=$(
+    grep -Fc 'scripts/check-openssl-ed25519.sh' "$ci_workflow"
+)
+if [ "$openssl_check_count" -ne 1 ]; then
+    echo "macOS CI must verify OpenSSL Ed25519 support" >&2
     exit 1
 fi
 

@@ -81,6 +81,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Select and smoke-test OpenSSL 3 explicitly in macOS CI and releases so
+  Sparkle Ed25519 appcast verification does not fall back to the runner's
+  incompatible OpenSSL 1.1 command.
 - Recreate and re-pin the transcript scroll container when switching chats so
   outgoing scroll offsets, lazy-layout state, and late viewport callbacks
   cannot leave the incoming chat blank.
