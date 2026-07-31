@@ -47,6 +47,10 @@ All notable changes to bl00p are documented in this file.
 
 ### Changed
 
+- Integrate the conversation header into the unified macOS window toolbar,
+  keeping repository and session actions available while retaining the inline
+  header on Linux. Long repository and worktree paths now truncate in the
+  middle to preserve the toolbar layout.
 - Remove the manual **Hand off** control from Builder conversations; managed
   workflows continue to deliver Builder context to Reviewers automatically.
 - Publish macOS updates with account-free ad-hoc code signing while retaining

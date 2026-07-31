@@ -311,6 +311,26 @@ every mode. `ClaudeToolApprovalPolicy.allowedTools(for:)` should continue to
 omit preapproved shell access for Reviewers and Managers so shell requests
 still flow through the runtime policy.
 
+## Conversation header placement
+
+`ConversationView` keeps the complete conversation header inline on Linux,
+where the SwiftOpenUI/GTK4 backend has no native macOS toolbar. On macOS, the
+identity group is placed in the unified window toolbar's `.principal` slot and
+the repository, terminal, Stop, and settings controls are placed in
+`.primaryAction`; the duplicate inline row and divider stay excluded from the
+macOS content column. Keep the existing action closures, enablement rules,
+help text, and repository/worktree path resolution shared by both platform
+presentations.
+
+The identity group must allow its path label to shrink and use middle
+truncation. Keep its maximum width bounded so the toolbar actions, sidebar
+toggle, inspector, and window controls remain usable at the 980×640 minimum
+window size as well as the 1240×780 default. When changing this layout, smoke
+test empty, selected, locked, and worktree-backed repositories; idle and
+running sessions; Manager and non-Manager conversations; both sidebar states;
+the inspector; and light and dark appearances on macOS. Verify that Linux still
+shows the inline header.
+
 ## Repository-gated composer
 
 `AgentSessionState.repositoryPath` is the UI source of truth for whether a chat

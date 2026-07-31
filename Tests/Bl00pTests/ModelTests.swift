@@ -1563,7 +1563,8 @@ func managedWorkflowsCreateDedicatedSessionsAndCanRunConcurrently() async throws
             selectedBotID: managerID
         )
     )
-    let model = AppModel(runtime: ImmediateRecordingRuntime(), store: store)
+    let runtime = ImmediateRecordingRuntime()
+    let model = AppModel(runtime: runtime, store: store)
     let standaloneBuilderSessionID = try #require(
         model.selectedSessionID(for: builderID)
     )
@@ -1629,11 +1630,22 @@ func managedWorkflowsCreateDedicatedSessionsAndCanRunConcurrently() async throws
             == "/tmp/repository-b"
     )
 
+    for _ in 0..<100 where
+        model.managerWorkflows[managerID]?.planApprovalEntryID == nil
+            || model.managerWorkflows[secondManagerSessionID]?.planApprovalEntryID == nil {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(await runtime.responseCount == 2)
+    #expect(model.managerWorkflows[managerID]?.planApprovalEntryID != nil)
+    #expect(
+        model.managerWorkflows[secondManagerSessionID]?.planApprovalEntryID
+            != nil
+    )
+
     let closeError = await model.closeSession(
         managerID,
         confirmedDestructiveCleanup: true
     )
-    try await Task.sleep(for: .milliseconds(20))
     #expect(closeError == nil)
     #expect(model.sessions[managerID] == nil)
     #expect(model.managerWorkflows[managerID] == nil)

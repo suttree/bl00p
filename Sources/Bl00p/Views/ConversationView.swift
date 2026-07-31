@@ -27,6 +27,7 @@ struct ConversationView: View {
             }
 
             VStack(spacing: 0) {
+                #if !os(macOS)
                 ConversationHeader(
                     profile: profile,
                     session: session,
@@ -49,6 +50,7 @@ struct ConversationView: View {
                 )
 
                 Divider()
+                #endif
 
                 if profile.role == .manager,
                    let selectedTabSessionID =
@@ -138,6 +140,42 @@ struct ConversationView: View {
                 )
             }
             .background(Color.bl00pTextBackground)
+            #if os(macOS)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    ConversationHeaderIdentity(
+                        profile: profile,
+                        session: session
+                    )
+                    // Keep the title group small enough for the sidebar,
+                    // inspector, and toolbar actions at the minimum window
+                    // width. The path itself truncates in the middle.
+                    .frame(minWidth: 0, maxWidth: 360, alignment: .leading)
+                }
+
+                ToolbarItemGroup(placement: .primaryAction) {
+                    ConversationHeaderActions(
+                        session: session,
+                        stop: {
+                            model.stop(profile.id, sessionID: sessionID)
+                        },
+                        chooseRepository: {
+                            model.chooseRepository(for: sessionID)
+                        },
+                        repositoryCanBeChanged:
+                            model.repositoryCanBeChanged(for: sessionID),
+                        openInTerminal: {
+                            guard let path = WorktreeTerminalLauncher.terminalTargetPath(
+                                worktreePath: session.worktree?.worktreePath,
+                                repositoryPath: session.repositoryPath
+                            ) else { return }
+                            WorktreeTerminalLauncher.open(path)
+                        },
+                        showSettings: { model.isInspectorVisible.toggle() }
+                    )
+                }
+            }
+            #endif
             .task(id: sessionID) {
                 draft = model.sessions[sessionID]?.draft ?? ""
                 attachments = []
@@ -606,16 +644,31 @@ private struct ConversationHeader: View {
     let openInTerminal: () -> Void
     let showSettings: () -> Void
 
-    private var isRunning: Bool {
-        session.status == .launching || session.status == .working
+    var body: some View {
+        HStack(spacing: 12) {
+            ConversationHeaderIdentity(profile: profile, session: session)
+
+            Spacer()
+
+            ConversationHeaderActions(
+                session: session,
+                stop: stop,
+                chooseRepository: chooseRepository,
+                repositoryCanBeChanged: repositoryCanBeChanged,
+                openInTerminal: openInTerminal,
+                showSettings: showSettings
+            )
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .background(Color.bl00pControlBackground)
     }
 
-    private var terminalTargetPath: String? {
-        WorktreeTerminalLauncher.terminalTargetPath(
-            worktreePath: session.worktree?.worktreePath,
-            repositoryPath: session.repositoryPath
-        )
-    }
+}
+
+private struct ConversationHeaderIdentity: View {
+    let profile: BotProfile
+    let session: AgentSessionState
 
     var body: some View {
         HStack(spacing: 12) {
@@ -630,6 +683,7 @@ private struct ConversationHeader: View {
                 HStack(spacing: 8) {
                     Text(profile.name)
                         .font(.bl00p(.headline, weight: .semibold))
+                        .lineLimit(1)
                     StatusPill(status: session.status)
                 }
 
@@ -639,9 +693,42 @@ private struct ConversationHeader: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+            .frame(minWidth: 0, alignment: .leading)
+        }
+    }
 
-            Spacer()
+    private var directoryLabel: String {
+        if let worktree = session.worktree {
+            return "\(worktree.branch) · \(worktree.worktreePath)"
+        }
+        if session.repositoryPath.isEmpty {
+            return "No repository selected for this chat"
+        }
+        return session.repositoryPath
+    }
+}
 
+private struct ConversationHeaderActions: View {
+    let session: AgentSessionState
+    let stop: () -> Void
+    let chooseRepository: () -> Void
+    let repositoryCanBeChanged: Bool
+    let openInTerminal: () -> Void
+    let showSettings: () -> Void
+
+    private var isRunning: Bool {
+        session.status == .launching || session.status == .working
+    }
+
+    private var terminalTargetPath: String? {
+        WorktreeTerminalLauncher.terminalTargetPath(
+            worktreePath: session.worktree?.worktreePath,
+            repositoryPath: session.repositoryPath
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
             if session.repositoryPath.isEmpty {
                 Button("Choose Repository…", action: chooseRepository)
                     .buttonStyle(.borderedProminent)
@@ -685,19 +772,6 @@ private struct ConversationHeader: View {
             .buttonStyle(.bordered)
             .help("Bot settings")
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 12)
-        .background(Color.bl00pControlBackground)
-    }
-
-    private var directoryLabel: String {
-        if let worktree = session.worktree {
-            return "\(worktree.branch) · \(worktree.worktreePath)"
-        }
-        if session.repositoryPath.isEmpty {
-            return "No repository selected for this chat"
-        }
-        return session.repositoryPath
     }
 }
 
