@@ -8,6 +8,7 @@ fi
 
 appcast=$1
 archive=$2
+openssl_bin=${OPENSSL_BIN:-openssl}
 temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/bl00p-update-verification.XXXXXX")
 
 cleanup() {
@@ -107,21 +108,21 @@ dd \
     seek=12 \
     conv=notrunc \
     2>/dev/null
-openssl pkey \
+"$openssl_bin" pkey \
     -pubin \
     -inform DER \
     -in "$temporary_directory/public-key.der" \
     -out "$temporary_directory/public-key.pem"
 
 printf '%s' "$signature" |
-    openssl base64 -d -A > "$temporary_directory/signature.bin"
+    "$openssl_bin" base64 -d -A > "$temporary_directory/signature.bin"
 
 if [ "$(wc -c < "$temporary_directory/signature.bin" | tr -d ' ')" -ne 64 ]; then
     echo "The appcast Ed25519 signature is not 64 bytes" >&2
     exit 1
 fi
 
-openssl pkeyutl \
+"$openssl_bin" pkeyutl \
     -verify \
     -pubin \
     -inkey "$temporary_directory/public-key.pem" \

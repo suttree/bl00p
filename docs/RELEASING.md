@@ -58,6 +58,11 @@ identity. `scripts/verify-adhoc-signatures.sh` extracts the final ZIP and checks
 that every component is structurally intact, validly signed, and reports
 `Signature=adhoc`.
 
+macOS CI and the release job install Homebrew `openssl@3`, record its exact
+executable in `OPENSSL_BIN`, and smoke-test Ed25519 signing and verification
+before tests or packaging. Signature verification must not rely on the
+runner's default `openssl`, which may not support `pkeyutl -rawin`.
+
 Never commit or print the private seed. Keep a separate secure backup outside
 the repository; the GitHub secret cannot be read back after it is saved.
 
