@@ -1123,7 +1123,9 @@ private struct TimelineEntryView: View {
                 .stroke(.red.opacity(0.75), lineWidth: 2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        #if os(macOS)
         .accessibilityElement(children: .combine)
+        #endif
         .accessibilityLabel(
             "Workflow paused due to agent failure. \(entry.detail ?? entry.text). \(TimelineTimestampFormatter.fullString(for: entry.timestamp))"
         )
