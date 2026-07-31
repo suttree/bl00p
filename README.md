@@ -193,10 +193,12 @@ persisted workflow with this sequence:
    evidence, Reviewer result, Documenter summary, and draft PR URL.
 
 The Manager transcript presents each completed stage as a compact status card
-instead of copying the participant's full response. Builder and Reviewer cards
-show a bounded summary plus structured branch or verification evidence, while
-the final **Draft PR created** card highlights the pull-request link. Full
-responses remain available in the corresponding participant conversation.
+instead of copying the participant's full response. Builder, revision, Reviewer,
+and Documenter / PR Writer cards show the role outcome with a bounded summary
+and any available branch, test, review, or publishing evidence. The final
+**Draft PR created** card highlights the clickable pull-request link. Cards stay
+useful when a participant provides no optional summary, and full responses
+remain available in the corresponding participant conversation.
 
 Sidebar notifications follow the action required: a successful managed stage
 badges only the Manager, while a blocked, failed, approval, or question state

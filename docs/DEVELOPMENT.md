@@ -133,14 +133,19 @@ xcrun swift test --disable-sandbox \
 Manager-only stage summaries are stored in `TimelineEntry.workflowUpdate`.
 The optional payload is backward-compatible with entries persisted before the
 field existed and carries the role, outcome, headline, bounded summary, and
-structured branch, test, review, and pull-request data. `TimelineEntryView`
-uses the payload to render a normal-sized success or attention card; the full
+structured branch, test, review, and pull-request data. Builder, revision,
+Reviewer, and Documenter / PR Writer completions each append one card; the
+publishing card includes the draft PR URL when one is available. Missing
+optional summaries must not produce placeholder text. `TimelineEntryView` uses
+the payload to render a normal-sized success or attention card; the full
 participant transcript remains in its private workflow chat.
 
 Use `WorkflowUpdateSummarizer` only on final assistant response text. It
 deterministically removes protocol markers, fenced code, labelled command
-output, and repeated paragraphs before enforcing the length bound. Do not feed
-streamed reasoning or command timeline entries into the summary.
+output, and repeated paragraphs before enforcing the length bound, adding an
+ellipsis when content is omitted. Do not feed streamed reasoning or command
+timeline entries into the summary. Keep the payload's optional fields optional
+so sessions saved before workflow cards were introduced continue decoding.
 
 ## Structured user questions
 

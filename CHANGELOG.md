@@ -6,9 +6,11 @@ All notable changes to bl00p are documented in this file.
 
 ### Added
 
-- Add compact, structured Manager workflow cards for completed Builder and
-  Reviewer stages, plus a prominent **Draft PR created** card with branch,
-  verification, reviewer result, and clickable pull-request link.
+- Add compact, structured Manager workflow cards for completed Builder,
+  revision, Reviewer, and Documenter / PR Writer stages, plus a prominent
+  **Draft PR created** card with branch, verification, reviewer result, and
+  clickable pull-request link. Summaries are bounded and omit protocol or
+  command noise while preserving compatibility with older saved sessions.
 - Add positional conversation-tab labels and `⌘1`–`⌘9` shortcuts on macOS,
   available only in the Manager view, with shortcuts and labels reindexing as
   tabs are added or closed.
