@@ -66,7 +66,7 @@ if [ -n "${BUILD_NUMBER:-}" ]; then
 fi
 
 env DEVELOPER_DIR="$developer_dir" xcrun actool \
-    "$project_root/Resources/IconComposer/AppIcon.icon" \
+    "$project_root/Resources/Assets.xcassets" \
     --compile "$app_path/Contents/Resources" \
     --output-format human-readable-text \
     --notices \
@@ -81,6 +81,11 @@ env DEVELOPER_DIR="$developer_dir" xcrun actool \
     --development-region en \
     --bundle-identifier dev.bl00p.app \
     --output-partial-info-plist "$icon_info_path"
+
+if [ ! -f "$app_path/Contents/Resources/AppIcon.icns" ]; then
+    echo "Missing compiled AppIcon.icns" >&2
+    exit 1
+fi
 
 # Sparkle's nested services and helpers must be signed from the inside out.
 # Do not use --deep for signing; the Downloader service retains its entitlements.

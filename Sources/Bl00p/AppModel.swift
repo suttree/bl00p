@@ -4132,8 +4132,10 @@ final class AppModel: ObservableObject {
 
     private func syncDockBadge() {
         guard notificationsArePrepared else { return }
-        let count = sessions.values.filter {
-            $0.status.needsAttention || $0.hasUnreadCompletion
+        // The Dock must match the sidebar. Background chats can retain their
+        // history while their old attention state is intentionally hidden.
+        let count = profiles.filter {
+            sidebarIndicatorState(for: $0.id).showsBadge
         }.count
         notifications?.setBadgeCount(count)
     }
