@@ -122,6 +122,14 @@ completion unread. This keeps the Dock count at one for a single routed event.
 Viewing the Manager chat clears its unread state through the normal
 `markSessionViewed` path.
 
+Completion notification copy is role-aware. Builder, Reviewer, and Publisher
+completion bodies only state that the agent finished its turn; they must not
+ask the user to review or imply immediate human action. Manager completion
+bodies direct the user to open bl00p and review the Manager's update. Keep the
+completion title, delivery path, urgency, badge updates, and workflow
+transitions unchanged when editing this copy. Question, approval, blocked, and
+failure copy is independent and must remain unchanged.
+
 Model coverage should verify standalone background chats, selected-chat
 switching, Manager workflow scoping, attention routing, and single-count Dock
 badges. A focused verification run is:

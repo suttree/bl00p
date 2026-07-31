@@ -74,7 +74,9 @@ enum AgentAttentionNotice: Equatable, Sendable {
         case .completed:
             return (
                 "\(profile.name) finished",
-                "The task is ready for your review."
+                profile.role == .manager
+                    ? "Open bl00p to review the Manager's update."
+                    : "This agent finished its turn."
             )
         }
     }
