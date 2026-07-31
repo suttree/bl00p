@@ -8296,7 +8296,10 @@ func claudeCLIClientCompletesThePermissionRoundTrip() async throws {
                 "result": behavior,
                 "permission_denials": []
             }), flush=True)
-            break
+            # Keep stdout open until the test stops the client. Exiting here
+            # races the final output read against the process termination
+            # callback on heavily loaded CI runners.
+            continue
     """.write(to: executable, atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes(
         [.posixPermissions: 0o755],
