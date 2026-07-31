@@ -72,7 +72,7 @@ struct SidebarView: View {
                     ProgressView()
                         .controlSize(.small)
                 } else {
-                    Image(systemName: "arrow.down.circle.fill")
+                    Label("Update available", systemImage: "arrow.down.circle.fill")
                         .font(.bl00p(.title3, weight: .semibold))
                 }
             }
