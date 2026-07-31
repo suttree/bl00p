@@ -590,11 +590,10 @@ private struct WorkflowStageIndicator: View {
             }
         }
         .fixedSize(horizontal: true, vertical: false)
-        #if os(macOS)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Managed workflow progress")
-        .accessibilityValue(accessibilityValue)
-        #endif
+        .bl00pAccessibilitySummary(
+            label: "Managed workflow progress",
+            value: accessibilityValue
+        )
     }
 
     @ViewBuilder
@@ -1132,10 +1131,7 @@ private struct TimelineEntryView: View {
                 .stroke(.red.opacity(0.75), lineWidth: 2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        #if os(macOS)
-        .accessibilityElement(children: .combine)
-        #endif
-        .accessibilityLabel(
+        .bl00pCombinedAccessibilityLabel(
             "Workflow paused due to agent failure. \(entry.detail ?? entry.text). \(TimelineTimestampFormatter.fullString(for: entry.timestamp))"
         )
     }

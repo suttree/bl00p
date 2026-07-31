@@ -86,6 +86,14 @@ if [ "$policy_check_count" -ne 2 ]; then
     exit 1
 fi
 
+portable_ui_check_count=$(
+    grep -Fc 'scripts/check-portable-ui.sh' "$ci_workflow"
+)
+if [ "$portable_ui_check_count" -ne 2 ]; then
+    echo "Both CI platforms must run the portable-UI contract check" >&2
+    exit 1
+fi
+
 openssl_check_count=$(
     grep -Fc 'scripts/check-openssl-ed25519.sh' "$ci_workflow"
 )

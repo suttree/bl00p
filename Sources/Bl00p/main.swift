@@ -11,7 +11,9 @@ struct Bl00pApp: App {
     @StateObject private var model = AppModel()
 
     var body: some Scene {
-        WindowGroup("bl00p") {
+        // SwiftOpenUI requires a title argument; an empty title keeps the GTK
+        // window intentionally untitled.
+        WindowGroup("") {
             RootView(model: model)
                 .frame(minWidth: 980, minHeight: 640)
         }

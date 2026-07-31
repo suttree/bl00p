@@ -24,17 +24,20 @@ struct SidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            brand
             rows
             Divider()
 
-            Button {
-                model.isAddingBot = true
-            } label: {
-                Label("Add Bot", systemImage: "plus")
-                    .frame(maxWidth: .infinity)
+            HStack {
+                Button {
+                    model.isAddingBot = true
+                } label: {
+                    Label("Add Bot", systemImage: "plus")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Spacer(minLength: 0)
             }
-            .buttonStyle(.bordered)
             .padding(14)
 
             #if os(macOS)
@@ -122,19 +125,6 @@ struct SidebarView: View {
         .padding(.bottom, 12)
     }
     #endif
-
-    private var brand: some View {
-        HStack {
-            Text("bl00p")
-                .font(.bl00p(.title3, weight: .heavy, design: .rounded))
-                .foregroundStyle(Color.bl00pInk)
-
-            Spacer()
-        }
-        .padding(.horizontal, 14)
-        .padding(.top, 14)
-        .padding(.bottom, 10)
-    }
 
     #if os(macOS)
     private var rows: some View {
