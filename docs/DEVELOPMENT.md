@@ -173,11 +173,16 @@ remain unchanged.
 
 The application window itself is intentionally untitled on Linux, and macOS
 continues to hide the native window title. The conversation header remains the
-place for status, repository or worktree details, and actions. When changing
-either layout, smoke test the default and minimum
-window sizes in light and dark appearances; on Linux, also confirm the GTK
-window title is not populated with the application name and that **Add Bot**
-still opens its sheet.
+place for the active bot name, status, repository or worktree details, and
+actions. `ConversationHeaderIdentity` keeps the bot name on its own line and
+places the status pill before the repository or worktree label in one centered
+metadata row. The path label must remain single-line, middle-truncated, and
+flexible so toolbar actions remain accessible; preserve the empty-repository
+message and existing action order. This shared identity view is used by both
+the macOS toolbar and the Linux inline header. When changing either layout,
+smoke test the default and minimum window sizes in light and dark appearances;
+on Linux, also confirm the GTK window title is not populated with the
+application name and that **Add Bot** still opens its sheet.
 
 SwiftOpenUI's `WindowGroup` requires an explicit title even though SwiftUI also
 offers a title-less initializer. Keep the Linux entry point on
