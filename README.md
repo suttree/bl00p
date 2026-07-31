@@ -192,6 +192,17 @@ persisted workflow with this sequence:
 7. bl00p completes the workflow directly from the recorded branch, test
    evidence, Reviewer result, Documenter summary, and draft PR URL.
 
+The Manager transcript presents each completed stage as a compact status card
+instead of copying the participant's full response. Builder and Reviewer cards
+show a bounded summary plus structured branch or verification evidence, while
+the final **Draft PR created** card highlights the pull-request link. Full
+responses remain available in the corresponding participant conversation.
+
+Sidebar notifications follow the action required: a successful managed stage
+badges only the Manager, while a blocked, failed, approval, or question state
+badges only the participant that needs attention. Standalone bot completions
+continue to badge their own row.
+
 Before each Reviewer pass, bl00p requires a clean Builder worktree, the
 appropriate committed revision, and passing test evidence. If a Builder turn
 ends with blocked Claude actions but those handoff requirements are already

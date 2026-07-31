@@ -99,21 +99,23 @@ xcrun swift test --disable-sandbox
 
 ## Sidebar indicators
 
-`BotRow` receives the sessions that are allowed to drive its avatar spinner and
-attention dot from `AppModel.sidebarIndicatorSessions(for:)`. Keep that
-selection scoped to the conversation currently visible for the row:
-standalone bots use their selected chat, Manager bots use the selected
-workflow's Manager session and participant sessions, and team-member rows use
-the participant session for the currently selected Manager workflow when one
-is visible.
+`BotRow` receives an explicit `SidebarIndicatorState` from
+`AppModel.sidebarIndicatorState(for:)`. Keep that state scoped to the
+conversation currently visible for the row. Standalone bots derive completion,
+attention, and running state from their selected chat. Managed participants
+show only their own running or actionable state; their successful completion
+is routed to the selected workflow's Manager unread state. The Manager spinner
+can reflect active participants, but its badge comes only from its own
+attention or unread workflow updates.
 
-Do not pass every session for a profile into the sidebar row. Background chats
-may still need attention, remain unread, or be running, but those states belong
-to the conversation tab strip, Dock badge, and notifications rather than the
-sidebar avatar for an idle current chat.
+When a managed participant becomes blocked, fails, asks a question, or requires
+approval, clear any stale Manager completion unread and badge only that
+participant. A completed participant session must not also retain its own
+completion unread. This keeps the Dock count at one for a single routed event.
+Viewing the Manager chat clears its unread state through the normal
+`markSessionViewed` path.
 
 Model coverage should verify standalone background chats, selected-chat
-switching, and Manager workflow scoping. A focused verification run is:
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
@@ -121,8 +123,22 @@ CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-module-cache" \
 SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/swiftpm-module-cache" \
 XDG_CACHE_HOME="$PWD/.build/cache" \
 xcrun swift test --disable-sandbox \
-  --filter sidebarIndicatorSessions
+  --filter sidebarIndicator
 ```
+
+## Managed workflow update cards
+
+Manager-only stage summaries are stored in `TimelineEntry.workflowUpdate`.
+The optional payload is backward-compatible with entries persisted before the
+field existed and carries the role, outcome, headline, bounded summary, and
+structured branch, test, review, and pull-request data. `TimelineEntryView`
+uses the payload to render a normal-sized success or attention card; the full
+participant transcript remains in its private workflow chat.
+
+Use `WorkflowUpdateSummarizer` only on final assistant response text. It
+deterministically removes protocol markers, fenced code, labelled command
+output, and repeated paragraphs before enforcing the length bound. Do not feed
+streamed reasoning or command timeline entries into the summary.
 
 ## Structured user questions
 

@@ -6,6 +6,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Added
 
+- Add compact, structured Manager workflow cards for completed Builder and
+  Reviewer stages, plus a prominent **Draft PR created** card with branch,
+  verification, reviewer result, and clickable pull-request link.
 - Add positional conversation-tab labels and `⌘1`–`⌘9` shortcuts on macOS,
   available only in the Manager view, with shortcuts and labels reindexing as
   tabs are added or closed.
@@ -73,6 +76,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Route successful managed-stage badges only to the selected Manager chat and
+  route blocked, failed, approval, and question badges only to the participant
+  that needs attention, avoiding duplicate sidebar and Dock counts.
 - Clarify the close-chat warning so managed worktree deletion, retained Git
   branches, uncommitted changes, and unsafe worktrees left on disk are each
   described accurately.

@@ -102,7 +102,7 @@ struct SidebarView: View {
             ForEach(model.profiles) { profile in
                 BotRow(
                     profile: profile,
-                    sessions: model.sidebarIndicatorSessions(for: profile.id),
+                    indicator: model.sidebarIndicatorState(for: profile.id),
                     windowColorScheme: windowColorScheme
                 )
                 .tag(Optional(profile.id))
@@ -145,7 +145,7 @@ struct SidebarView: View {
                 } label: {
                     BotRow(
                         profile: profile,
-                        sessions: model.sidebarIndicatorSessions(for: profile.id),
+                        indicator: model.sidebarIndicatorState(for: profile.id),
                         windowColorScheme: windowColorScheme
                     )
                     .padding(.horizontal, 10)
@@ -380,14 +380,8 @@ private final class RenameTextFieldControl: NSTextField {
 
 private struct BotRow: View {
     let profile: BotProfile
-    let sessions: [AgentSessionState]
+    let indicator: SidebarIndicatorState
     let windowColorScheme: ColorScheme
-
-    private var showsAttention: Bool {
-        sessions.contains {
-            $0.status.needsAttention || $0.hasUnreadCompletion
-        }
-    }
 
     private var sidebarTop: Color {
         #if os(macOS)
@@ -406,7 +400,7 @@ private struct BotRow: View {
                 size: 32
             )
                 .overlay(alignment: .topTrailing) {
-                    if showsAttention {
+                    if indicator.showsBadge {
                         Circle()
                             .fill(Color.bl00pPink)
                             .frame(width: 10, height: 10)
@@ -434,9 +428,7 @@ private struct BotRow: View {
 
             Spacer(minLength: 2)
 
-            if sessions.contains(where: {
-                $0.status == .working || $0.status == .launching
-            }) {
+            if indicator.isRunning {
                 ProgressView()
                     .controlSize(.small)
             }
