@@ -9,6 +9,9 @@ import SwiftOpenUI
 
 struct SidebarView: View {
     @ObservedObject var model: AppModel
+    #if os(macOS)
+    @ObservedObject var updateController: UpdateController
+    #endif
     let windowColorScheme: ColorScheme
     @State private var renameTargetID: UUID?
     @State private var renameDraft = ""
@@ -34,7 +37,9 @@ struct SidebarView: View {
             .buttonStyle(.bordered)
             .padding(14)
 
-            #if !os(macOS)
+            #if os(macOS)
+            macOSUpdateFooter
+            #else
             updateFooter
             #endif
         }
@@ -55,6 +60,41 @@ struct SidebarView: View {
             rename: { id, name in model.rename(id, to: name) }
         ))
     }
+
+    #if os(macOS)
+    @ViewBuilder
+    private var macOSUpdateFooter: some View {
+        if updateController.isUpdateAvailable {
+            Button {
+                updateController.requestInstallation()
+            } label: {
+                if updateController.isInstallationRequested {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.bl00p(.title3, weight: .semibold))
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.bl00pInk)
+            .disabled(updateController.isInstallationRequested)
+            .help(
+                updateController.isInstallationRequested
+                    ? "Preparing Update…"
+                    : "Update and Relaunch"
+            )
+            .accessibilityLabel(
+                updateController.isInstallationRequested
+                    ? "Preparing Update"
+                    : "Update and Relaunch"
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 12)
+        }
+    }
+    #endif
 
     private var sidebarColors: [Color] {
         #if os(macOS)

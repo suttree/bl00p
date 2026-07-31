@@ -21,7 +21,7 @@ struct Bl00pApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView(model: model)
+            RootView(model: model, updateController: updateController)
                 .frame(minWidth: 980, minHeight: 640)
         }
         .defaultSize(width: 1240, height: 780)

@@ -147,6 +147,37 @@ ellipsis when content is omitted. Do not feed streamed reasoning or command
 timeline entries into the summary. Keep the payload's optional fields optional
 so sessions saved before workflow cards were introduced continue decoding.
 
+## macOS update affordance
+
+`UpdateController` is the single Sparkle delegate owned by `Bl00pApp`. It
+publishes the availability of a validated update and whether the user has
+requested installation. `SidebarView` observes that controller and renders
+the optional bottom-left update button only while an update is available.
+
+The button may be activated before Sparkle supplies its immediate-install
+handler; the controller retains that request and invokes the handler once it
+arrives. Installation clears the affordance before calling Sparkle so repeated
+clicks cannot trigger multiple installations. Sparkle's normal termination
+path remains responsible for flushing persisted state before relaunch.
+
+Keep the macOS controller and sidebar wiring behind `#if os(macOS)` so Linux
+continues to use its package-manager handoff. State-transition coverage can be
+run without starting Sparkle with:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-module-cache" \
+SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/swiftpm-module-cache" \
+XDG_CACHE_HOME="$PWD/.build/cache" \
+xcrun swift test --disable-sandbox --filter UpdateControllerTests
+```
+
+Manual macOS checks should use an older packaged build and a newer signed
+appcast: verify the icon's bottom-left placement and accessibility text,
+activate it while preparation is in progress and when ready, and confirm that
+the app relaunches with persisted data intact. Background discovery must not
+restart an active session without the user's action.
+
 ## Structured user questions
 
 Claude `AskUserQuestion` control requests and Codex

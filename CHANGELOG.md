@@ -18,6 +18,9 @@ All notable changes to bl00p are documented in this file.
   Repository…** action in the conversation header for new chats.
 - Add signed automatic update checks, installation, and relaunch through
   Sparkle and GitHub Releases.
+- Show an optional macOS sidebar update icon after Sparkle finds a newer
+  release, allowing the user to install and relaunch immediately or queue the
+  action while the update is still being prepared.
 - Add automatic stable GitHub Releases for every validated merge to `main`,
   with retry-safe tags and assets, monotonic Sparkle build numbers, and
   verified appcast metadata.
