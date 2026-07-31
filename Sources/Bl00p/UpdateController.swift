@@ -14,19 +14,147 @@ import FoundationNetworking
 #if os(macOS)
 
 @MainActor
-final class UpdateController {
-    private let controller: SPUStandardUpdaterController
+final class UpdateController: NSObject, ObservableObject, SPUUpdaterDelegate {
+    @Published private(set) var isUpdateAvailable = false
+    @Published private(set) var isInstallationRequested = false
 
-    init() {
+    private var controller: SPUStandardUpdaterController?
+    private var immediateInstallationHandler: (() -> Void)?
+    private var didBeginInstallation = false
+
+    override init() {
+        super.init()
         controller = SPUStandardUpdaterController(
             startingUpdater: true,
-            updaterDelegate: nil,
+            updaterDelegate: self,
             userDriverDelegate: nil
         )
     }
 
+    /// Avoids starting Sparkle in state-transition tests.
+    init(startingUpdater: Bool) {
+        super.init()
+        if startingUpdater {
+            controller = SPUStandardUpdaterController(
+                startingUpdater: true,
+                updaterDelegate: self,
+                userDriverDelegate: nil
+            )
+        }
+    }
+
     var updater: SPUUpdater {
-        controller.updater
+        guard let controller else {
+            preconditionFailure("Sparkle is unavailable when the updater is not started")
+        }
+        return controller.updater
+    }
+
+    func requestInstallation() {
+        guard isUpdateAvailable, !isInstallationRequested else { return }
+        isInstallationRequested = true
+        beginInstallationIfReady()
+    }
+
+    func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
+        updateWasFound()
+    }
+
+    func updaterDidNotFindUpdate(_ updater: SPUUpdater, error: Error) {
+        updateWasNotFound()
+    }
+
+    func updater(
+        _ updater: SPUUpdater,
+        willInstallUpdateOnQuit item: SUAppcastItem,
+        immediateInstallationBlock immediateInstallHandler: @escaping () -> Void
+    ) -> Bool {
+        installHandlerBecameAvailable(immediateInstallHandler)
+    }
+
+    func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {
+        installationWillBegin()
+    }
+
+    func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        updateDidFail()
+    }
+
+    func updater(
+        _ updater: SPUUpdater,
+        failedToDownloadUpdate item: SUAppcastItem,
+        error: Error
+    ) {
+        updateDidFail()
+    }
+
+    func userDidCancelDownload(_ updater: SPUUpdater) {
+        updateWasCancelled()
+    }
+
+    func updater(
+        _ updater: SPUUpdater,
+        didFinishUpdateCycleFor updateCheck: SPUUpdateCheck,
+        error: Error?
+    ) {
+        guard isUpdateAvailable else { return }
+        resetAvailability()
+    }
+
+    func updateWasFound() {
+        immediateInstallationHandler = nil
+        didBeginInstallation = false
+        isInstallationRequested = false
+        isUpdateAvailable = true
+    }
+
+    @discardableResult
+    func installHandlerBecameAvailable(
+        _ immediateInstallHandler: @escaping () -> Void
+    ) -> Bool {
+        guard isUpdateAvailable, !didBeginInstallation else { return false }
+        immediateInstallationHandler = immediateInstallHandler
+        beginInstallationIfReady()
+        return true
+    }
+
+    func updateWasNotFound() {
+        resetAvailability()
+    }
+
+    func updateWasCancelled() {
+        resetAvailability()
+    }
+
+    func updateDidFail() {
+        resetAvailability()
+    }
+
+    func installationWillBegin() {
+        guard !didBeginInstallation else { return }
+        didBeginInstallation = true
+        immediateInstallationHandler = nil
+        isUpdateAvailable = false
+    }
+
+    private func beginInstallationIfReady() {
+        guard
+            isInstallationRequested,
+            !didBeginInstallation,
+            let immediateInstallationHandler
+        else { return }
+
+        didBeginInstallation = true
+        self.immediateInstallationHandler = nil
+        isUpdateAvailable = false
+        immediateInstallationHandler()
+    }
+
+    private func resetAvailability() {
+        immediateInstallationHandler = nil
+        didBeginInstallation = false
+        isInstallationRequested = false
+        isUpdateAvailable = false
     }
 }
 
