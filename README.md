@@ -241,9 +241,10 @@ repository is locked; create another chat to work elsewhere.
 The same conversation header also exposes shortcuts into the selected checkout.
 On macOS, the header is integrated into the unified window toolbar; on Linux it
 remains inline above the conversation. The toolbar keeps the bot identity,
-status, repository/worktree path, repository chooser, terminal, conditional
-Stop, and settings controls together. Long paths truncate in the middle so the
-toolbar remains usable at small window sizes. The folder button opens the
+status, and repository/worktree path on the leading side, with the repository
+chooser, terminal, conditional Stop, and settings controls grouped at the
+trailing edge. Long paths truncate in the middle so the toolbar remains usable
+at small window sizes. The folder button opens the
 chat's current repository or worktree in the system file browser, and the
 terminal button opens the same directory in a native terminal window. For
 managed workflows this means the Builder, Reviewer, and Documenter can jump

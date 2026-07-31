@@ -6,6 +6,10 @@ All notable changes to bl00p are documented in this file.
 
 ### Changed
 
+- Align macOS conversation-header identity and status content to the leading
+  toolbar edge, while keeping repository, terminal, conditional Stop, and
+  settings controls together at the trailing edge. Preserve the Linux inline
+  header layout.
 - Simplify the conversation header by removing its avatar, leading-aligning
   the bot name, status, and repository/worktree path, and showing Manager
   workflow activity from the selected chat while linked agents are launching
