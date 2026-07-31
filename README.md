@@ -23,7 +23,7 @@ The current prototype includes:
 - A Slack-like sidebar whose spinner and attention badges follow the bot's
   current chat instead of stale or background chats
 - A compact **Add Bot** sidebar control with an uncluttered, untitled window
-  chrome; conversation headers still identify the active bot and repository
+  chrome; conversation headers show project status and repository details
 - Automatic light and dark appearances that follow the system setting (macOS: live; Linux: read once at launch from `org.gnome.desktop.interface color-scheme`)
 - Consistent, legible typography across conversations, settings, and bot creation
 - Structured messages, commands, findings, and approval cards
