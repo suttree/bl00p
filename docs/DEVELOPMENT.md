@@ -346,18 +346,21 @@ still flow through the runtime policy.
 
 `ConversationView` keeps the complete conversation header inline on Linux,
 where the SwiftOpenUI/GTK4 backend has no native macOS toolbar. On macOS, the
-identity group is placed in the unified window toolbar's `.principal` slot and
-the repository, terminal, Stop, and settings controls are placed in
-`.primaryAction`; the duplicate inline row and divider stay excluded from the
-macOS content column. Keep the existing action closures, enablement rules,
+identity group is placed in the unified window toolbar's `.navigation` slot. A
+uniquely identified `ToolbarItem` containing `Spacer()` follows it; on macOS
+that becomes an AppKit flexible-space item and separates the leading identity
+from the repository, terminal, Stop, and settings controls in `.primaryAction`
+at the trailing edge. The duplicate inline row and divider stay excluded from
+the macOS content column. Keep the existing action closures, enablement rules,
 help text, and repository/worktree path resolution shared by both platform
 presentations.
 
 The identity group must allow its path label to shrink and use middle
-truncation. Keep its maximum width bounded so the toolbar actions, sidebar
-toggle, inspector, and window controls remain usable at the 980×640 minimum
-window size as well as the 1240×780 default. When changing this layout, smoke
-test empty, selected, locked, and worktree-backed repositories; idle and
+truncation. Keep the identity's maximum width bounded and the trailing action
+group fixed-width so the toolbar actions, sidebar toggle, inspector, and window
+controls remain usable at the 980×640 minimum window size as well as the
+1240×780 default. When changing this layout, smoke test empty, selected, locked,
+and worktree-backed repositories; idle and
 running sessions; Manager and non-Manager conversations; both sidebar states;
 the inspector; and light and dark appearances on macOS. Verify that Linux still
 shows the inline header.

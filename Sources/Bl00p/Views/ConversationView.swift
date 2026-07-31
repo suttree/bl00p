@@ -161,7 +161,15 @@ struct ConversationView: View {
                     .frame(minWidth: 0, maxWidth: 360, alignment: .leading)
                 }
 
+                ToolbarItem(id: "conversation-header-flexible-space") {
+                    // On macOS, this becomes an AppKit flexible-space item,
+                    // which keeps the actions at the trailing toolbar edge.
+                    Spacer()
+                }
+
                 ToolbarItemGroup(placement: .primaryAction) {
+                    // Keep these controls together so their order is
+                    // unchanged when Stop appears for a running chat.
                     ConversationHeaderActions(
                         session: session,
                         stop: {
@@ -181,6 +189,7 @@ struct ConversationView: View {
                         },
                         showSettings: { model.isInspectorVisible.toggle() }
                     )
+                    .fixedSize(horizontal: true, vertical: false)
                 }
             }
             #endif
