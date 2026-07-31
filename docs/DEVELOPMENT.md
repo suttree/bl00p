@@ -206,10 +206,11 @@ xcrun swift test --disable-sandbox --filter UpdateControllerTests
 ```
 
 Manual macOS checks should use an older packaged build and a newer signed
-appcast: verify the icon's bottom-left placement and accessibility text,
-activate it while preparation is in progress and when ready, and confirm that
-the app relaunches with persisted data intact. Background discovery must not
-restart an active session without the user's action.
+appcast: verify the icon-and-text label's bottom-left placement and
+accessibility text, activate it while preparation is in progress and when
+ready, and confirm that the app relaunches with persisted data intact.
+Background discovery must not restart an active session without the user's
+action.
 
 ## Structured user questions
 
