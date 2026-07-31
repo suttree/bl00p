@@ -275,6 +275,14 @@ persisted with the workflow, so a relaunch can restore a missing or interrupted
 approval card without dispatching the Builder twice. Unrelated runtime
 permission approvals remain runtime approvals, and declining the plan leaves
 the workflow paused for revision feedback.
+
+When a managed Builder, Reviewer / QA, or Publisher actually fails, the Manager
+thread records a persisted red **Workflow paused** warning card. It names the
+agent, shows the failure reason and timestamp, and keeps the details selectable
+for copying. Other pauses, including blocked, stopped, planning, handoff, and
+approval states, retain the ordinary grey system-message presentation. The
+warning is restored with the transcript after relaunch, so a failure remains
+visible until the workflow is addressed.
 Leaving any team assignment unset keeps that Manager in standalone chat mode.
 Clean workflows use four agent turns; workflows with one requested-changes
 round use six, and workflows with two rounds use eight. If findings remain
