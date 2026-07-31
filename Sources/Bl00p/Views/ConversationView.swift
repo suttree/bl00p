@@ -912,7 +912,14 @@ private struct TimelineEntryView: View {
         case .assistant:
             assistantMessage
         case .system:
-            systemMessage
+            if let update = entry.workflowUpdate {
+                WorkflowUpdateCard(
+                    update: update,
+                    timestamp: entry.timestamp
+                )
+            } else {
+                systemMessage
+            }
         case .command:
             ToolCallCard(entry: entry, icon: "terminal", tint: .bl00pInk)
         case .diff:
@@ -1120,6 +1127,157 @@ private struct TimelineEntryView: View {
             RoundedRectangle(cornerRadius: 14)
                 .stroke(Color.bl00pPink.opacity(0.40), lineWidth: 1)
         }
+    }
+}
+
+private struct WorkflowUpdateCard: View {
+    let update: WorkflowUpdate
+    let timestamp: Date
+
+    private var tint: Color {
+        update.outcome == .success ? .green : .orange
+    }
+
+    private var icon: String {
+        switch (update.role, update.outcome) {
+        case (.builder, .success):
+            "hammer.fill"
+        case (.reviewer, .success):
+            "checkmark.seal.fill"
+        case (.reviewer, .attention):
+            "exclamationmark.bubble.fill"
+        case (.publisher, .success):
+            "arrow.up.doc.fill"
+        default:
+            "checkmark.circle.fill"
+        }
+    }
+
+    private var textRowAlignment: VerticalAlignment {
+        #if os(macOS)
+        .firstTextBaseline
+        #else
+        .top
+        #endif
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 13) {
+            Image(systemName: icon)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 32, height: 32)
+                .background(
+                    tint.opacity(0.12),
+                    in: RoundedRectangle(cornerRadius: 9)
+                )
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: textRowAlignment, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(update.role.displayName)
+                            .font(.bl00p(.caption1, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Text(update.headline)
+                            .font(.bl00p(.headline, weight: .bold))
+                            .foregroundStyle(.primary)
+                    }
+                    Spacer(minLength: 12)
+                    TimelineTimestamp(timestamp)
+                }
+
+                if let summary = update.summary, !summary.isEmpty {
+                    Text(summary)
+                        .font(.bl00p(.callout))
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    if let branch = update.branch, !branch.isEmpty {
+                        detailRow(
+                            label: "Branch",
+                            value: branch,
+                            monospaced: true
+                        )
+                    }
+                    if let testSummary = update.testSummary,
+                       !testSummary.isEmpty {
+                        detailRow(label: "Tests", value: testSummary)
+                    }
+                    if let reviewSummary = update.reviewSummary,
+                       !reviewSummary.isEmpty {
+                        detailRow(
+                            label: "Reviewer",
+                            value: reviewSummary
+                        )
+                    }
+                }
+
+                if let pullRequestURL = update.pullRequestURL,
+                   let url = URL(string: pullRequestURL) {
+                    #if os(macOS)
+                    Link(destination: url) {
+                        Label(
+                            "Open draft pull request",
+                            systemImage: "arrow.up.right.square.fill"
+                        )
+                        .font(.bl00p(.callout, weight: .bold))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(tint)
+                    .background(
+                        tint.opacity(0.10),
+                        in: RoundedRectangle(cornerRadius: 9)
+                    )
+                    #else
+                    MarkdownMessageView(
+                        source:
+                            "[Open draft pull request](\(pullRequestURL))"
+                    )
+                    .font(.bl00p(.callout, weight: .bold))
+                    #endif
+                }
+            }
+        }
+        .padding(15)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            tint.opacity(0.055),
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(tint.opacity(0.30), lineWidth: 1)
+        }
+    }
+
+    @ViewBuilder
+    private func detailRow(
+        label: String,
+        value: String,
+        monospaced: Bool = false
+    ) -> some View {
+        HStack(alignment: textRowAlignment, spacing: 8) {
+            Text(label)
+                .font(.bl00p(.caption1, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 58, alignment: .leading)
+            Text(value)
+                .font(
+                    monospaced
+                        ? .bl00p(.caption1, design: .monospaced)
+                        : .bl00p(.caption1)
+                )
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

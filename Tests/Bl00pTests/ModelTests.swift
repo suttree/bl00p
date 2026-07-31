@@ -1198,19 +1198,17 @@ func sidebarIndicatorSessionsIgnoreBackgroundChatsForStandaloneBots() async thro
     model.sessions[backgroundID]?.hasUnreadCompletion = true
     model.sessions[currentID]?.status = .stopped
 
-    let indicatorSessions = model.sidebarIndicatorSessions(for: profile.id)
-    #expect(indicatorSessions.map(\.id) == [currentID])
-    #expect(!indicatorSessions.contains { $0.status.needsAttention })
-    #expect(!indicatorSessions.contains { $0.hasUnreadCompletion })
+    let indicator = model.sidebarIndicatorState(for: profile.id)
+    #expect(!indicator.showsBadge)
+    #expect(!indicator.isRunning)
 
     model.sessions[currentID]?.status = .working
-    let workingIndicatorSessions = model.sidebarIndicatorSessions(for: profile.id)
-    #expect(workingIndicatorSessions.contains { $0.status == .working })
+    let workingIndicator = model.sidebarIndicatorState(for: profile.id)
+    #expect(workingIndicator.isRunning)
 
     model.selectSession(backgroundID, for: profile.id)
-    let switchedIndicatorSessions = model.sidebarIndicatorSessions(for: profile.id)
-    #expect(switchedIndicatorSessions.map(\.id) == [backgroundID])
-    #expect(switchedIndicatorSessions.contains { $0.status.needsAttention })
+    let switchedIndicator = model.sidebarIndicatorState(for: profile.id)
+    #expect(switchedIndicator.showsBadge)
 }
 
 @MainActor
@@ -1262,7 +1260,8 @@ func sidebarIndicatorSessionsForManagerScopeToTheSelectedWorkflow() throws {
         backgroundManagerChatID: AgentSessionState(
             id: backgroundManagerChatID,
             ownerProfileID: managerID,
-            status: .stopped
+            status: .completed,
+            hasUnreadCompletion: true
         ),
         currentBuilderSessionID: AgentSessionState(
             id: currentBuilderSessionID,
@@ -1295,20 +1294,15 @@ func sidebarIndicatorSessionsForManagerScopeToTheSelectedWorkflow() throws {
         )
     ]
 
-    let indicatorSessions = model.sidebarIndicatorSessions(for: managerID)
-    #expect(
-        Set(indicatorSessions.map(\.id))
-            == [currentManagerChatID, currentBuilderSessionID]
-    )
-    #expect(!indicatorSessions.contains { $0.status == .working })
+    let indicator = model.sidebarIndicatorState(for: managerID)
+    #expect(!indicator.isRunning)
+    #expect(!indicator.showsBadge)
 
     model.selectSession(backgroundManagerChatID, for: managerID)
-    let switchedIndicatorSessions = model.sidebarIndicatorSessions(for: managerID)
-    #expect(
-        Set(switchedIndicatorSessions.map(\.id))
-            == [backgroundManagerChatID, backgroundBuilderSessionID]
-    )
-    #expect(switchedIndicatorSessions.contains { $0.status == .working })
+    let switchedIndicator = model.sidebarIndicatorState(for: managerID)
+    #expect(switchedIndicator.isRunning)
+    // Selecting the Manager chat clears its unread completion.
+    #expect(!switchedIndicator.showsBadge)
 }
 
 @MainActor
@@ -3254,6 +3248,8 @@ func blockedBuilderTurnWithReadyHandoffAdvancesWorkflowAutomatically() async thr
     #expect(model.session(for: reviewerID).entries.contains {
         $0.kind == .handoff
     })
+    #expect(model.sidebarIndicatorState(for: builderID).showsBadge)
+    #expect(!model.sidebarIndicatorState(for: managerID).showsBadge)
 }
 
 @MainActor
@@ -4712,6 +4708,57 @@ func reviewDispositionRequiresExactlyOneValidStructuredMarker() {
     )
 }
 
+@Test
+func workflowUpdateSummariesRemoveProtocolCommandsAndDuplicates() throws {
+    let summary = try #require(
+        WorkflowUpdateSummarizer.concise(
+            """
+            Implemented the focused notification change.
+
+            Command output:
+            swift test
+            142 tests passed
+
+            ```console
+            verbose compiler output
+            ```
+
+            Implemented the focused notification change.
+
+            Tests passed and the branch is ready for review.
+            BL00P_REVIEW_DISPOSITION: clean
+            """
+        )
+    )
+
+    #expect(summary.count <= 240)
+    #expect(!summary.contains("swift test"))
+    #expect(!summary.contains("compiler output"))
+    #expect(!summary.contains(ReviewDisposition.marker))
+    #expect(
+        summary.components(
+            separatedBy: "Implemented the focused notification change."
+        ).count == 2
+    )
+    #expect(
+        WorkflowUpdateSummarizer.concise(
+            "No assistant summary was captured."
+        ) == nil
+    )
+    let bounded = try #require(
+        WorkflowUpdateSummarizer.concise(
+            """
+            Implementation and tests completed successfully.
+
+            Caveat: deployment verification still needs production access.
+            """,
+            maximumLength: 60
+        )
+    )
+    #expect(bounded.count <= 60)
+    #expect(bounded.hasSuffix("…"))
+}
+
 @MainActor
 @Test
 func cleanManagedWorkflowUsesExactlyFourAgentTurns() async throws {
@@ -4740,14 +4787,86 @@ func cleanManagedWorkflowUsesExactlyFourAgentTurns() async throws {
         workflow.pullRequestURL
             == "https://github.com/suttree/bl00p/pull/99"
     )
-    let completion = try #require(
-        harness.model.session(for: harness.managerID).entries.last(where: {
-            $0.text == "Managed workflow complete"
-        })
+    let updates = harness.model
+        .session(for: harness.managerID)
+        .entries
+        .compactMap(\.workflowUpdate)
+    #expect(updates.map(\.role) == [.builder, .reviewer, .publisher])
+    #expect(
+        updates.map(\.headline)
+            == ["Implementation ready", "Review passed", "Draft PR created"]
     )
-    #expect(completion.detail?.contains("Verification: Passed") == true)
-    #expect(completion.detail?.contains("Publisher:") == true)
-    #expect(completion.detail?.contains(workflow.pullRequestURL!) == true)
+    let completion = try #require(updates.last)
+    #expect(completion.branch == harness.ownership.branch)
+    #expect(completion.testSummary?.contains("Passed") == true)
+    #expect(completion.reviewSummary?.contains("No actionable") == true)
+    #expect(completion.pullRequestURL == workflow.pullRequestURL)
+    #expect(
+        harness.model.session(for: harness.managerID).entries.contains {
+            $0.text == "Managed workflow complete"
+        } == false
+    )
+}
+
+@MainActor
+@Test
+func managedCompletionsBadgeOnlyManagerAndCountOnceInDock() async throws {
+    let notifications = RecordingNotificationDelivery()
+    let harness = try makeManagedWorkflowHarness(
+        reviewerResponses: [
+            """
+            No actionable findings.
+            BL00P_REVIEW_DISPOSITION: clean
+            """
+        ],
+        notifications: notifications,
+        isAppWindowActive: { false }
+    )
+    defer { try? FileManager.default.removeItem(at: harness.directory) }
+    harness.model.prepareNotifications()
+
+    try await runManagedWorkflow(harness)
+
+    let workflow = try #require(
+        harness.model.workflow(for: harness.managerID)
+    )
+    let participantSessionIDs = workflow.participantSessionIDs
+        .filter { $0.key != .manager }
+        .map(\.value)
+    #expect(
+        participantSessionIDs.allSatisfy {
+            harness.model.sessions[$0]?.hasUnreadCompletion == false
+        }
+    )
+    #expect(
+        harness.model.sessions[harness.managerID]?
+            .hasUnreadCompletion == true
+    )
+    #expect(
+        harness.model.sidebarIndicatorState(
+            for: harness.managerID
+        ).showsBadge
+    )
+    for profile in harness.model.profiles where profile.role != .manager {
+        #expect(
+            !harness.model.sidebarIndicatorState(
+                for: profile.id
+            ).showsBadge
+        )
+    }
+    #expect(notifications.badgeCounts.last == 1)
+    #expect(!notifications.badgeCounts.contains(where: { $0 > 1 }))
+
+    harness.model.markViewed(
+        harness.managerID,
+        sessionID: harness.managerID
+    )
+    #expect(
+        !harness.model.sidebarIndicatorState(
+            for: harness.managerID
+        ).showsBadge
+    )
+    #expect(notifications.badgeCounts.last == 0)
 }
 
 @MainActor
@@ -4777,11 +4896,13 @@ func reviewerDispositionCanArriveInASeparateAssistantBlock() async throws {
     )
     #expect(!calls[3].message.contains(ReviewDisposition.marker))
     let completion = try #require(
-        harness.model.session(for: harness.managerID).entries.last(where: {
-            $0.text == "Managed workflow complete"
-        })
+        harness.model
+            .session(for: harness.managerID)
+            .entries
+            .compactMap(\.workflowUpdate)
+            .last
     )
-    #expect(completion.detail?.contains(ReviewDisposition.marker) == false)
+    #expect(completion.reviewSummary?.contains(ReviewDisposition.marker) == false)
 }
 
 @MainActor
@@ -4809,6 +4930,20 @@ func malformedReviewDispositionConservativelyUsesFixAndVerificationTurns() async
     #expect(!calls[3].message.contains(ReviewDisposition.marker))
     #expect(calls[4].message.contains("Re-check the updated"))
     #expect(harness.model.workflow(for: harness.managerID)?.stage == .completed)
+    let updates = harness.model
+        .session(for: harness.managerID)
+        .entries
+        .compactMap(\.workflowUpdate)
+    #expect(
+        updates.map(\.headline)
+            == [
+                "Implementation ready",
+                "Changes requested",
+                "Revision ready",
+                "Revision verified",
+                "Draft PR created"
+            ]
+    )
 }
 
 @MainActor
@@ -6714,10 +6849,12 @@ func legacyReportingWorkflowCompletesDuringRestore() throws {
         restored.pullRequestURL
             == "https://github.com/suttree/bl00p/pull/77"
     )
-    #expect(
-        model.session(for: manager.id).entries.last?.text
-            == "Managed workflow complete"
+    let completion = try #require(
+        model.session(for: manager.id).entries.last?.workflowUpdate
     )
+    #expect(completion.headline == "Draft PR created")
+    #expect(completion.branch == "bl00p/legacy-reporting")
+    #expect(completion.pullRequestURL == restored.pullRequestURL)
 }
 
 @MainActor
@@ -7856,6 +7993,45 @@ func structuredQuestionPersistenceAndCodexAnswersRoundTrip() throws {
     )
     #expect(legacy.questions == nil)
     #expect(legacy.questionResolution == nil)
+}
+
+@Test
+func workflowUpdatePayloadPersistsAndLegacyEntriesStillDecode() throws {
+    let entry = TimelineEntry(
+        kind: .system,
+        text: "Draft PR created",
+        workflowUpdate: WorkflowUpdate(
+            role: .publisher,
+            outcome: .success,
+            headline: "Draft PR created",
+            summary: "Documentation and publishing completed.",
+            branch: "bl00p/compact-updates",
+            testSummary: "Passed — swift test",
+            reviewSummary: "No actionable findings.",
+            pullRequestURL: "https://github.com/suttree/bl00p/pull/99"
+        )
+    )
+
+    let decoded = try JSONDecoder().decode(
+        TimelineEntry.self,
+        from: JSONEncoder().encode(entry)
+    )
+    #expect(decoded == entry)
+
+    let legacy = try JSONDecoder().decode(
+        TimelineEntry.self,
+        from: Data(
+            """
+            {
+              "id": "BD1F67B4-F1B8-48EE-89B9-D68B3510A0A7",
+              "kind": "system",
+              "text": "Managed workflow complete",
+              "timestamp": 0
+            }
+            """.utf8
+        )
+    )
+    #expect(legacy.workflowUpdate == nil)
 }
 
 @Test
@@ -10467,7 +10643,9 @@ private struct ManagedWorkflowHarness {
 @MainActor
 private func makeManagedWorkflowHarness(
     reviewerResponses: [String] = [],
-    reviewerResponseBlocks: [[String]]? = nil
+    reviewerResponseBlocks: [[String]]? = nil,
+    notifications: RecordingNotificationDelivery? = nil,
+    isAppWindowActive: @escaping () -> Bool = { false }
 ) throws -> ManagedWorkflowHarness {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(
@@ -10579,7 +10757,9 @@ private func makeManagedWorkflowHarness(
             ],
             preparedOwnership: ownership
         ),
-        store: store
+        store: store,
+        notifications: notifications,
+        isAppWindowActive: isAppWindowActive
     )
     return ManagedWorkflowHarness(
         directory: directory,

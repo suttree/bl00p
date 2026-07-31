@@ -798,6 +798,163 @@ enum TimelineContentFormat: String, Codable, Sendable {
     case markdown
 }
 
+enum WorkflowUpdateOutcome: String, Codable, Hashable, Sendable {
+    case success
+    case attention
+}
+
+struct WorkflowUpdate: Codable, Hashable, Sendable {
+    var role: AgentRole
+    var outcome: WorkflowUpdateOutcome
+    var headline: String
+    var summary: String?
+    var branch: String?
+    var testSummary: String?
+    var reviewSummary: String?
+    var pullRequestURL: String?
+
+    init(
+        role: AgentRole,
+        outcome: WorkflowUpdateOutcome,
+        headline: String,
+        summary: String? = nil,
+        branch: String? = nil,
+        testSummary: String? = nil,
+        reviewSummary: String? = nil,
+        pullRequestURL: String? = nil
+    ) {
+        self.role = role
+        self.outcome = outcome
+        self.headline = headline
+        self.summary = summary
+        self.branch = branch
+        self.testSummary = testSummary
+        self.reviewSummary = reviewSummary
+        self.pullRequestURL = pullRequestURL
+    }
+}
+
+enum WorkflowUpdateSummarizer {
+    static func concise(
+        _ response: String,
+        maximumLength: Int = 240
+    ) -> String? {
+        guard maximumLength > 0 else { return nil }
+
+        var paragraphs: [String] = []
+        var currentLines: [String] = []
+        var isInsideCodeFence = false
+        var isInsideCommandOutput = false
+
+        func finishParagraph() {
+            let paragraph = currentLines
+                .joined(separator: " ")
+                .replacingOccurrences(
+                    of: #"\s+"#,
+                    with: " ",
+                    options: .regularExpression
+                )
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            currentLines.removeAll(keepingCapacity: true)
+            if !paragraph.isEmpty {
+                paragraphs.append(paragraph)
+            }
+        }
+
+        for rawLine in response.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            if line.hasPrefix("```") || line.hasPrefix("~~~") {
+                finishParagraph()
+                isInsideCodeFence.toggle()
+                continue
+            }
+            guard !isInsideCodeFence else { continue }
+
+            if line.isEmpty {
+                finishParagraph()
+                isInsideCommandOutput = false
+                continue
+            }
+
+            let lowercase = line.lowercased()
+            if lowercase == "command output:"
+                || lowercase == "tool output:"
+                || lowercase == "stdout:"
+                || lowercase == "stderr:" {
+                finishParagraph()
+                isInsideCommandOutput = true
+                continue
+            }
+            guard !isInsideCommandOutput,
+                  !line.hasPrefix(ReviewDisposition.marker),
+                  !line.hasPrefix("BL00P_"),
+                  !line.hasPrefix("$ "),
+                  !line.hasPrefix("> ") else {
+                continue
+            }
+
+            let cleaned = line
+                .replacingOccurrences(
+                    of: #"^#{1,6}\s+"#,
+                    with: "",
+                    options: .regularExpression
+                )
+                .replacingOccurrences(
+                    of: #"^(?:[-*+]|\d+[.)])\s+"#,
+                    with: "",
+                    options: .regularExpression
+                )
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !cleaned.isEmpty {
+                currentLines.append(cleaned)
+            }
+        }
+        finishParagraph()
+
+        var seen = Set<String>()
+        let placeholders = [
+            "no assistant summary was captured.",
+            "no reviewer summary was captured."
+        ]
+        let unique = paragraphs.filter {
+            let normalized = $0.lowercased()
+            return !placeholders.contains(normalized)
+                && seen.insert(normalized).inserted
+        }
+        guard !unique.isEmpty else { return nil }
+
+        var summary = ""
+        var includedParagraphCount = 0
+        for paragraph in unique {
+            let candidate = summary.isEmpty
+                ? paragraph
+                : "\(summary) \(paragraph)"
+            if candidate.count > maximumLength {
+                break
+            }
+            summary = candidate
+            includedParagraphCount += 1
+            if summary.count >= maximumLength / 2 {
+                break
+            }
+        }
+        if summary.isEmpty {
+            summary = String(unique[0].prefix(maximumLength))
+            if unique[0].count <= maximumLength {
+                includedParagraphCount = 1
+            }
+        }
+        if includedParagraphCount < unique.count {
+            summary = String(summary.prefix(max(0, maximumLength - 1)))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                + "…"
+        }
+        return summary
+    }
+}
+
 struct StructuredQuestionOption: Identifiable, Codable, Hashable, Sendable {
     var label: String
     var description: String?
@@ -875,6 +1032,7 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
     var contentFormat: TimelineContentFormat?
     var questions: [StructuredQuestion]?
     var questionResolution: QuestionResolution?
+    var workflowUpdate: WorkflowUpdate?
 
     init(
         id: UUID = UUID(),
@@ -888,7 +1046,8 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
         deliveryFailed: Bool? = nil,
         contentFormat: TimelineContentFormat? = nil,
         questions: [StructuredQuestion]? = nil,
-        questionResolution: QuestionResolution? = nil
+        questionResolution: QuestionResolution? = nil,
+        workflowUpdate: WorkflowUpdate? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -902,7 +1061,18 @@ struct TimelineEntry: Identifiable, Codable, Hashable, Sendable {
         self.contentFormat = contentFormat
         self.questions = questions
         self.questionResolution = questionResolution
+        self.workflowUpdate = workflowUpdate
     }
+}
+
+struct SidebarIndicatorState: Equatable, Sendable {
+    var showsBadge: Bool
+    var isRunning: Bool
+
+    static let idle = SidebarIndicatorState(
+        showsBadge: false,
+        isRunning: false
+    )
 }
 
 struct AgentSessionState: Codable, Sendable {
