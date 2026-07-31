@@ -40,7 +40,7 @@ private struct BuilderImplementationHandoff: Sendable {
         \(approvedPlan)
         </approved_implementation_plan>
 
-        Implement the approved plan in your isolated worktree. Keep the change focused, run the relevant tests, and create a local commit before finishing so the Reviewer can inspect an immutable HEAD. Do not push or open a pull request.
+        Implement the approved plan in your isolated worktree. Stay on the branch already checked out by bl00p; do not create, rename, switch, or delete branches, even if the plan requests a branch name. Keep the change focused, run the relevant tests, and create a local commit before finishing so the Reviewer can inspect an immutable HEAD. Do not push or open a pull request.
         """
     }
 }
@@ -3033,6 +3033,10 @@ final class AppModel: ObservableObject {
                         from: builder,
                         session: builderSession
                     )
+                    synchronizeWorktreeBranch(
+                        with: package,
+                        sessionID: builderSessionID
+                    )
                     package.taskContext =
                         workflow.implementationPlan ?? workflow.request
                     guard validate(
@@ -3204,7 +3208,7 @@ final class AppModel: ObservableObject {
         Manager brief:
         \(workflow.implementationPlan ?? "No implementation plan was captured.")
 
-        Implement the requested change in your isolated worktree. Keep the change focused, run the relevant tests, and create a local commit before finishing so the Reviewer can inspect an immutable HEAD. Do not push or open a pull request.
+        Implement the requested change in your isolated worktree. Stay on the branch already checked out by bl00p; do not create, rename, switch, or delete branches, even if the plan requests a branch name. Keep the change focused, run the relevant tests, and create a local commit before finishing so the Reviewer can inspect an immutable HEAD. Do not push or open a pull request.
         """
     }
 
@@ -3527,6 +3531,24 @@ final class AppModel: ObservableObject {
             marksUnread: !builderNeedsAttention
         )
         return true
+    }
+
+    private func synchronizeWorktreeBranch(
+        with package: GitHandoffPackage,
+        sessionID: UUID
+    ) {
+        guard var state = sessions[sessionID],
+              var ownership = state.worktree,
+              ownership.repositoryPath == package.repositoryPath,
+              ownership.worktreePath == package.worktreePath,
+              ownership.branch != package.branch else {
+            return
+        }
+        ownership.branch = package.branch
+        state.worktree = ownership
+        state.updatedAt = .now
+        sessions[sessionID] = state
+        save()
     }
 
     private func prepareWorkflowHandoff(

@@ -2068,6 +2068,85 @@ func worktreeManagerCreatesIsolatedBranchesAndHandoffSnapshots() async throws {
 }
 
 @Test
+func worktreeManagerRecoversARegisteredWorktreeAfterItsBranchIsRenamed() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-renamed-worktree-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    let repository = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: repository,
+        withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try runGit(["init", "-b", "main"], in: repository)
+    try Data("initial\n".utf8).write(
+        to: repository.appendingPathComponent("README.md")
+    )
+    try runGit(["add", "README.md"], in: repository)
+    try runGit(
+        [
+            "-c", "user.name=bl00p Tests",
+            "-c", "user.email=tests@bl00p.dev",
+            "commit", "-m", "Initial commit"
+        ],
+        in: repository
+    )
+
+    var builder = BotProfile(
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "",
+        workingDirectory: repository.path
+    )
+    let manager = GitWorktreeManager()
+    let ownership = try await manager.prepareWorktree(
+        for: builder,
+        startingPoint: nil,
+        handoffID: nil
+    )
+    builder.worktree = ownership
+    let worktree = URL(fileURLWithPath: ownership.worktreePath)
+    let renamedBranch = "fix-agent-completion-notification-copy"
+    try runGit(["branch", "-m", renamedBranch], in: worktree)
+    try Data("change\n".utf8).write(
+        to: worktree.appendingPathComponent("change.txt")
+    )
+    try runGit(["add", "change.txt"], in: worktree)
+    try runGit(
+        [
+            "-c", "user.name=bl00p Tests",
+            "-c", "user.email=tests@bl00p.dev",
+            "commit", "-m", "Implement change"
+        ],
+        in: worktree
+    )
+
+    let package = try await manager.makeHandoff(
+        from: builder,
+        session: AgentSessionState(
+            status: .completed,
+            entries: [
+                .init(kind: .user, text: "Implement the requested change"),
+                .init(
+                    kind: .command,
+                    title: "Command finished",
+                    text: "swift test",
+                    detail: "Tests passed"
+                )
+            ]
+        )
+    )
+
+    #expect(package.branch == renamedBranch)
+    #expect(package.worktreePath == ownership.worktreePath)
+    #expect(package.workingTreeSummary == "Clean")
+}
+
+@Test
 func makeHandoffFallsBackToTheLatestHandoffEntryWhenNoUserEntryExists() async throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent(
