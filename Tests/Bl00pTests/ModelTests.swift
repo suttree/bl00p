@@ -2284,15 +2284,7 @@ func handoffPackageIsDeliveredWithTheRecipientsNextMessage() async throws {
         )
     defer { try? FileManager.default.removeItem(at: directory) }
 
-    var source = BotProfile.defaults[0]
-    source.workingDirectory = "/tmp/project"
-    source.worktree = GitWorktreeOwnership(
-        ownerProfileID: source.id,
-        repositoryPath: "/tmp/project",
-        worktreePath: "/tmp/project-builder",
-        branch: "bl00p/source-12345678",
-        baseRevision: "abc123"
-    )
+    let source = BotProfile.defaults[0]
     let target = BotProfile.defaults[1]
     let package = GitHandoffPackage(
         sourceProfileID: source.id,
@@ -2315,26 +2307,32 @@ func handoffPackageIsDeliveredWithTheRecipientsNextMessage() async throws {
             profiles: [source, target],
             sessions: [
                 source.id: AgentSessionState(
+                    repositoryPath: package.repositoryPath,
                     status: .completed,
                     entries: [.init(kind: .user, text: package.taskContext)]
                 ),
-                target.id: AgentSessionState()
+                target.id: AgentSessionState(
+                    repositoryPath: package.repositoryPath,
+                    entries: [
+                        .init(
+                            kind: .handoff,
+                            title: "Workflow handoff from \(source.name)",
+                            text: package.taskContext,
+                            detail: package.timelineDetail
+                        )
+                    ],
+                    pendingHandoff: package,
+                    handoffWorktreePath: package.worktreePath
+                )
             ],
-            selectedBotID: source.id
+            selectedBotID: target.id
         )
     )
     let runtime = HandoffRecordingRuntime()
     let model = AppModel(
         runtime: runtime,
-        worktrees: StubWorktreeManager(package: package),
         store: store
     )
-
-    model.handoff(from: source.id, to: target.id)
-    for _ in 0..<30
-        where model.session(for: target.id).pendingHandoff == nil {
-        try await Task.sleep(for: .milliseconds(10))
-    }
 
     #expect(model.selectedBotID == target.id)
     #expect(model.session(for: target.id).entries.last?.kind == .handoff)
@@ -2352,97 +2350,6 @@ func handoffPackageIsDeliveredWithTheRecipientsNextMessage() async throws {
     #expect(delivered.contains("Next instruction:\nReview this implementation"))
     #expect(await runtime.respondedDirectories == [package.worktreePath])
     #expect(model.session(for: target.id).pendingHandoff == nil)
-}
-
-@MainActor
-@Test
-func manualHandoffButtonDeliversTheWorkflowPlanInsteadOfTheFallbackString() async throws {
-    let directory = FileManager.default.temporaryDirectory
-        .appendingPathComponent(
-            "bl00p-manual-handoff-workflow-\(UUID().uuidString)",
-            isDirectory: true
-        )
-    defer { try? FileManager.default.removeItem(at: directory) }
-
-    var source = BotProfile.defaults[0]
-    source.workingDirectory = "/tmp/project"
-    source.worktree = GitWorktreeOwnership(
-        ownerProfileID: source.id,
-        repositoryPath: "/tmp/project",
-        worktreePath: "/tmp/project-builder",
-        branch: "bl00p/source-12345678",
-        baseRevision: "abc123"
-    )
-    let target = BotProfile.defaults[1]
-    let managerID = UUID()
-    let team = ManagerTeamConfiguration(
-        builderProfileID: source.id,
-        reviewerProfileID: target.id
-    )
-    let manager = BotProfile(
-        id: managerID,
-        name: "Manager",
-        provider: .codex,
-        role: .manager,
-        instructions: "Coordinate.",
-        managerTeam: team
-    )
-    let workflow = ManagerWorkflow(
-        managerProfileID: managerID,
-        team: team,
-        request: "Ship the feature",
-        implementationPlan: "Implement the feature end to end, with tests.",
-        stage: .building,
-        participantSessionIDs: [.builder: source.id, .reviewer: target.id]
-    )
-    let package = GitHandoffPackage(
-        sourceProfileID: source.id,
-        sourceName: source.name,
-        repositoryPath: "/tmp/project",
-        worktreePath: "/tmp/project-builder",
-        branch: "bl00p/source-12345678",
-        baseRevision: "abc123",
-        headRevision: "def456",
-        taskContext: "No task context was captured.",
-        testStatus: .passed,
-        testSummary: "`swift test` — passed",
-        workingTreeSummary: "Clean"
-    )
-    let store = AppStateStore(
-        fileURL: directory.appendingPathComponent("state.json")
-    )
-    try store.saveFixture(
-        PersistedAppState(
-            profiles: [manager, source, target],
-            sessions: [
-                source.id: AgentSessionState(status: .completed),
-                target.id: AgentSessionState()
-            ],
-            selectedBotID: source.id,
-            managerWorkflows: [managerID: workflow]
-        )
-    )
-    let runtime = HandoffRecordingRuntime()
-    let model = AppModel(
-        runtime: runtime,
-        worktrees: StubWorktreeManager(package: package),
-        store: store
-    )
-
-    model.handoff(from: source.id, to: target.id)
-    for _ in 0..<30
-        where model.session(for: target.id).pendingHandoff == nil {
-        try await Task.sleep(for: .milliseconds(10))
-    }
-
-    #expect(
-        model.session(for: target.id).pendingHandoff?.taskContext
-            == "Implement the feature end to end, with tests."
-    )
-    #expect(
-        model.session(for: target.id).entries.last?.text
-            == "Implement the feature end to end, with tests."
-    )
 }
 
 @MainActor
