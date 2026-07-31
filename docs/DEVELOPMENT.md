@@ -161,6 +161,24 @@ xcrun swift test --disable-sandbox \
   --filter sidebarIndicator
 ```
 
+## Sidebar and window chrome
+
+The sidebar starts directly with the bot rows; do not reintroduce a separate
+application-brand header above them. The **Add Bot** action remains at the
+bottom of the sidebar, but is a small bordered, content-sized control aligned
+to the sidebar inset rather than a full-width button. Preserve its plus icon,
+label, action, and sheet presentation. Sidebar row selection, rename and
+update affordances, indicator state, and the minimum 980×640 window size must
+remain unchanged.
+
+The application window itself is intentionally untitled on Linux, and macOS
+continues to hide the native window title. The conversation header remains the
+place for the active bot name, status, repository or worktree details, and
+actions. When changing either layout, smoke test the default and minimum
+window sizes in light and dark appearances; on Linux, also confirm the GTK
+window title is not populated with the application name and that **Add Bot**
+still opens its sheet.
+
 ## Managed workflow update cards
 
 Manager-only stage summaries are stored in `TimelineEntry.workflowUpdate`.
