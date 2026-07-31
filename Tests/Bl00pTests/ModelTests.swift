@@ -301,6 +301,37 @@ func attentionNoticesOnlyFireOnRelevantStatusTransitions() {
     )
 }
 
+@Test
+func completedNoticeCopyIsRoleAware() {
+    let manager = BotProfile(
+        name: "Morgan",
+        provider: .claude,
+        role: .manager,
+        instructions: ""
+    )
+    #expect(
+        AgentAttentionNotice.completed.content(for: manager)
+            == ("Morgan finished", "Open bl00p to review the Manager's update.")
+    )
+
+    for (role, name) in [
+        (AgentRole.builder, "Bea"),
+        (.reviewer, "Rory"),
+        (.publisher, "Parker")
+    ] {
+        let profile = BotProfile(
+            name: name,
+            provider: .codex,
+            role: role,
+            instructions: ""
+        )
+        #expect(
+            AgentAttentionNotice.completed.content(for: profile)
+                == ("\(name) finished", "This agent finished its turn.")
+        )
+    }
+}
+
 @MainActor
 @Test
 func completedAgentPostsNotificationAndUpdatesDockBadge() async throws {
