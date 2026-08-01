@@ -10879,79 +10879,27 @@ private func runGit(_ arguments: [String], in directory: URL) async throws {
     _ = try await gitOutput(arguments, in: directory)
 }
 
-/// Collects a `gitOutput()` invocation's async completion. Mirrors
-/// `GitWorktreeManager.GitInvocation`: every completion signal (stdout EOF,
-/// stderr EOF, exit) arrives on its own GCD queue via `Process`'s
-/// `readabilityHandler`/`terminationHandler`, so mutation is serialized
-/// through `lock` and the continuation resumes exactly once, when all three
-/// have landed.
-private final class GitOutputInvocation: @unchecked Sendable {
-    private let lock = NSLock()
-    private var output = Data()
-    private var error = Data()
-    private var outputDone = false
-    private var errorDone = false
-    private var exitStatus: Int32?
-    private var continuation: CheckedContinuation<String, Error>?
-
-    func resume(with continuation: CheckedContinuation<String, Error>) {
-        lock.lock()
-        self.continuation = continuation
-        lock.unlock()
-        maybeFinish()
-    }
-
-    func appendOutput(_ data: Data) {
-        lock.lock()
-        if data.isEmpty { outputDone = true } else { output.append(data) }
-        lock.unlock()
-        maybeFinish()
-    }
-
-    func appendError(_ data: Data) {
-        lock.lock()
-        if data.isEmpty { errorDone = true } else { error.append(data) }
-        lock.unlock()
-        maybeFinish()
-    }
-
-    func markExited(_ status: Int32) {
-        lock.lock()
-        exitStatus = status
-        lock.unlock()
-        maybeFinish()
-    }
-
-    private func maybeFinish() {
-        lock.lock()
-        guard outputDone, errorDone, let exitStatus, let continuation else {
-            lock.unlock()
-            return
-        }
-        self.continuation = nil
-        let stdout = String(data: output, encoding: .utf8) ?? ""
-        let stderr = String(data: error, encoding: .utf8) ?? ""
-        lock.unlock()
-
-        if exitStatus == 0 {
-            continuation.resume(
-                returning: stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-            )
-        } else {
-            continuation.resume(
-                throwing: GitWorktreeError.commandFailed(
-                    stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-                )
-            )
-        }
-    }
+private final class GitOutputBox: @unchecked Sendable {
+    var data = Data()
 }
 
 // Never blocks a thread on the subprocess: actor-isolated and plain async
 // test code alike run on Swift's small, fixed-size cooperative thread pool,
-// and a synchronous wait (DispatchGroup.wait(), Process.waitUntilExit())
-// there can starve that whole pool once enough concurrent tests do it at
-// once — every other async task in the process appears to silently stall.
+// and a synchronous wait there can starve that whole pool once enough
+// concurrent tests do it at once — every other async task in the process
+// appears to silently stall. Every blocking step here — both pipe reads
+// (draining only after waitUntilExit() deadlocks the moment output exceeds
+// the OS pipe buffer), the wait for them to finish, and the final
+// waitUntilExit() — runs on its own dedicated Thread rather than any
+// DispatchQueue: GCD's global queues share a small, capped worker pool, and
+// a blocking call there can exhaust the very pool the next concurrent
+// gitOutput() call needs — the same starvation this is trying to avoid,
+// just relocated. A plain Thread has no such shared cap. (Two earlier
+// attempts got this partly right and still hung under heavy concurrency:
+// one used readabilityHandler/terminationHandler, which also hung
+// intermittently on Linux's swift-corelibs-foundation; the other used
+// DispatchGroup.notify(queue: .global()) for the final wait, still a
+// shared pool.)
 private func gitOutput(_ arguments: [String], in directory: URL) async throws -> String {
     let process = Process()
     let output = Pipe()
@@ -10961,35 +10909,41 @@ private func gitOutput(_ arguments: [String], in directory: URL) async throws ->
     process.currentDirectoryURL = directory
     process.standardOutput = output
     process.standardError = error
+    try process.run()
 
-    let invocation = GitOutputInvocation()
-    let outputHandle = output.fileHandleForReading
-    let errorHandle = error.fileHandleForReading
-    outputHandle.readabilityHandler = { handle in
-        let data = handle.availableData
-        if data.isEmpty { handle.readabilityHandler = nil }
-        invocation.appendOutput(data)
-    }
-    errorHandle.readabilityHandler = { handle in
-        let data = handle.availableData
-        if data.isEmpty { handle.readabilityHandler = nil }
-        invocation.appendError(data)
-    }
-    process.terminationHandler = { process in
-        invocation.markExited(process.terminationStatus)
+    let (outputData, errorData, status): (Data, Data, Int32) = await withCheckedContinuation { continuation in
+        let stdoutHandle = output.fileHandleForReading
+        let stderrHandle = error.fileHandleForReading
+        let outputBox = GitOutputBox()
+        let errorBox = GitOutputBox()
+        let group = DispatchGroup()
+        group.enter()
+        Thread.detachNewThread {
+            outputBox.data = stdoutHandle.readDataToEndOfFile()
+            group.leave()
+        }
+        group.enter()
+        Thread.detachNewThread {
+            errorBox.data = stderrHandle.readDataToEndOfFile()
+            group.leave()
+        }
+        Thread.detachNewThread {
+            group.wait()
+            process.waitUntilExit()
+            continuation.resume(
+                returning: (outputBox.data, errorBox.data, process.terminationStatus)
+            )
+        }
     }
 
-    do {
-        try process.run()
-    } catch {
-        outputHandle.readabilityHandler = nil
-        errorHandle.readabilityHandler = nil
-        throw error
+    let standardOutput = String(data: outputData, encoding: .utf8) ?? ""
+    let standardError = String(data: errorData, encoding: .utf8) ?? ""
+    guard status == 0 else {
+        throw GitWorktreeError.commandFailed(
+            standardError.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
     }
-
-    return try await withCheckedThrowingContinuation { continuation in
-        invocation.resume(with: continuation)
-    }
+    return standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 private actor StubWorktreeManager: GitWorktreeManaging {

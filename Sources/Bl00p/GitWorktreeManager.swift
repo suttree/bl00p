@@ -391,98 +391,37 @@ actor GitWorktreeManager: GitWorktreeManaging {
         let stderr: String
     }
 
-    /// Collects a `git()` invocation's async completion. `Process`'s
-    /// `readabilityHandler`/`terminationHandler` callbacks each fire on
-    /// their own GCD queue, so every mutation is serialized through `lock`;
-    /// `maybeFinish()` resumes the continuation exactly once, the moment
-    /// all three completion signals (stdout EOF, stderr EOF, exit) arrive.
-    private final class GitInvocation: @unchecked Sendable {
-        private let lock = NSLock()
-        private var output = Data()
-        private var error = Data()
-        private var outputDone = false
-        private var errorDone = false
-        private var exitStatus: Int32?
-        private var continuation: CheckedContinuation<GitResult, Error>?
-        private let allowFailure: Bool
-        private let arguments: [String]
-
-        init(allowFailure: Bool, arguments: [String]) {
-            self.allowFailure = allowFailure
-            self.arguments = arguments
-        }
-
-        func resume(with continuation: CheckedContinuation<GitResult, Error>) {
-            lock.lock()
-            self.continuation = continuation
-            lock.unlock()
-            maybeFinish()
-        }
-
-        func appendOutput(_ data: Data) {
-            lock.lock()
-            if data.isEmpty {
-                outputDone = true
-            } else {
-                output.append(data)
-            }
-            lock.unlock()
-            maybeFinish()
-        }
-
-        func appendError(_ data: Data) {
-            lock.lock()
-            if data.isEmpty {
-                errorDone = true
-            } else {
-                error.append(data)
-            }
-            lock.unlock()
-            maybeFinish()
-        }
-
-        func markExited(_ status: Int32) {
-            lock.lock()
-            exitStatus = status
-            lock.unlock()
-            maybeFinish()
-        }
-
-        private func maybeFinish() {
-            lock.lock()
-            guard outputDone, errorDone, let exitStatus, let continuation else {
-                lock.unlock()
-                return
-            }
-            self.continuation = nil
-            let stdout = String(data: output, encoding: .utf8) ?? ""
-            let stderr = String(data: error, encoding: .utf8) ?? ""
-            lock.unlock()
-
-            let result = GitResult(status: exitStatus, stdout: stdout, stderr: stderr)
-            if !allowFailure && result.status != 0 {
-                let command = (["git"] + arguments).joined(separator: " ")
-                let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-                continuation.resume(
-                    throwing: GitWorktreeError.commandFailed(
-                        detail.isEmpty ? "\(command) failed." : detail
-                    )
-                )
-            } else {
-                continuation.resume(returning: result)
-            }
-        }
+    /// Single-writer handoff from a background pipe-reading closure back to
+    /// the continuation resumed once all reads complete. Safe by
+    /// construction: exactly one closure ever writes `data`, and the
+    /// `DispatchGroup` happens-before relationship orders that write
+    /// before the code that reads it.
+    private final class DataBox: @unchecked Sendable {
+        var data = Data()
     }
 
-    /// Runs `git` without ever blocking a thread on the process. Actor
-    /// methods run on Swift's small, fixed-size cooperative thread pool;
-    /// blocking one of those threads synchronously (as `Process
-    /// .waitUntilExit()` or `DispatchGroup.wait()` do) can starve the whole
-    /// pool once enough concurrent callers do it at once, which looks like
-    /// every unrelated async task in the process silently stalling. Draining
-    /// both pipes via `readabilityHandler` and awaiting a continuation until
-    /// termination and both EOF signals arrive keeps this fully
-    /// suspend/resume, so the actor's thread is free while git runs.
+    /// Runs `git` without ever blocking Swift's cooperative thread pool.
+    /// Actor methods run on that small, fixed-size pool; blocking one of
+    /// those threads synchronously (`Process.waitUntilExit()`,
+    /// `DispatchGroup.wait()`) can starve the whole pool once enough
+    /// concurrent callers do it at once, which looks like every unrelated
+    /// async task in the process silently stalling.
+    ///
+    /// Draining only after `waitUntilExit()` deadlocks the moment output
+    /// exceeds the OS pipe buffer, so both pipes are drained concurrently
+    /// with the process running. Every blocking step here — both reads, the
+    /// wait for them to finish, and the final `waitUntilExit()` — runs on
+    /// its own dedicated `Thread` rather than any `DispatchQueue`: GCD's
+    /// global queues share a small, capped worker pool, and a blocking call
+    /// there can exhaust the very pool the next concurrent `git()` call
+    /// needs — the same starvation this is trying to avoid, just relocated.
+    /// A plain `Thread` has no such shared cap, so nothing here can starve
+    /// anything else. (Two earlier attempts got this partly right and still
+    /// hung under heavy concurrency: one used `Process`'s
+    /// `readabilityHandler`/`terminationHandler`, which also hung
+    /// intermittently on Linux's swift-corelibs-foundation; the other used
+    /// `DispatchGroup.notify(queue: .global())` for the final wait, still a
+    /// shared pool.)
     private func git(
         _ arguments: [String],
         in directory: URL,
@@ -497,35 +436,54 @@ actor GitWorktreeManager: GitWorktreeManaging {
         process.standardOutput = standardOutput
         process.standardError = standardError
 
-        let invocation = GitInvocation(allowFailure: allowFailure, arguments: arguments)
-
-        let outputHandle = standardOutput.fileHandleForReading
-        let errorHandle = standardError.fileHandleForReading
-        outputHandle.readabilityHandler = { handle in
-            let data = handle.availableData
-            if data.isEmpty { handle.readabilityHandler = nil }
-            invocation.appendOutput(data)
-        }
-        errorHandle.readabilityHandler = { handle in
-            let data = handle.availableData
-            if data.isEmpty { handle.readabilityHandler = nil }
-            invocation.appendError(data)
-        }
-        process.terminationHandler = { process in
-            invocation.markExited(process.terminationStatus)
-        }
-
         do {
             try process.run()
         } catch {
-            outputHandle.readabilityHandler = nil
-            errorHandle.readabilityHandler = nil
             throw GitWorktreeError.commandFailed(error.localizedDescription)
         }
 
-        return try await withCheckedThrowingContinuation { continuation in
-            invocation.resume(with: continuation)
+        let (outputData, errorData, status): (Data, Data, Int32) = await withCheckedContinuation { continuation in
+            let stdoutHandle = standardOutput.fileHandleForReading
+            let stderrHandle = standardError.fileHandleForReading
+            let outputBox = DataBox()
+            let errorBox = DataBox()
+            let group = DispatchGroup()
+            group.enter()
+            Thread.detachNewThread {
+                outputBox.data = stdoutHandle.readDataToEndOfFile()
+                group.leave()
+            }
+            group.enter()
+            Thread.detachNewThread {
+                errorBox.data = stderrHandle.readDataToEndOfFile()
+                group.leave()
+            }
+            // Waiting for the group and for exit both block, so both run on
+            // their own dedicated thread too rather than handing off to
+            // group.notify(queue:), which would run on one of libdispatch's
+            // shared global queues — a smaller, capped pool that can still
+            // exhaust under enough concurrent git() calls, same as this
+            // whole rewrite exists to avoid in the first place.
+            Thread.detachNewThread {
+                group.wait()
+                process.waitUntilExit()
+                continuation.resume(
+                    returning: (outputBox.data, errorBox.data, process.terminationStatus)
+                )
+            }
         }
+
+        let output = String(data: outputData, encoding: .utf8) ?? ""
+        let error = String(data: errorData, encoding: .utf8) ?? ""
+        let result = GitResult(status: status, stdout: output, stderr: error)
+        if !allowFailure && result.status != 0 {
+            let command = (["git"] + arguments).joined(separator: " ")
+            let detail = error.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw GitWorktreeError.commandFailed(
+                detail.isEmpty ? "\(command) failed." : detail
+            )
+        }
+        return result
     }
 }
 
