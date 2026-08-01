@@ -1973,8 +1973,15 @@ enum ClaudeToolApprovalPolicy {
                     ["-p", "--patch", "-i", "--interactive", "-e", "--edit"]
                         .contains($0)
                 })
+            // A bare `--force`/`-f` can silently clobber another author's
+            // work on the remote; `--force-with-lease` refuses to push if
+            // the remote moved since the last fetch, so it is safe to
+            // auto-approve alongside an ordinary push.
+            let isSafePushSubcommand = (role == .builder || role == .publisher)
+                && subcommand == "push"
+                && !arguments.contains(where: { $0 == "--force" || $0 == "-f" })
             supported = baseSupported
-                && (isInspectionSubcommand || isWriteSubcommand)
+                && (isInspectionSubcommand || isWriteSubcommand || isSafePushSubcommand)
 
         case "swift":
             supported = ["test", "build", "--version"].contains(
@@ -2040,9 +2047,9 @@ enum ClaudeToolApprovalPolicy {
                 "\(executable) is outside the Claude Manager's test and inspection command set."
             )
         case .builder, .publisher:
-            // Unrecognized rather than unsafe: surface an approval card
-            // instead of dead-ending the turn with no way to proceed.
-            return .ask
+            return .deny(
+                "\(executable) is outside Claude auto-approval's safe command set. Switch to Ask to review it explicitly."
+            )
         }
     }
 
