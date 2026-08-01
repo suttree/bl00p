@@ -171,6 +171,12 @@ label, action, and sheet presentation. Sidebar row selection, rename and
 update affordances, indicator state, and the minimum 980×640 window size must
 remain unchanged.
 
+On macOS, `List(selection:)` provides the selected sidebar row highlight.
+Do not add a second selected-row background there; reserve the subtle pink row
+background for associated, non-selected managed agents. The Linux sidebar uses
+SwiftOpenUI without the native selection binding, so keep its explicit selected
+and associated row backgrounds visible.
+
 The application window itself is intentionally untitled on Linux, and macOS
 continues to hide the native window title. The conversation header remains the
 place for the active bot name, status, repository or worktree details, and
