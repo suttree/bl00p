@@ -178,7 +178,6 @@ struct SidebarView: View {
         .tag(Optional(profile.id))
         .listRowBackground(
             rowBackground(
-                isSelected: model.selectedBotID == profile.id,
                 isAssociated: associatedBotIDs.contains(profile.id)
             )
         )
@@ -206,10 +205,8 @@ struct SidebarView: View {
     }
 
     @ViewBuilder
-    private func rowBackground(isSelected: Bool, isAssociated: Bool) -> some View {
-        if isSelected {
-            Color.bl00pPink.opacity(0.22)
-        } else if isAssociated {
+    private func rowBackground(isAssociated: Bool) -> some View {
+        if isAssociated {
             Color.bl00pPink.opacity(0.10)
         } else {
             Color.clear
