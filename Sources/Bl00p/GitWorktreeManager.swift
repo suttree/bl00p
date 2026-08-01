@@ -85,7 +85,7 @@ actor GitWorktreeManager: GitWorktreeManaging {
         startingPoint: String? = nil,
         handoffID: UUID? = nil
     ) async throws -> GitWorktreeOwnership {
-        try prepareWorktree(
+        try await prepareWorktree(
             for: profile,
             sessionID: sessionID,
             startingPoint: startingPoint,
@@ -99,7 +99,7 @@ actor GitWorktreeManager: GitWorktreeManaging {
         startingPoint: String? = nil,
         handoffID: UUID? = nil
     ) async throws -> GitWorktreeOwnership {
-        try prepareWorktree(
+        try await prepareWorktree(
             for: profile,
             sessionID: profile.id,
             startingPoint: startingPoint,
@@ -114,7 +114,7 @@ actor GitWorktreeManager: GitWorktreeManaging {
         startingPoint: String?,
         handoffID: UUID?,
         legacyOwnership: GitWorktreeOwnership?
-    ) throws -> GitWorktreeOwnership {
+    ) async throws -> GitWorktreeOwnership {
         guard !profile.workingDirectory.isEmpty else {
             throw GitWorktreeError.noRepository
         }
@@ -122,14 +122,14 @@ actor GitWorktreeManager: GitWorktreeManaging {
         let selectedDirectory = URL(fileURLWithPath: profile.workingDirectory)
             .standardizedFileURL
             .resolvingSymlinksInPath()
-        let repository = try primaryRepositoryRoot(from: selectedDirectory)
+        let repository = try await primaryRepositoryRoot(from: selectedDirectory)
 
         if let ownership = legacyOwnership,
            ownership.ownerProfileID == profile.id,
            ownership.ownerSessionID == sessionID
                 || (ownership.ownerSessionID == nil && sessionID == profile.id),
            canonicalPath(ownership.repositoryPath) == repository.path,
-           isReusable(ownership) {
+           await isReusable(ownership) {
             var migrated = ownership
             migrated.ownerSessionID = sessionID
             return migrated
@@ -160,12 +160,12 @@ actor GitWorktreeManager: GitWorktreeManaging {
         )
         let worktreePath = canonicalPath(worktree.path)
         let base = startingPoint ?? "HEAD"
-        let baseRevision = try git(
+        let baseRevision = try await git(
             ["rev-parse", "\(base)^{commit}"],
             in: repository
         ).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let registered = try registeredWorktrees(in: repository)
+        let registered = try await registeredWorktrees(in: repository)
         if let registeredBranch = registered[worktreePath] {
             guard registeredBranch == branch else {
                 throw GitWorktreeError.conflictingWorktree(worktreePath)
@@ -179,7 +179,7 @@ actor GitWorktreeManager: GitWorktreeManaging {
                 withIntermediateDirectories: true
             )
 
-            let branchExists = try git(
+            let branchExists = try await git(
                 ["show-ref", "--verify", "--quiet", "refs/heads/\(branch)"],
                 in: repository,
                 allowFailure: true
@@ -187,7 +187,7 @@ actor GitWorktreeManager: GitWorktreeManaging {
             let arguments = branchExists
                 ? ["worktree", "add", worktreePath, branch]
                 : ["worktree", "add", "-b", branch, worktreePath, base]
-            _ = try git(arguments, in: repository)
+            _ = try await git(arguments, in: repository)
         }
 
         return GitWorktreeOwnership(
@@ -201,8 +201,8 @@ actor GitWorktreeManager: GitWorktreeManaging {
     }
 
     func worktreeIsDirty(_ ownership: GitWorktreeOwnership) async throws -> Bool {
-        _ = try validateCleanupTarget(ownership)
-        let result = try git(
+        _ = try await validateCleanupTarget(ownership)
+        let result = try await git(
             ["status", "--porcelain"],
             in: URL(fileURLWithPath: ownership.worktreePath)
         )
@@ -213,18 +213,18 @@ actor GitWorktreeManager: GitWorktreeManaging {
         _ ownership: GitWorktreeOwnership,
         force: Bool
     ) async throws {
-        let repository = try validateCleanupTarget(ownership)
+        let repository = try await validateCleanupTarget(ownership)
         var arguments = ["worktree", "remove"]
         if force {
             arguments.append("--force")
         }
         arguments.append(ownership.worktreePath)
-        _ = try git(arguments, in: repository)
+        _ = try await git(arguments, in: repository)
     }
 
     private func validateCleanupTarget(
         _ ownership: GitWorktreeOwnership
-    ) throws -> URL {
+    ) async throws -> URL {
         let repository = URL(fileURLWithPath: ownership.repositoryPath)
             .standardizedFileURL
             .resolvingSymlinksInPath()
@@ -238,7 +238,7 @@ actor GitWorktreeManager: GitWorktreeManaging {
               path != repository.path else {
             throw GitWorktreeError.unsafeCleanupTarget(path)
         }
-        let registered = try registeredWorktrees(in: repository)
+        let registered = try await registeredWorktrees(in: repository)
         guard registered[path] == ownership.branch else {
             throw GitWorktreeError.unsafeCleanupTarget(path)
         }
@@ -248,28 +248,28 @@ actor GitWorktreeManager: GitWorktreeManaging {
     func makeHandoff(
         from profile: BotProfile,
         session: AgentSessionState
-    ) throws -> GitHandoffPackage {
+    ) async throws -> GitHandoffPackage {
         guard let ownership = profile.worktree,
               ownership.ownerProfileID == profile.id else {
             throw GitWorktreeError.noRepository
         }
 
         let worktree = URL(fileURLWithPath: ownership.worktreePath)
-        let branch = try git(["branch", "--show-current"], in: worktree)
+        let branch = try await git(["branch", "--show-current"], in: worktree)
             .stdout
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let repository = URL(fileURLWithPath: ownership.repositoryPath)
             .standardizedFileURL
             .resolvingSymlinksInPath()
-        let registered = try registeredWorktrees(in: repository)
+        let registered = try await registeredWorktrees(in: repository)
         guard !branch.isEmpty,
               registered[canonicalPath(ownership.worktreePath)] == branch else {
             throw GitWorktreeError.conflictingWorktree(ownership.worktreePath)
         }
-        let head = try git(["rev-parse", "HEAD"], in: worktree)
+        let head = try await git(["rev-parse", "HEAD"], in: worktree)
             .stdout
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let status = try git(["status", "--short"], in: worktree)
+        let status = try await git(["status", "--short"], in: worktree)
             .stdout
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let task = session.entries
@@ -299,8 +299,8 @@ actor GitWorktreeManager: GitWorktreeManaging {
         )
     }
 
-    private func primaryRepositoryRoot(from directory: URL) throws -> URL {
-        let rootResult = try git(
+    private func primaryRepositoryRoot(from directory: URL) async throws -> URL {
+        let rootResult = try await git(
             ["rev-parse", "--show-toplevel"],
             in: directory,
             allowFailure: true
@@ -309,7 +309,7 @@ actor GitWorktreeManager: GitWorktreeManaging {
             throw GitWorktreeError.invalidRepository(directory.path)
         }
 
-        let list = try git(["worktree", "list", "--porcelain"], in: directory)
+        let list = try await git(["worktree", "list", "--porcelain"], in: directory)
             .stdout
         guard let primaryPath = list
             .split(separator: "\n")
@@ -327,12 +327,12 @@ actor GitWorktreeManager: GitWorktreeManaging {
             .resolvingSymlinksInPath()
     }
 
-    private func isReusable(_ ownership: GitWorktreeOwnership) -> Bool {
+    private func isReusable(_ ownership: GitWorktreeOwnership) async -> Bool {
         let worktree = URL(fileURLWithPath: ownership.worktreePath)
         guard FileManager.default.fileExists(atPath: worktree.path) else {
             return false
         }
-        guard let branch = try? git(
+        guard let branch = try? await git(
             ["branch", "--show-current"],
             in: worktree,
             allowFailure: true
@@ -342,8 +342,8 @@ actor GitWorktreeManager: GitWorktreeManaging {
                 == ownership.branch
     }
 
-    private func registeredWorktrees(in repository: URL) throws -> [String: String] {
-        let output = try git(["worktree", "list", "--porcelain"], in: repository)
+    private func registeredWorktrees(in repository: URL) async throws -> [String: String] {
+        let output = try await git(["worktree", "list", "--porcelain"], in: repository)
             .stdout
         var result: [String: String] = [:]
         var path: String?
@@ -391,11 +391,103 @@ actor GitWorktreeManager: GitWorktreeManaging {
         let stderr: String
     }
 
+    /// Collects a `git()` invocation's async completion. `Process`'s
+    /// `readabilityHandler`/`terminationHandler` callbacks each fire on
+    /// their own GCD queue, so every mutation is serialized through `lock`;
+    /// `maybeFinish()` resumes the continuation exactly once, the moment
+    /// all three completion signals (stdout EOF, stderr EOF, exit) arrive.
+    private final class GitInvocation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var output = Data()
+        private var error = Data()
+        private var outputDone = false
+        private var errorDone = false
+        private var exitStatus: Int32?
+        private var continuation: CheckedContinuation<GitResult, Error>?
+        private let allowFailure: Bool
+        private let arguments: [String]
+
+        init(allowFailure: Bool, arguments: [String]) {
+            self.allowFailure = allowFailure
+            self.arguments = arguments
+        }
+
+        func resume(with continuation: CheckedContinuation<GitResult, Error>) {
+            lock.lock()
+            self.continuation = continuation
+            lock.unlock()
+            maybeFinish()
+        }
+
+        func appendOutput(_ data: Data) {
+            lock.lock()
+            if data.isEmpty {
+                outputDone = true
+            } else {
+                output.append(data)
+            }
+            lock.unlock()
+            maybeFinish()
+        }
+
+        func appendError(_ data: Data) {
+            lock.lock()
+            if data.isEmpty {
+                errorDone = true
+            } else {
+                error.append(data)
+            }
+            lock.unlock()
+            maybeFinish()
+        }
+
+        func markExited(_ status: Int32) {
+            lock.lock()
+            exitStatus = status
+            lock.unlock()
+            maybeFinish()
+        }
+
+        private func maybeFinish() {
+            lock.lock()
+            guard outputDone, errorDone, let exitStatus, let continuation else {
+                lock.unlock()
+                return
+            }
+            self.continuation = nil
+            let stdout = String(data: output, encoding: .utf8) ?? ""
+            let stderr = String(data: error, encoding: .utf8) ?? ""
+            lock.unlock()
+
+            let result = GitResult(status: exitStatus, stdout: stdout, stderr: stderr)
+            if !allowFailure && result.status != 0 {
+                let command = (["git"] + arguments).joined(separator: " ")
+                let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                continuation.resume(
+                    throwing: GitWorktreeError.commandFailed(
+                        detail.isEmpty ? "\(command) failed." : detail
+                    )
+                )
+            } else {
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    /// Runs `git` without ever blocking a thread on the process. Actor
+    /// methods run on Swift's small, fixed-size cooperative thread pool;
+    /// blocking one of those threads synchronously (as `Process
+    /// .waitUntilExit()` or `DispatchGroup.wait()` do) can starve the whole
+    /// pool once enough concurrent callers do it at once, which looks like
+    /// every unrelated async task in the process silently stalling. Draining
+    /// both pipes via `readabilityHandler` and awaiting a continuation until
+    /// termination and both EOF signals arrive keeps this fully
+    /// suspend/resume, so the actor's thread is free while git runs.
     private func git(
         _ arguments: [String],
         in directory: URL,
         allowFailure: Bool = false
-    ) throws -> GitResult {
+    ) async throws -> GitResult {
         let process = Process()
         let standardOutput = Pipe()
         let standardError = Pipe()
@@ -405,35 +497,35 @@ actor GitWorktreeManager: GitWorktreeManaging {
         process.standardOutput = standardOutput
         process.standardError = standardError
 
+        let invocation = GitInvocation(allowFailure: allowFailure, arguments: arguments)
+
+        let outputHandle = standardOutput.fileHandleForReading
+        let errorHandle = standardError.fileHandleForReading
+        outputHandle.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty { handle.readabilityHandler = nil }
+            invocation.appendOutput(data)
+        }
+        errorHandle.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty { handle.readabilityHandler = nil }
+            invocation.appendError(data)
+        }
+        process.terminationHandler = { process in
+            invocation.markExited(process.terminationStatus)
+        }
+
         do {
             try process.run()
         } catch {
+            outputHandle.readabilityHandler = nil
+            errorHandle.readabilityHandler = nil
             throw GitWorktreeError.commandFailed(error.localizedDescription)
         }
-        process.waitUntilExit()
 
-        let output = String(
-            data: standardOutput.fileHandleForReading.readDataToEndOfFile(),
-            encoding: .utf8
-        ) ?? ""
-        let error = String(
-            data: standardError.fileHandleForReading.readDataToEndOfFile(),
-            encoding: .utf8
-        ) ?? ""
-        let result = GitResult(
-            status: process.terminationStatus,
-            stdout: output,
-            stderr: error
-        )
-        if !allowFailure && result.status != 0 {
-            let command = (["git"] + arguments).joined(separator: " ")
-            let detail = error
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            throw GitWorktreeError.commandFailed(
-                detail.isEmpty ? "\(command) failed." : detail
-            )
+        return try await withCheckedThrowingContinuation { continuation in
+            invocation.resume(with: continuation)
         }
-        return result
     }
 }
 

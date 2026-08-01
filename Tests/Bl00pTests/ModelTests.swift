@@ -2132,12 +2132,12 @@ func worktreeManagerCreatesIsolatedBranchesAndHandoffSnapshots() async throws {
     )
     defer { try? FileManager.default.removeItem(at: root) }
 
-    try runGit(["init", "-b", "main"], in: repository)
+    try await runGit(["init", "-b", "main"], in: repository)
     try Data("initial\n".utf8).write(
         to: repository.appendingPathComponent("README.md")
     )
-    try runGit(["add", "README.md"], in: repository)
-    try runGit(
+    try await runGit(["add", "README.md"], in: repository)
+    try await runGit(
         [
             "-c", "user.name=bl00p Tests",
             "-c", "user.email=tests@bl00p.dev",
@@ -2166,7 +2166,7 @@ func worktreeManagerCreatesIsolatedBranchesAndHandoffSnapshots() async throws {
     #expect(firstOwnership.worktreePath != repository.path)
     #expect(firstOwnership.branch.hasPrefix("bl00p/implementation-one-"))
     #expect(
-        try gitOutput(["branch", "--show-current"], in: URL(
+        try await gitOutput(["branch", "--show-current"], in: URL(
             fileURLWithPath: firstOwnership.worktreePath
         )) == firstOwnership.branch
     )
@@ -2175,8 +2175,8 @@ func worktreeManagerCreatesIsolatedBranchesAndHandoffSnapshots() async throws {
     try Data("handoff\n".utf8).write(
         to: firstWorktree.appendingPathComponent("handoff.txt")
     )
-    try runGit(["add", "handoff.txt"], in: firstWorktree)
-    try runGit(
+    try await runGit(["add", "handoff.txt"], in: firstWorktree)
+    try await runGit(
         [
             "-c", "user.name=bl00p Tests",
             "-c", "user.email=tests@bl00p.dev",
@@ -2218,7 +2218,7 @@ func worktreeManagerCreatesIsolatedBranchesAndHandoffSnapshots() async throws {
         startingPoint: package.branch,
         handoffID: package.id
     )
-    let secondHead = try gitOutput(
+    let secondHead = try await gitOutput(
         ["rev-parse", "HEAD"],
         in: URL(fileURLWithPath: secondOwnership.worktreePath)
     )
@@ -2242,12 +2242,12 @@ func worktreeManagerRecoversARegisteredWorktreeAfterItsBranchIsRenamed() async t
     )
     defer { try? FileManager.default.removeItem(at: root) }
 
-    try runGit(["init", "-b", "main"], in: repository)
+    try await runGit(["init", "-b", "main"], in: repository)
     try Data("initial\n".utf8).write(
         to: repository.appendingPathComponent("README.md")
     )
-    try runGit(["add", "README.md"], in: repository)
-    try runGit(
+    try await runGit(["add", "README.md"], in: repository)
+    try await runGit(
         [
             "-c", "user.name=bl00p Tests",
             "-c", "user.email=tests@bl00p.dev",
@@ -2272,12 +2272,12 @@ func worktreeManagerRecoversARegisteredWorktreeAfterItsBranchIsRenamed() async t
     builder.worktree = ownership
     let worktree = URL(fileURLWithPath: ownership.worktreePath)
     let renamedBranch = "fix-agent-completion-notification-copy"
-    try runGit(["branch", "-m", renamedBranch], in: worktree)
+    try await runGit(["branch", "-m", renamedBranch], in: worktree)
     try Data("change\n".utf8).write(
         to: worktree.appendingPathComponent("change.txt")
     )
-    try runGit(["add", "change.txt"], in: worktree)
-    try runGit(
+    try await runGit(["add", "change.txt"], in: worktree)
+    try await runGit(
         [
             "-c", "user.name=bl00p Tests",
             "-c", "user.email=tests@bl00p.dev",
@@ -2321,12 +2321,12 @@ func makeHandoffFallsBackToTheLatestHandoffEntryWhenNoUserEntryExists() async th
     )
     defer { try? FileManager.default.removeItem(at: root) }
 
-    try runGit(["init", "-b", "main"], in: repository)
+    try await runGit(["init", "-b", "main"], in: repository)
     try Data("initial\n".utf8).write(
         to: repository.appendingPathComponent("README.md")
     )
-    try runGit(["add", "README.md"], in: repository)
-    try runGit(
+    try await runGit(["add", "README.md"], in: repository)
+    try await runGit(
         [
             "-c", "user.name=bl00p Tests",
             "-c", "user.email=tests@bl00p.dev",
@@ -2503,10 +2503,10 @@ func oneBuilderProfileGetsUniqueSessionWorktreesAndCleanupRetainsBranches() asyn
     let repository = root.appendingPathComponent("project", isDirectory: true)
     try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
-    try runGit(["init", "-b", "main"], in: repository)
+    try await runGit(["init", "-b", "main"], in: repository)
     try Data("initial\n".utf8).write(to: repository.appendingPathComponent("README.md"))
-    try runGit(["add", "README.md"], in: repository)
-    try runGit(
+    try await runGit(["add", "README.md"], in: repository)
+    try await runGit(
         [
             "-c", "user.name=bl00p Tests",
             "-c", "user.email=tests@bl00p.dev",
@@ -2546,7 +2546,7 @@ func oneBuilderProfileGetsUniqueSessionWorktreesAndCleanupRetainsBranches() asyn
 
     try await manager.removeWorktree(first, force: false)
     #expect(!FileManager.default.fileExists(atPath: first.worktreePath))
-    try runGit(
+    try await runGit(
         ["show-ref", "--verify", "--quiet", "refs/heads/\(first.branch)"],
         in: repository
     )
@@ -2558,7 +2558,7 @@ func oneBuilderProfileGetsUniqueSessionWorktreesAndCleanupRetainsBranches() asyn
     #expect(try await manager.worktreeIsDirty(second))
     try await manager.removeWorktree(second, force: true)
     #expect(!FileManager.default.fileExists(atPath: second.worktreePath))
-    try runGit(
+    try await runGit(
         ["show-ref", "--verify", "--quiet", "refs/heads/\(second.branch)"],
         in: repository
     )
@@ -9367,6 +9367,39 @@ func claudeBuilderCanAutoApproveStagingAndCommittingButNotAmend() throws {
                 "input": .object(["command": .string(command)])
             ]))
         )
+        if case .deny = ClaudeToolApprovalPolicy.decision(
+            for: request,
+            mode: .auto,
+            role: .builder,
+            workingDirectory: workingDirectory,
+            stagedAttachmentDirectory: nil
+        ) {
+            // Expected: history-rewriting and interactive git flags still
+            // require explicit approval even for the Builder.
+        } else {
+            Issue.record("\(command) was auto-approved for the Builder")
+        }
+    }
+}
+
+@Test
+func claudeBuilderCanAutoApprovePushExceptBareForce() throws {
+    let workingDirectory = URL(
+        fileURLWithPath: "/tmp/bl00p-workspace",
+        isDirectory: true
+    )
+    for command in [
+        "git push",
+        "git push origin feature/example",
+        "git push --force-with-lease origin feature/example"
+    ] {
+        let request = try #require(
+            ClaudeToolApprovalRequest(request: .object([
+                "subtype": .string("can_use_tool"),
+                "tool_name": .string("Bash"),
+                "input": .object(["command": .string(command)])
+            ]))
+        )
         #expect(
             ClaudeToolApprovalPolicy.decision(
                 for: request,
@@ -9374,9 +9407,31 @@ func claudeBuilderCanAutoApproveStagingAndCommittingButNotAmend() throws {
                 role: .builder,
                 workingDirectory: workingDirectory,
                 stagedAttachmentDirectory: nil
-            ) == .ask,
-            "\(command) should require explicit approval, not auto-approve or dead-end"
+            ) == .allow,
+            "\(command) should be auto-approved for the Builder"
         )
+    }
+
+    for command in ["git push --force origin feature/example", "git push -f"] {
+        let request = try #require(
+            ClaudeToolApprovalRequest(request: .object([
+                "subtype": .string("can_use_tool"),
+                "tool_name": .string("Bash"),
+                "input": .object(["command": .string(command)])
+            ]))
+        )
+        if case .deny = ClaudeToolApprovalPolicy.decision(
+            for: request,
+            mode: .auto,
+            role: .builder,
+            workingDirectory: workingDirectory,
+            stagedAttachmentDirectory: nil
+        ) {
+            // Expected: a bare force-push can silently clobber another
+            // author's work on the remote, unlike --force-with-lease.
+        } else {
+            Issue.record("\(command) was auto-approved for the Builder")
+        }
     }
 }
 
@@ -9420,18 +9475,17 @@ func claudeAutoApprovalAsksForUnclassifiedActionsAndMatchesXcodebuildSubcommands
             stagedAttachmentDirectory: nil
         ) == .ask
     )
-    // Expected: only the first xcodebuild subcommand is classified as
-    // supported, so `archive` falls through to an approval card rather
-    // than auto-approving or dead-ending the turn.
-    #expect(
-        ClaudeToolApprovalPolicy.decision(
-            for: archive,
-            mode: .auto,
-            role: .publisher,
-            workingDirectory: workingDirectory,
-            stagedAttachmentDirectory: nil
-        ) == .ask
-    )
+    if case .deny = ClaudeToolApprovalPolicy.decision(
+        for: archive,
+        mode: .auto,
+        role: .publisher,
+        workingDirectory: workingDirectory,
+        stagedAttachmentDirectory: nil
+    ) {
+        // Expected: only the first xcodebuild subcommand is classified.
+    } else {
+        Issue.record("xcodebuild archive was auto-approved")
+    }
     #expect(
         ClaudeToolApprovalPolicy.decision(
             for: test,
@@ -10821,11 +10875,84 @@ private actor ApprovalStubClaudeClient: ClaudeClient {
     }
 }
 
-private func runGit(_ arguments: [String], in directory: URL) throws {
-    _ = try gitOutput(arguments, in: directory)
+private func runGit(_ arguments: [String], in directory: URL) async throws {
+    _ = try await gitOutput(arguments, in: directory)
 }
 
-private func gitOutput(_ arguments: [String], in directory: URL) throws -> String {
+/// Collects a `gitOutput()` invocation's async completion. Mirrors
+/// `GitWorktreeManager.GitInvocation`: every completion signal (stdout EOF,
+/// stderr EOF, exit) arrives on its own GCD queue via `Process`'s
+/// `readabilityHandler`/`terminationHandler`, so mutation is serialized
+/// through `lock` and the continuation resumes exactly once, when all three
+/// have landed.
+private final class GitOutputInvocation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var output = Data()
+    private var error = Data()
+    private var outputDone = false
+    private var errorDone = false
+    private var exitStatus: Int32?
+    private var continuation: CheckedContinuation<String, Error>?
+
+    func resume(with continuation: CheckedContinuation<String, Error>) {
+        lock.lock()
+        self.continuation = continuation
+        lock.unlock()
+        maybeFinish()
+    }
+
+    func appendOutput(_ data: Data) {
+        lock.lock()
+        if data.isEmpty { outputDone = true } else { output.append(data) }
+        lock.unlock()
+        maybeFinish()
+    }
+
+    func appendError(_ data: Data) {
+        lock.lock()
+        if data.isEmpty { errorDone = true } else { error.append(data) }
+        lock.unlock()
+        maybeFinish()
+    }
+
+    func markExited(_ status: Int32) {
+        lock.lock()
+        exitStatus = status
+        lock.unlock()
+        maybeFinish()
+    }
+
+    private func maybeFinish() {
+        lock.lock()
+        guard outputDone, errorDone, let exitStatus, let continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        let stdout = String(data: output, encoding: .utf8) ?? ""
+        let stderr = String(data: error, encoding: .utf8) ?? ""
+        lock.unlock()
+
+        if exitStatus == 0 {
+            continuation.resume(
+                returning: stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        } else {
+            continuation.resume(
+                throwing: GitWorktreeError.commandFailed(
+                    stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            )
+        }
+    }
+}
+
+// Never blocks a thread on the subprocess: actor-isolated and plain async
+// test code alike run on Swift's small, fixed-size cooperative thread pool,
+// and a synchronous wait (DispatchGroup.wait(), Process.waitUntilExit())
+// there can starve that whole pool once enough concurrent tests do it at
+// once — every other async task in the process appears to silently stall.
+private func gitOutput(_ arguments: [String], in directory: URL) async throws -> String {
     let process = Process()
     let output = Pipe()
     let error = Pipe()
@@ -10834,23 +10961,35 @@ private func gitOutput(_ arguments: [String], in directory: URL) throws -> Strin
     process.currentDirectoryURL = directory
     process.standardOutput = output
     process.standardError = error
-    try process.run()
-    process.waitUntilExit()
 
-    let standardOutput = String(
-        data: output.fileHandleForReading.readDataToEndOfFile(),
-        encoding: .utf8
-    ) ?? ""
-    let standardError = String(
-        data: error.fileHandleForReading.readDataToEndOfFile(),
-        encoding: .utf8
-    ) ?? ""
-    guard process.terminationStatus == 0 else {
-        throw GitWorktreeError.commandFailed(
-            standardError.trimmingCharacters(in: .whitespacesAndNewlines)
-        )
+    let invocation = GitOutputInvocation()
+    let outputHandle = output.fileHandleForReading
+    let errorHandle = error.fileHandleForReading
+    outputHandle.readabilityHandler = { handle in
+        let data = handle.availableData
+        if data.isEmpty { handle.readabilityHandler = nil }
+        invocation.appendOutput(data)
     }
-    return standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+    errorHandle.readabilityHandler = { handle in
+        let data = handle.availableData
+        if data.isEmpty { handle.readabilityHandler = nil }
+        invocation.appendError(data)
+    }
+    process.terminationHandler = { process in
+        invocation.markExited(process.terminationStatus)
+    }
+
+    do {
+        try process.run()
+    } catch {
+        outputHandle.readabilityHandler = nil
+        errorHandle.readabilityHandler = nil
+        throw error
+    }
+
+    return try await withCheckedThrowingContinuation { continuation in
+        invocation.resume(with: continuation)
+    }
 }
 
 private actor StubWorktreeManager: GitWorktreeManaging {
