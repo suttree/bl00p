@@ -136,6 +136,7 @@ jobs:
   release:
     needs: prepare-release
     runs-on: macos-15
+    timeout-minutes: 30
     environment:
       name: release
     permissions:
@@ -153,6 +154,25 @@ jobs:
           ref: ${{ env.RELEASE_SHA }}
           fetch-depth: 0
 
+      # This workflow otherwise starts every run from a completely cold
+      # `.build`, so a stalled fetch of a package dependency (e.g. the
+      # Sparkle binary artifact) looks identical to a hung compile: no
+      # output, no CPU, no timeout. Restoring SwiftPM's caches removes
+      # the network fetch on a cache hit and speeds up every run either
+      # way; the per-step timeouts below are the actual backstop against
+      # a genuine stall.
+      - name: Cache Swift package dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build/checkouts
+            .build/repositories
+            .build/artifacts
+            ~/Library/Caches/org.swift.swiftpm
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
       - name: Install OpenSSL 3
         run: |
           brew install openssl@3
@@ -166,9 +186,11 @@ jobs:
         run: sh scripts/check-release-config.sh
 
       - name: Run tests
+        timeout-minutes: 12
         run: swift test --disable-sandbox
 
       - name: Build ad-hoc-signed app
+        timeout-minutes: 12
         env:
           CODE_SIGN_IDENTITY: "-"
         run: sh scripts/build-installable-app.sh
