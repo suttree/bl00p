@@ -941,8 +941,10 @@ private struct TranscriptView: View {
 
     @ViewBuilder
     private var transcriptContent: some View {
-        let rows = Self.groupedRows(entries)
-        let isWorking = status == .launching || status == .working
+        let rows = Self.groupedRows(
+            entries,
+            isWorking: status == .launching || status == .working
+        )
 
         ForEach(rows) { row in
             switch row {
@@ -957,25 +959,26 @@ private struct TranscriptView: View {
                 )
                 .id(entry.id)
 
-            case .actionRun(let run):
-                // While the agent is still working, an in-flight run of
-                // actions is a live status line: each new action replaces
-                // the last rather than stacking up. Once the run is no
-                // longer the active tail (the turn moved on or finished),
-                // collapse it into one summary card instead of leaving
+            case .liveAction(let entry):
+                // The agent's commentary stays visible, but its tool calls
+                // are buffered rather than shown inline: only the most
+                // recent action is on screen at a time, replacing the last
+                // instead of stacking up.
+                ToolCallCard(
+                    entry: entry,
+                    icon: entry.kind == .diff
+                        ? "doc.text.magnifyingglass" : "terminal",
+                    tint: entry.kind == .diff ? .orange : .bl00pInk
+                )
+                .id(entry.id)
+
+            case .actionSummary(let run):
+                // Once a turn's actions are no longer live (a new turn
+                // started, or this one finished), collapse the whole
+                // buffered run into one summary card instead of leaving
                 // every individual action card in the transcript.
-                if isWorking, run.id == rows.last?.id, let latest = run.entries.last {
-                    ToolCallCard(
-                        entry: latest,
-                        icon: latest.kind == .diff
-                            ? "doc.text.magnifyingglass" : "terminal",
-                        tint: latest.kind == .diff ? .orange : .bl00pInk
-                    )
-                    .id(latest.id)
-                } else {
-                    ActionRunSummaryCard(entries: run.entries)
-                        .id(run.id)
-                }
+                ActionRunSummaryCard(entries: run.entries)
+                    .id(run.id)
             }
         }
 
@@ -989,45 +992,56 @@ private struct TranscriptView: View {
 
     private enum TranscriptRow: Identifiable {
         case entry(TimelineEntry)
-        case actionRun(ActionRunGroup)
+        case liveAction(TimelineEntry)
+        case actionSummary(ActionRunGroup)
 
         var id: UUID {
             switch self {
             case .entry(let entry): entry.id
-            case .actionRun(let run): run.id
+            case .liveAction(let entry): entry.id
+            case .actionSummary(let run): run.id
             }
         }
     }
 
-    /// Groups consecutive command/diff entries (a single turn's tool calls)
-    /// so the transcript can render them as one collapsible run instead of
-    /// one card per action. Runs of a single action pass through unchanged,
-    /// since there is nothing to collapse.
-    private static func groupedRows(_ entries: [TimelineEntry]) -> [TranscriptRow] {
+    /// Buffers each turn's command/diff entries instead of interleaving them
+    /// with the agent's commentary. While the buffered turn is still live
+    /// (the tail of the transcript, session still working), only the latest
+    /// buffered action renders, replacing the previous one. Once a turn
+    /// ends — a new user message starts, or the run finishes — its buffered
+    /// actions collapse into one expandable summary card.
+    private static func groupedRows(
+        _ entries: [TimelineEntry],
+        isWorking: Bool
+    ) -> [TranscriptRow] {
         var rows: [TranscriptRow] = []
-        var currentRun: [TimelineEntry] = []
+        var pendingActions: [TimelineEntry] = []
 
-        func flushRun() {
-            guard !currentRun.isEmpty else { return }
-            if currentRun.count == 1 {
-                rows.append(.entry(currentRun[0]))
+        func flushPendingActions(live: Bool) {
+            guard !pendingActions.isEmpty else { return }
+            if live, let latest = pendingActions.last {
+                rows.append(.liveAction(latest))
             } else {
                 rows.append(
-                    .actionRun(ActionRunGroup(id: currentRun[0].id, entries: currentRun))
+                    .actionSummary(
+                        ActionRunGroup(id: pendingActions[0].id, entries: pendingActions)
+                    )
                 )
             }
-            currentRun.removeAll()
+            pendingActions.removeAll()
         }
 
         for entry in entries {
             if entry.kind == .command || entry.kind == .diff {
-                currentRun.append(entry)
-            } else {
-                flushRun()
-                rows.append(.entry(entry))
+                pendingActions.append(entry)
+                continue
             }
+            if entry.kind == .user {
+                flushPendingActions(live: false)
+            }
+            rows.append(.entry(entry))
         }
-        flushRun()
+        flushPendingActions(live: isWorking)
         return rows
     }
 }

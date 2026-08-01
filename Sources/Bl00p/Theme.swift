@@ -277,7 +277,7 @@ struct StatusPill: View {
                 .font(.bl00p(.caption1, weight: .semibold))
         }
         .foregroundStyle(Color.bl00pMuted)
-        .padding(.horizontal, 9)
+        .padding(.horizontal, 12)
         .padding(.vertical, 5)
         #if os(macOS)
         .background(.quaternary.opacity(0.45), in: Capsule())
