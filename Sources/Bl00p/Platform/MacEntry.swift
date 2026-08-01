@@ -31,6 +31,19 @@ struct Bl00pApp: App {
                 CheckForUpdatesView(updater: updateController.updater)
             }
 
+            CommandGroup(after: .pasteboard) {
+                Divider()
+
+                Button("Edit Master Prompt…") {
+                    guard let profileID = model.selectedProfile?.id else {
+                        return
+                    }
+                    model.showSettings(for: profileID)
+                }
+                .keyboardShortcut("e", modifiers: [.command, .option])
+                .disabled(model.selectedProfile == nil)
+            }
+
             CommandGroup(after: .sidebar) {
                 ForEach(1...9, id: \.self) { position in
                     Button("Select Chat \(position)") {
