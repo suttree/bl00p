@@ -9319,6 +9319,70 @@ func claudeAutoApprovalRejectsExpandedOrFlagEmbeddedPaths() throws {
 }
 
 @Test
+func claudeBuilderCanAutoApproveStagingAndCommittingButNotAmend() throws {
+    let workingDirectory = URL(
+        fileURLWithPath: "/tmp/bl00p-workspace",
+        isDirectory: true
+    )
+    for command in ["git add -A", "git add .", "git commit -am done"] {
+        let request = try #require(
+            ClaudeToolApprovalRequest(request: .object([
+                "subtype": .string("can_use_tool"),
+                "tool_name": .string("Bash"),
+                "input": .object(["command": .string(command)])
+            ]))
+        )
+        #expect(
+            ClaudeToolApprovalPolicy.decision(
+                for: request,
+                mode: .auto,
+                role: .builder,
+                workingDirectory: workingDirectory,
+                stagedAttachmentDirectory: nil
+            ) == .allow,
+            "\(command) should be auto-approved for the Builder"
+        )
+        // Ask mode still surfaces every Bash command as an approval card;
+        // only Auto mode consults the safe command set above.
+        #expect(
+            ClaudeToolApprovalPolicy.decision(
+                for: request,
+                mode: .ask,
+                role: .builder,
+                workingDirectory: workingDirectory,
+                stagedAttachmentDirectory: nil
+            ) == .ask
+        )
+    }
+
+    for command in [
+        "git commit --amend -m rewritten",
+        "git add -p",
+        "git commit -i"
+    ] {
+        let request = try #require(
+            ClaudeToolApprovalRequest(request: .object([
+                "subtype": .string("can_use_tool"),
+                "tool_name": .string("Bash"),
+                "input": .object(["command": .string(command)])
+            ]))
+        )
+        if case .deny = ClaudeToolApprovalPolicy.decision(
+            for: request,
+            mode: .auto,
+            role: .builder,
+            workingDirectory: workingDirectory,
+            stagedAttachmentDirectory: nil
+        ) {
+            // Expected: history-rewriting and interactive git flags still
+            // require explicit approval even for the Builder.
+        } else {
+            Issue.record("\(command) was auto-approved for the Builder")
+        }
+    }
+}
+
+@Test
 func claudeAutoApprovalAsksForUnclassifiedActionsAndMatchesXcodebuildSubcommands() throws {
     let workingDirectory = URL(
         fileURLWithPath: "/tmp/bl00p-workspace",

@@ -1940,7 +1940,7 @@ enum ClaudeToolApprovalPolicy {
             })
 
         case "git":
-            supported = !arguments.contains("--ext-diff")
+            let baseSupported = !arguments.contains("--ext-diff")
                 && !arguments.contains("--textconv")
                 && !arguments.contains("--output")
                 && !arguments.contains("-O")
@@ -1950,12 +1950,26 @@ enum ClaudeToolApprovalPolicy {
                         || $0.hasPrefix("-O")
                         || $0.hasPrefix("--open-files-in-pager=")
                 })
-                && (arguments.first.map {
+            let subcommand = arguments.first
+            let isInspectionSubcommand = subcommand.map {
                 [
                     "status", "diff", "log", "show", "rev-parse",
                     "merge-base", "ls-files", "grep"
                 ].contains($0)
-            } ?? false)
+            } ?? false
+            // The Builder's own instructions require a local commit before
+            // finishing (see initialBuilderInstruction), so staging and
+            // committing must be auto-approvable for that role. Reviewers
+            // and Managers stay read-only via the role gates above/below.
+            let isWriteSubcommand = (role == .builder || role == .publisher)
+                && (subcommand == "add" || subcommand == "commit")
+                && !arguments.contains("--amend")
+                && !arguments.contains(where: {
+                    ["-p", "--patch", "-i", "--interactive", "-e", "--edit"]
+                        .contains($0)
+                })
+            supported = baseSupported
+                && (isInspectionSubcommand || isWriteSubcommand)
 
         case "swift":
             supported = ["test", "build", "--version"].contains(
