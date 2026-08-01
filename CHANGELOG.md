@@ -6,6 +6,9 @@ All notable changes to bl00p are documented in this file.
 
 ### Changed
 
+- Use the native macOS sidebar selection highlight as the only selected-row
+  indicator while preserving the softer linked-agent background cue and the
+  existing Linux selected-row treatment.
 - Align macOS conversation-header identity content to the leading toolbar edge,
   placing status before the inline repository/worktree label while keeping
   repository, terminal, conditional Stop, and settings controls together at
