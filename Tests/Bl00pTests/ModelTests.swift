@@ -9367,18 +9367,16 @@ func claudeBuilderCanAutoApproveStagingAndCommittingButNotAmend() throws {
                 "input": .object(["command": .string(command)])
             ]))
         )
-        if case .deny = ClaudeToolApprovalPolicy.decision(
-            for: request,
-            mode: .auto,
-            role: .builder,
-            workingDirectory: workingDirectory,
-            stagedAttachmentDirectory: nil
-        ) {
-            // Expected: history-rewriting and interactive git flags still
-            // require explicit approval even for the Builder.
-        } else {
-            Issue.record("\(command) was auto-approved for the Builder")
-        }
+        #expect(
+            ClaudeToolApprovalPolicy.decision(
+                for: request,
+                mode: .auto,
+                role: .builder,
+                workingDirectory: workingDirectory,
+                stagedAttachmentDirectory: nil
+            ) == .ask,
+            "\(command) should require explicit approval, not auto-approve or dead-end"
+        )
     }
 }
 
@@ -9422,17 +9420,18 @@ func claudeAutoApprovalAsksForUnclassifiedActionsAndMatchesXcodebuildSubcommands
             stagedAttachmentDirectory: nil
         ) == .ask
     )
-    if case .deny = ClaudeToolApprovalPolicy.decision(
-        for: archive,
-        mode: .auto,
-        role: .publisher,
-        workingDirectory: workingDirectory,
-        stagedAttachmentDirectory: nil
-    ) {
-        // Expected: only the first xcodebuild subcommand is classified.
-    } else {
-        Issue.record("xcodebuild archive was auto-approved")
-    }
+    // Expected: only the first xcodebuild subcommand is classified as
+    // supported, so `archive` falls through to an approval card rather
+    // than auto-approving or dead-ending the turn.
+    #expect(
+        ClaudeToolApprovalPolicy.decision(
+            for: archive,
+            mode: .auto,
+            role: .publisher,
+            workingDirectory: workingDirectory,
+            stagedAttachmentDirectory: nil
+        ) == .ask
+    )
     #expect(
         ClaudeToolApprovalPolicy.decision(
             for: test,

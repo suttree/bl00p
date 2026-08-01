@@ -1897,9 +1897,14 @@ enum ClaudeToolApprovalPolicy {
             return .deny("Auto-approval requires a readable shell command.")
         }
         guard !executableToken.contains("/") else {
-            return .deny(
-                "Commands launched through an explicit executable path require explicit approval."
-            )
+            // Not an evasion vector like the syntax/path checks above, just
+            // an unrecognized shape: let the Builder/Publisher ask a human
+            // instead of dead-ending with no way to proceed.
+            return role == .builder || role == .publisher
+                ? .ask
+                : .deny(
+                    "Commands launched through an explicit executable path require explicit approval."
+                )
         }
         let executable = URL(fileURLWithPath: executableToken).lastPathComponent
         let arguments = Array(tokens.dropFirst())
@@ -2035,9 +2040,9 @@ enum ClaudeToolApprovalPolicy {
                 "\(executable) is outside the Claude Manager's test and inspection command set."
             )
         case .builder, .publisher:
-            return .deny(
-                "\(executable) is outside Claude auto-approval's safe command set. Switch to Ask to review it explicitly."
-            )
+            // Unrecognized rather than unsafe: surface an approval card
+            // instead of dead-ending the turn with no way to proceed.
+            return .ask
         }
     }
 
