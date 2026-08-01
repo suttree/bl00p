@@ -229,8 +229,11 @@ struct SidebarView: View {
     }
 
     private var rows: some View {
+        // SwiftOpenUI's `LazyVStack` only offers the data-driven initializer
+        // used below per section, not a free-form `alignment:spacing:`
+        // ViewBuilder one, so the outer wrapper is a plain `VStack` instead.
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
                 if !managerProfiles.isEmpty {
                     sectionHeader("Managers")
                     LazyVStack(managerProfiles) { profile in botRow(profile) }

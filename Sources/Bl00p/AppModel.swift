@@ -986,10 +986,27 @@ final class AppModel: ObservableObject {
         toOffset destination: Int
     ) {
         var subset = profiles.filter(predicate)
-        subset.move(fromOffsets: source, toOffset: destination)
+        Self.move(&subset, fromOffsets: source, toOffset: destination)
         var reordered = subset.makeIterator()
         profiles = profiles.map { predicate($0) ? reordered.next() ?? $0 : $0 }
         save()
+    }
+
+    /// `RangeReplaceableCollection.move(fromOffsets:toOffset:)` is a SwiftUI
+    /// extension, unavailable on the SwiftOpenUI/Linux build. This is the
+    /// same insertion-index algorithm, implemented on Foundation alone so it
+    /// works identically on both platforms.
+    private static func move<T>(
+        _ elements: inout [T],
+        fromOffsets source: IndexSet,
+        toOffset destination: Int
+    ) {
+        let moving = source.map { elements[$0] }
+        for offset in source.sorted(by: >) {
+            elements.remove(at: offset)
+        }
+        let adjustedDestination = destination - source.filter { $0 < destination }.count
+        elements.insert(contentsOf: moving, at: adjustedDestination)
     }
 
     /// Bot IDs assigned to the selected Manager's team, for highlighting its
