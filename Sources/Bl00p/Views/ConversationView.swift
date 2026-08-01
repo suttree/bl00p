@@ -89,6 +89,7 @@ struct ConversationView: View {
                         sessionID: sessionID,
                         scrollCoordinator: $transcriptScroll,
                         entries: session.entries,
+                        status: session.status,
                         profile: profile,
                         canRetryFailedMessage:
                             session.status.allowsFailedMessageRetry,
@@ -783,6 +784,7 @@ private struct TranscriptView: View {
     let sessionID: UUID
     @Binding var scrollCoordinator: TranscriptScrollCoordinator
     let entries: [TimelineEntry]
+    let status: AgentStatus
     let profile: BotProfile
     let canRetryFailedMessage: Bool
     let retry: (UUID) -> Void
@@ -939,19 +941,94 @@ private struct TranscriptView: View {
 
     @ViewBuilder
     private var transcriptContent: some View {
-        ForEach(entries) { entry in
-            TimelineEntryView(
-                entry: entry,
-                profile: profile,
-                canRetryFailedMessage: canRetryFailedMessage,
-                retry: retry,
-                resolveApproval: resolveApproval,
-                resolveQuestion: resolveQuestion
-            )
-            .id(entry.id)
+        let rows = Self.groupedRows(entries)
+        let isWorking = status == .launching || status == .working
+
+        ForEach(rows) { row in
+            switch row {
+            case .entry(let entry):
+                TimelineEntryView(
+                    entry: entry,
+                    profile: profile,
+                    canRetryFailedMessage: canRetryFailedMessage,
+                    retry: retry,
+                    resolveApproval: resolveApproval,
+                    resolveQuestion: resolveQuestion
+                )
+                .id(entry.id)
+
+            case .actionRun(let run):
+                // While the agent is still working, an in-flight run of
+                // actions is a live status line: each new action replaces
+                // the last rather than stacking up. Once the run is no
+                // longer the active tail (the turn moved on or finished),
+                // collapse it into one summary card instead of leaving
+                // every individual action card in the transcript.
+                if isWorking, run.id == rows.last?.id, let latest = run.entries.last {
+                    ToolCallCard(
+                        entry: latest,
+                        icon: latest.kind == .diff
+                            ? "doc.text.magnifyingglass" : "terminal",
+                        tint: latest.kind == .diff ? .orange : .bl00pInk
+                    )
+                    .id(latest.id)
+                } else {
+                    ActionRunSummaryCard(entries: run.entries)
+                        .id(run.id)
+                }
+            }
         }
 
         bottomSentinel
+    }
+
+    private struct ActionRunGroup: Identifiable {
+        let id: UUID
+        let entries: [TimelineEntry]
+    }
+
+    private enum TranscriptRow: Identifiable {
+        case entry(TimelineEntry)
+        case actionRun(ActionRunGroup)
+
+        var id: UUID {
+            switch self {
+            case .entry(let entry): entry.id
+            case .actionRun(let run): run.id
+            }
+        }
+    }
+
+    /// Groups consecutive command/diff entries (a single turn's tool calls)
+    /// so the transcript can render them as one collapsible run instead of
+    /// one card per action. Runs of a single action pass through unchanged,
+    /// since there is nothing to collapse.
+    private static func groupedRows(_ entries: [TimelineEntry]) -> [TranscriptRow] {
+        var rows: [TranscriptRow] = []
+        var currentRun: [TimelineEntry] = []
+
+        func flushRun() {
+            guard !currentRun.isEmpty else { return }
+            if currentRun.count == 1 {
+                rows.append(.entry(currentRun[0]))
+            } else {
+                rows.append(
+                    .actionRun(ActionRunGroup(id: currentRun[0].id, entries: currentRun))
+                )
+            }
+            currentRun.removeAll()
+        }
+
+        for entry in entries {
+            if entry.kind == .command || entry.kind == .diff {
+                currentRun.append(entry)
+            } else {
+                flushRun()
+                rows.append(.entry(entry))
+            }
+        }
+        flushRun()
+        return rows
     }
 }
 
@@ -1671,6 +1748,123 @@ private struct ToolCallCard: View {
                             .font(.bl00p(.caption1, design: .monospaced))
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(
+            Color.bl00pControlBackground,
+            in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(.quaternary, lineWidth: 1)
+        }
+    }
+}
+
+/// A finished run of consecutive tool-call actions, collapsed into one
+/// summary card so the transcript shows what the agent accomplished rather
+/// than every individual command/edit. Expands to the full run on tap.
+private struct ActionRunSummaryCard: View {
+    let entries: [TimelineEntry]
+    @State private var isExpanded = false
+
+    private var commandCount: Int {
+        entries.filter { $0.kind == .command }.count
+    }
+
+    private var diffCount: Int {
+        entries.filter { $0.kind == .diff }.count
+    }
+
+    private var failureCount: Int {
+        entries.filter {
+            $0.commandOutcome == .failed
+                || $0.title?.localizedCaseInsensitiveContains("failed") == true
+        }.count
+    }
+
+    private var headline: String {
+        var parts: [String] = []
+        if commandCount > 0 {
+            parts.append("\(commandCount) command\(commandCount == 1 ? "" : "s")")
+        }
+        if diffCount > 0 {
+            parts.append("\(diffCount) file change\(diffCount == 1 ? "" : "s")")
+        }
+        let summary = parts.isEmpty
+            ? "\(entries.count) action\(entries.count == 1 ? "" : "s")"
+            : parts.joined(separator: ", ")
+        return failureCount > 0
+            ? "\(summary) · \(failureCount) failed"
+            : summary
+    }
+
+    private var fileList: String {
+        entries.map(\.text).joined(separator: " · ")
+    }
+
+    private var icon: String {
+        failureCount > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
+    }
+
+    private var tint: Color {
+        failureCount > 0 ? .red : .green
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(alignment: .center, spacing: 12) {
+                    Image(systemName: icon)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(tint)
+                        .frame(width: 28, height: 28)
+                        .background(
+                            tint.opacity(0.10),
+                            in: RoundedRectangle(cornerRadius: 8)
+                        )
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(headline)
+                            .font(.bl00p(.callout, weight: .semibold))
+                        Text(fileList)
+                            .font(.bl00p(.caption1))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+
+                    TimelineTimestamp(entries.last?.timestamp ?? .now)
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                Divider()
+                    .padding(.vertical, 12)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(entries) { entry in
+                        ToolCallCard(
+                            entry: entry,
+                            icon: entry.kind == .diff
+                                ? "doc.text.magnifyingglass" : "terminal",
+                            tint: entry.kind == .diff ? .orange : .bl00pInk
+                        )
                     }
                 }
             }

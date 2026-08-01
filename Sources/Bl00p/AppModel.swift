@@ -543,15 +543,38 @@ final class AppModel: ObservableObject {
             return profileID
         }
 
-        return profiles.first(where: { candidate in
+        let candidateManagerIDs = profiles.compactMap { candidate -> UUID? in
             guard candidate.role == .manager,
-                  let team = candidate.managerTeam else {
-                return false
+                  let team = candidate.managerTeam,
+                  team.builderProfileID == profileID
+                      || team.reviewerProfileID == profileID
+                      || team.publisherProfileID == profileID else {
+                return nil
             }
-            return team.builderProfileID == profileID
-                || team.reviewerProfileID == profileID
-                || team.publisherProfileID == profileID
-        })?.id ?? profileID
+            return candidate.id
+        }
+        guard candidateManagerIDs.count > 1 else {
+            return candidateManagerIDs.first ?? profileID
+        }
+
+        // Multiple Managers can share the same Builder/Reviewer/Publisher
+        // profile. Picking the first match arbitrarily could point tab
+        // navigation at a different Manager's participant session than the
+        // one actually running, making an active workflow look idle. Prefer
+        // the most recently updated Manager whose active workflow currently
+        // owns this participant.
+        let activeManagerID = managerWorkflows.values
+            .filter {
+                $0.stage != .completed
+                    && candidateManagerIDs.contains($0.managerProfileID)
+                    && $0.participantSessionIDs.values.contains {
+                        sessions[$0]?.ownerProfileID == profileID
+                    }
+            }
+            .max { $0.updatedAt < $1.updatedAt }?
+            .managerProfileID
+
+        return activeManagerID ?? candidateManagerIDs.first ?? profileID
     }
 
     func tabSessions(for profileID: UUID) -> [AgentSessionState] {
@@ -943,6 +966,59 @@ final class AppModel: ObservableObject {
                 self?.save()
             }
         )
+    }
+
+    func moveManagerProfiles(fromOffsets source: IndexSet, toOffset destination: Int) {
+        reorderProfiles(matching: { $0.role == .manager }, fromOffsets: source, toOffset: destination)
+    }
+
+    func moveWorkerProfiles(fromOffsets source: IndexSet, toOffset destination: Int) {
+        reorderProfiles(matching: { $0.role != .manager }, fromOffsets: source, toOffset: destination)
+    }
+
+    /// Reorders only the profiles matching `predicate`, leaving every other
+    /// profile in its existing slot. The sidebar shows Managers and other
+    /// agents as separate, independently-orderable groups; this lets each
+    /// group's drag reorder the whole list without disturbing the other.
+    private func reorderProfiles(
+        matching predicate: (BotProfile) -> Bool,
+        fromOffsets source: IndexSet,
+        toOffset destination: Int
+    ) {
+        var subset = profiles.filter(predicate)
+        Self.move(&subset, fromOffsets: source, toOffset: destination)
+        var reordered = subset.makeIterator()
+        profiles = profiles.map { predicate($0) ? reordered.next() ?? $0 : $0 }
+        save()
+    }
+
+    /// `RangeReplaceableCollection.move(fromOffsets:toOffset:)` is a SwiftUI
+    /// extension, unavailable on the SwiftOpenUI/Linux build. This is the
+    /// same insertion-index algorithm, implemented on Foundation alone so it
+    /// works identically on both platforms.
+    private static func move<T>(
+        _ elements: inout [T],
+        fromOffsets source: IndexSet,
+        toOffset destination: Int
+    ) {
+        let moving = source.map { elements[$0] }
+        for offset in source.sorted(by: >) {
+            elements.remove(at: offset)
+        }
+        let adjustedDestination = destination - source.filter { $0 < destination }.count
+        elements.insert(contentsOf: moving, at: adjustedDestination)
+    }
+
+    /// Bot IDs assigned to the selected Manager's team, for highlighting its
+    /// associated bots in the sidebar. Empty when the selected bot isn't a
+    /// Manager or has no team assigned yet.
+    func associatedBotIDs(for profileID: UUID) -> Set<UUID> {
+        guard let profile = profiles.first(where: { $0.id == profileID }),
+              profile.role == .manager,
+              let team = profile.managerTeam else {
+            return []
+        }
+        return Set([team.builderProfileID, team.reviewerProfileID, team.publisherProfileID].compactMap { $0 })
     }
 
     func add(_ profile: BotProfile) {
@@ -4144,7 +4220,7 @@ final class AppModel: ObservableObject {
             statusTransition = (previousStatus, status)
             if status == .failed || status == .stopped {
                 connectedProfileIDs.remove(profileID)
-                launchedProfileIDs.remove(profileID)
+                launchedProfileIDs.remove(ownerProfileID)
             }
             if status == .failed,
                let entryID = inFlightUserEntryIDs.removeValue(

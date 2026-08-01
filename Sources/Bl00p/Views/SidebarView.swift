@@ -127,83 +127,173 @@ struct SidebarView: View {
     #endif
 
     #if os(macOS)
+    private var associatedBotIDs: Set<UUID> {
+        guard let selectedBotID = model.selectedBotID else { return [] }
+        return model.associatedBotIDs(for: selectedBotID)
+    }
+
+    private var managerProfiles: [BotProfile] {
+        model.profiles.filter { $0.role == .manager }
+    }
+
+    private var workerProfiles: [BotProfile] {
+        model.profiles.filter { $0.role != .manager }
+    }
+
     private var rows: some View {
         List(selection: $model.selectedBotID) {
-            ForEach(model.profiles) { profile in
-                BotRow(
-                    profile: profile,
-                    indicator: model.sidebarIndicatorState(for: profile.id),
-                    windowColorScheme: windowColorScheme
-                )
-                .tag(Optional(profile.id))
-                .contextMenu {
-                    Button("Rename…") {
-                        renameDraft = profile.name
-                        renameTargetID = profile.id
+            if !managerProfiles.isEmpty {
+                Section("Managers") {
+                    ForEach(managerProfiles) { profile in
+                        botRow(profile)
                     }
-
-                    Button("Edit Prompt") {
-                        model.showSettings(for: profile.id)
+                    .onMove { source, destination in
+                        model.moveManagerProfiles(fromOffsets: source, toOffset: destination)
                     }
+                }
+            }
 
-                    Divider()
-
-                    Button("Duplicate Bot") {
-                        model.duplicate(profile.id)
+            if !workerProfiles.isEmpty {
+                Section("Agents") {
+                    ForEach(workerProfiles) { profile in
+                        botRow(profile)
                     }
-
-                    Button("Delete Bot", role: .destructive) {
-                        model.delete(profile.id)
+                    .onMove { source, destination in
+                        model.moveWorkerProfiles(fromOffsets: source, toOffset: destination)
                     }
-                    .disabled(model.profiles.count == 1)
                 }
             }
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
     }
+
+    @ViewBuilder
+    private func botRow(_ profile: BotProfile) -> some View {
+        BotRow(
+            profile: profile,
+            indicator: model.sidebarIndicatorState(for: profile.id),
+            windowColorScheme: windowColorScheme
+        )
+        .tag(Optional(profile.id))
+        .listRowBackground(
+            rowBackground(
+                isSelected: model.selectedBotID == profile.id,
+                isAssociated: associatedBotIDs.contains(profile.id)
+            )
+        )
+        .contextMenu {
+            Button("Rename…") {
+                renameDraft = profile.name
+                renameTargetID = profile.id
+            }
+
+            Button("Edit Prompt") {
+                model.showSettings(for: profile.id)
+            }
+
+            Divider()
+
+            Button("Duplicate Bot") {
+                model.duplicate(profile.id)
+            }
+
+            Button("Delete Bot", role: .destructive) {
+                model.delete(profile.id)
+            }
+            .disabled(model.profiles.count == 1)
+        }
+    }
+
+    @ViewBuilder
+    private func rowBackground(isSelected: Bool, isAssociated: Bool) -> some View {
+        if isSelected {
+            Color.bl00pPink.opacity(0.22)
+        } else if isAssociated {
+            Color.bl00pPink.opacity(0.10)
+        } else {
+            Color.clear
+        }
+    }
     #else
     /// SwiftOpenUI's `List` has no selection binding and its `contextMenu`
     /// takes a declarative `MenuElement` list rather than `Button` views, so
     /// the row list and its menu are rebuilt from `ScrollView` + `LazyVStack`
     /// instead of ported modifier-for-modifier.
+    private var managerProfiles: [BotProfile] {
+        model.profiles.filter { $0.role == .manager }
+    }
+
+    private var workerProfiles: [BotProfile] {
+        model.profiles.filter { $0.role != .manager }
+    }
+
     private var rows: some View {
+        // SwiftOpenUI's `LazyVStack` only offers the data-driven initializer
+        // used below per section, not a free-form `alignment:spacing:`
+        // ViewBuilder one, so the outer wrapper is a plain `VStack` instead.
         ScrollView {
-            LazyVStack(model.profiles) { profile in
-                Button {
-                    model.selectedBotID = profile.id
-                } label: {
-                    BotRow(
-                        profile: profile,
-                        indicator: model.sidebarIndicatorState(for: profile.id),
-                        windowColorScheme: windowColorScheme
-                    )
-                    .padding(.horizontal, 10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        model.selectedBotID == profile.id
-                            ? Color.bl00pPink.opacity(0.14)
-                            : Color.clear
-                    )
+            VStack(alignment: .leading, spacing: 0) {
+                if !managerProfiles.isEmpty {
+                    sectionHeader("Managers")
+                    LazyVStack(managerProfiles) { profile in botRow(profile) }
                 }
-                .buttonStyle(.plain)
-                .contextMenu {
-                    MenuItem("Rename…") {
-                        renameDraft = profile.name
-                        renameTargetID = profile.id
+                if !workerProfiles.isEmpty {
+                    if !managerProfiles.isEmpty {
+                        Divider().padding(.vertical, 6)
                     }
-                    MenuItem("Edit Prompt") {
-                        model.showSettings(for: profile.id)
-                    }
-                    MenuDivider()
-                    MenuItem("Duplicate Bot") {
-                        model.duplicate(profile.id)
-                    }
-                    if model.profiles.count > 1 {
-                        MenuItem("Delete Bot") {
-                            model.delete(profile.id)
-                        }
-                    }
+                    sectionHeader("Agents")
+                    LazyVStack(workerProfiles) { profile in botRow(profile) }
+                }
+            }
+        }
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.bl00p(.caption2, weight: .bold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
+            .padding(.bottom, 2)
+    }
+
+    @ViewBuilder
+    private func botRow(_ profile: BotProfile) -> some View {
+        Button {
+            model.selectedBotID = profile.id
+        } label: {
+            BotRow(
+                profile: profile,
+                indicator: model.sidebarIndicatorState(for: profile.id),
+                windowColorScheme: windowColorScheme
+            )
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                model.selectedBotID == profile.id
+                    ? Color.bl00pPink.opacity(0.22)
+                    : model.selectedBotID.map { model.associatedBotIDs(for: $0).contains(profile.id) } == true
+                        ? Color.bl00pPink.opacity(0.10)
+                        : Color.clear
+            )
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            MenuItem("Rename…") {
+                renameDraft = profile.name
+                renameTargetID = profile.id
+            }
+            MenuItem("Edit Prompt") {
+                model.showSettings(for: profile.id)
+            }
+            MenuDivider()
+            MenuItem("Duplicate Bot") {
+                model.duplicate(profile.id)
+            }
+            if model.profiles.count > 1 {
+                MenuItem("Delete Bot") {
+                    model.delete(profile.id)
                 }
             }
         }
