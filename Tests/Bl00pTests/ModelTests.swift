@@ -4799,6 +4799,10 @@ func stalledBuilderResolvesViaBypassWhenBoundedRecoveryIsExhausted() async throw
     }
     // Trigger the watchdog's expiry deterministically instead of waiting
     // out a real deadline racing the Builder's genuinely-hung turn.
+    // Synchronize to the arm actually reaching `sleeper(_:)` first —
+    // observing `.working` alone races the freshly spawned watchdog Task,
+    // which may not have registered with the gate yet.
+    await gate.waitForArm(atLeast: 1)
     await gate.expireCurrentArm()
 
     for _ in 0..<500 where model.workflow(for: managerID)?.pauseReason?.contains("stalled") != true {
@@ -4957,6 +4961,10 @@ func manualRetryRedispatchesAParticipantStillStuckAtWorking() async throws {
     }
     // Trigger the watchdog's expiry deterministically instead of waiting
     // out a real deadline racing the Builder's genuinely-hung first turn.
+    // Synchronize to the arm actually reaching `sleeper(_:)` first —
+    // observing `.working` alone races the freshly spawned watchdog Task,
+    // which may not have registered with the gate yet.
+    await gate.waitForArm(atLeast: 1)
     await gate.expireCurrentArm()
 
     for _ in 0..<500 where model.workflow(for: managerID)?.pauseReason?.contains("stalled") != true {
@@ -5245,6 +5253,11 @@ func stalledReviewerBoundsAutomaticRecoveryAndPausesWithStallReason() async thro
     // launch+respond turn, so wait for both the new `respond()` call and
     // the session settling back at `.working` before expiring the next one.
     for expectedReviewerCalls in 1...3 {
+        // Snapshot the arm count before waiting on this iteration's turn so
+        // `waitForArm` below is guaranteed to wait for a *new* arm rather
+        // than a threshold already satisfied by an earlier, possibly-stale
+        // one (a prior arm can be armed/reset more than once per turn).
+        let priorArmCount = await gate.armCount
         for _ in 0..<500
         where await runtime.calls.filter({ $0 == .reviewer }).count < expectedReviewerCalls {
             try await Task.sleep(for: .milliseconds(10))
@@ -5252,6 +5265,7 @@ func stalledReviewerBoundsAutomaticRecoveryAndPausesWithStallReason() async thro
         for _ in 0..<500 where model.session(for: reviewerID).status != .working {
             try await Task.sleep(for: .milliseconds(10))
         }
+        await gate.waitForArm(atLeast: priorArmCount + 1)
         await gate.expireCurrentArm()
     }
     for _ in 0..<500
@@ -12996,21 +13010,43 @@ private actor HeartbeatingRuntime: AgentRuntime {
 /// A caller observes a session settling at `.working`/`.launching` and
 /// only then calls `expireCurrentArm()` — but that observation races the
 /// freshly-spawned `Task { await sleeper(deadline) }` inside
-/// `armIdleWatchdog`, which may not have reached `sleeper(_:)` yet. If
-/// `expireCurrentArm()` ran while `current` was still nil, it used to be
-/// a silent no-op and the arm would suspend forever. `pendingExpiry`
-/// makes expiry order-independent: when no arm is outstanding yet, it
-/// records the expiry so the very next `sleeper(_:)` call consumes it
-/// immediately instead of suspending.
+/// `armIdleWatchdog`, which may not have reached `sleeper(_:)` yet. Two
+/// distinct interleavings can strand an arm:
+///
+/// - No arm has ever called `sleeper(_:)`, so `current` is nil.
+///   `pendingExpiry` covers this: the very next `sleeper(_:)` call
+///   consumes it immediately instead of suspending.
+/// - A newer arm has been spawned (superseding an older one that
+///   `armIdleWatchdog` already cancelled), but that newer arm hasn't
+///   reached `sleeper(_:)` yet, so `current` still dangles on the old,
+///   already-cancelled arm's continuation. Resuming it is a harmless
+///   no-op (that arm's `Task` falls through its own `!Task.isCancelled`
+///   guard), but it does NOT mean the *live* arm has been expired — the
+///   gate cannot tell a stale `current` from a live one just by looking
+///   at it, since cancellation happens on `AppModel`'s side and is never
+///   reported here.
+///
+/// `waitForArm(atLeast:)` closes the second case by letting a caller
+/// synchronize to a specific arm generation *before* expiring: because
+/// `armCount` is incremented and `current` assigned within the same
+/// synchronous prefix of `sleeper(_:)` (no suspension in between), once
+/// `armCount >= count` is observable, `current` is guaranteed to hold
+/// that arm's continuation (or a later one, which only happens if this
+/// one already resolved). Callers snapshot `armCount` before waiting on
+/// whatever external condition precedes expiry, then wait for
+/// `priorArmCount + 1` — guaranteeing they synchronize to a genuinely
+/// new arm rather than a threshold already satisfied by stale history.
 private actor ManualIdleWatchdogGate {
     private(set) var armCount = 0
     private var current: CheckedContinuation<Void, Never>?
     private var pendingExpiry = false
+    private var armWaiters: [(threshold: Int, continuation: CheckedContinuation<Void, Never>)] = []
 
     func sleeper(_ duration: Duration) async {
         armCount += 1
         current?.resume()
         current = nil
+        resumeSatisfiedArmWaiters()
         if pendingExpiry {
             pendingExpiry = false
             return
@@ -13020,9 +13056,33 @@ private actor ManualIdleWatchdogGate {
         }
     }
 
+    /// Suspends until at least `count` arms have called `sleeper(_:)`.
+    func waitForArm(atLeast count: Int) async {
+        if armCount >= count { return }
+        await withCheckedContinuation { continuation in
+            armWaiters.append((threshold: count, continuation: continuation))
+        }
+    }
+
+    private func resumeSatisfiedArmWaiters() {
+        guard !armWaiters.isEmpty else { return }
+        var stillWaiting: [(threshold: Int, continuation: CheckedContinuation<Void, Never>)] = []
+        for waiter in armWaiters {
+            if armCount >= waiter.threshold {
+                waiter.continuation.resume()
+            } else {
+                stillWaiting.append(waiter)
+            }
+        }
+        armWaiters = stillWaiting
+    }
+
     /// Resolves whichever arm is currently outstanding, simulating its
     /// idle deadline elapsing right now. If no arm has reached `sleeper(_:)`
     /// yet, records the expiry so that arm resolves the instant it arrives.
+    /// Callers should synchronize via `waitForArm(atLeast:)` first so
+    /// `current` is guaranteed to hold the intended arm rather than a
+    /// stale, already-superseded one.
     func expireCurrentArm() {
         if let current {
             current.resume()
