@@ -4799,11 +4799,9 @@ func stalledBuilderResolvesViaBypassWhenBoundedRecoveryIsExhausted() async throw
     }
     // Trigger the watchdog's expiry deterministically instead of waiting
     // out a real deadline racing the Builder's genuinely-hung turn.
-    // Wait for the settled, final arm first — observing `.working` alone
-    // races both the freshly spawned watchdog Task and any earlier
-    // throwaway arms from the launch phase.
-    await gate.waitForSettledArm()
-    await gate.expireCurrentArm()
+    // Order-independent by construction (see `ManualIdleWatchdogGate`'s
+    // doc comment) — no extra synchronization needed before expiring.
+    gate.expireCurrentArm()
 
     for _ in 0..<500 where model.workflow(for: managerID)?.pauseReason?.contains("stalled") != true {
         try await Task.sleep(for: .milliseconds(10))
@@ -4961,11 +4959,9 @@ func manualRetryRedispatchesAParticipantStillStuckAtWorking() async throws {
     }
     // Trigger the watchdog's expiry deterministically instead of waiting
     // out a real deadline racing the Builder's genuinely-hung first turn.
-    // Wait for the settled, final arm first — observing `.working` alone
-    // races both the freshly spawned watchdog Task and any earlier
-    // throwaway arms from the launch phase.
-    await gate.waitForSettledArm()
-    await gate.expireCurrentArm()
+    // Order-independent by construction (see `ManualIdleWatchdogGate`'s
+    // doc comment) — no extra synchronization needed before expiring.
+    gate.expireCurrentArm()
 
     for _ in 0..<500 where model.workflow(for: managerID)?.pauseReason?.contains("stalled") != true {
         try await Task.sleep(for: .milliseconds(10))
@@ -5125,10 +5121,10 @@ func toolOutputEventsResetTheIdleWatchdog() async throws {
     // processed (each heartbeat plus the final completion) — proof it
     // resets logically on each event, verified directly via the seam
     // instead of by racing a real turn against a real deadline.
-    #expect(await gate.armCount >= 6)
+    #expect(gate.armCount >= 6)
     // The final arm is left outstanding since this test never expires it;
     // resolve it so its continuation isn't leaked at process exit.
-    await gate.finish()
+    gate.finish()
 }
 
 /// A Reviewer that never reaches a terminal status — the same shape
@@ -5260,10 +5256,9 @@ func stalledReviewerBoundsAutomaticRecoveryAndPausesWithStallReason() async thro
         for _ in 0..<500 where model.session(for: reviewerID).status != .working {
             try await Task.sleep(for: .milliseconds(10))
         }
-        // Wait for the settled, final arm before expiring — a redispatch
-        // can re-arm the watchdog more than once per turn before hanging.
-        await gate.waitForSettledArm()
-        await gate.expireCurrentArm()
+        // Order-independent by construction (see `ManualIdleWatchdogGate`'s
+        // doc comment) — no extra synchronization needed before expiring.
+        gate.expireCurrentArm()
     }
     for _ in 0..<500
     where model.workflow(for: managerID)?.pauseReason?.contains("appears stalled") != true {
@@ -13009,82 +13004,131 @@ private actor HeartbeatingRuntime: AgentRuntime {
 /// watchdog on *every* qualifying event, not just once: a single launch
 /// can cancel-and-recreate the arm several times in a row (once per
 /// launch-stream event, then again for the first response event) before
-/// settling on the one that will genuinely hang. So `current` reaching a
-/// non-nil state proves nothing about which arm it is, and there is no
-/// fixed arm count a caller can name in advance to distinguish "some
-/// throwaway arm registered" from "the final, durable arm registered" —
-/// counting either the first arm or the Nth arm relative to some earlier
-/// snapshot can both land on a stale, already-cancelled arm while the
-/// true final one hasn't reached `sleeper(_:)` yet. Resuming a stale
-/// continuation is a harmless no-op (that arm's `Task` falls through its
-/// own `!Task.isCancelled` guard), but it does NOT expire the live arm —
-/// the gate cannot tell a stale `current` from a live one just by
-/// looking at it, since cancellation happens on `AppModel`'s side and is
-/// never reported here.
+/// settling on the one that will genuinely hang. Polling for the arm
+/// count to "settle" is still a wall-clock guess about when the dust has
+/// stopped — it narrows the window but doesn't close it. What actually
+/// closes it is `withTaskCancellationHandler`: Swift guarantees its
+/// `onCancel` handler runs the instant `Task.cancel()` is called — on
+/// the cancelling thread, synchronously with that call, not on some
+/// later scheduling pass — so an arm's own cancellation can clear this
+/// gate's state in lockstep with `armIdleWatchdog` cancelling its `Task`,
+/// with no timing gap for a test to race.
 ///
-/// `waitForSettledArm()` sidesteps counting entirely: it polls `armCount`
-/// itself — the one thing that actually reflects watchdog activity —
-/// until it stops changing across several consecutive checks. Every
-/// runtime double in this file that a test expires deliberately stops
-/// yielding events at the point under test, so once no new arm has
-/// registered for a stretch, none ever will until the caller acts, and
-/// `current` is guaranteed to hold that settled, final arm.
-private actor ManualIdleWatchdogGate {
-    private(set) var armCount = 0
-    private var current: CheckedContinuation<Void, Never>?
+/// All state is protected by a plain lock rather than actor isolation
+/// specifically because `onCancel` must be synchronous and non-isolated
+/// — an actor hop here would reintroduce exactly the scheduling gap this
+/// is meant to close. Each arm gets a unique id; `currentArmID` and
+/// `currentContinuation` are always mutated together, atomically, so
+/// `expireCurrentArm()` never has to guess whether what it sees is live:
+///
+/// - If an arm has registered, `currentContinuation` is resumed directly.
+/// - If no arm has registered yet (nil), `pendingExpiry` is set and
+///   consumed by whichever arm's `sleeper(_:)` call registers next —
+///   there is always exactly one "next" registration for the turn under
+///   test, since the runtime doubles in this file deliberately stop
+///   producing events at the point being tested.
+/// - An arm that is already cancelled by the time it would register
+///   (checked via `Task.isCancelled` inside the same locked step)
+///   resolves itself immediately instead of becoming a stale `current`.
+/// - An arm that gets cancelled *after* registering is cleaned up by
+///   `onCancel`, synchronously, before `armIdleWatchdog`'s cancelling
+///   call even returns — so a subsequent `expireCurrentArm()` can never
+///   observe a dangling registration from an arm that's already dead.
+private final class ManualIdleWatchdogGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var nextArmID = 0
+    private var armCountStorage = 0
+    private var currentArmID: Int?
+    private var currentContinuation: CheckedContinuation<Void, Never>?
     private var pendingExpiry = false
 
-    func sleeper(_ duration: Duration) async {
-        armCount += 1
-        current?.resume()
-        current = nil
+    // `lock.lock()`/`unlock()` are only usable from synchronous, non-async
+    // scopes (the compiler flags them directly inside `async` functions —
+    // deliberately, since a suspension while holding a raw lock is a real
+    // hazard in general). None of these helpers ever suspend internally, so
+    // each is a plain sync method; `sleeper(_:)` below is the only place
+    // that's actually `async`, and it never calls the lock directly itself.
+
+    var armCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return armCountStorage
+    }
+
+    private func beginArm() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        armCountStorage += 1
+        nextArmID += 1
+        return nextArmID
+    }
+
+    private func registerOrResolveImmediately(
+        armID: Int,
+        continuation: CheckedContinuation<Void, Never>
+    ) {
+        lock.lock()
         if pendingExpiry {
             pendingExpiry = false
+            lock.unlock()
+            continuation.resume()
             return
         }
-        await withCheckedContinuation { continuation in
-            current = continuation
+        if Task.isCancelled {
+            lock.unlock()
+            continuation.resume()
+            return
+        }
+        currentArmID = armID
+        currentContinuation = continuation
+        lock.unlock()
+    }
+
+    private func resolveIfStillCurrent(armID: Int) {
+        lock.lock()
+        if currentArmID == armID, let stale = currentContinuation {
+            currentContinuation = nil
+            currentArmID = nil
+            lock.unlock()
+            stale.resume()
+        } else {
+            lock.unlock()
         }
     }
 
-    /// Waits until `armCount` has stopped increasing for several
-    /// consecutive checks, i.e. until every arm spawned so far — however
-    /// many throwaway ones preceded it — has reached `sleeper(_:)` and
-    /// registered as `current`.
-    func waitForSettledArm() async {
-        var lastObserved = armCount
-        var stableChecks = 0
-        while stableChecks < 5 {
-            try? await Task.sleep(for: .milliseconds(5))
-            if armCount == lastObserved {
-                stableChecks += 1
-            } else {
-                lastObserved = armCount
-                stableChecks = 0
+    func sleeper(_ duration: Duration) async {
+        let armID = beginArm()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                registerOrResolveImmediately(armID: armID, continuation: continuation)
             }
+        } onCancel: {
+            self.resolveIfStillCurrent(armID: armID)
         }
     }
 
     /// Resolves whichever arm is currently outstanding, simulating its
-    /// idle deadline elapsing right now. If no arm has reached `sleeper(_:)`
-    /// yet, records the expiry so that arm resolves the instant it arrives.
-    /// Callers should synchronize via `waitForSettledArm()` first so
-    /// `current` is guaranteed to hold the intended, final arm rather than
-    /// a stale, already-superseded one.
+    /// idle deadline elapsing right now. If no arm has registered yet,
+    /// records the expiry so the next arm to register resolves instantly
+    /// instead of suspending — order-independent by construction, not by
+    /// timing: see the type-level doc comment.
     func expireCurrentArm() {
-        if let current {
-            current.resume()
-            self.current = nil
+        lock.lock()
+        if let live = currentContinuation {
+            currentContinuation = nil
+            currentArmID = nil
+            lock.unlock()
+            live.resume()
         } else {
             pendingExpiry = true
+            lock.unlock()
         }
     }
 
     /// Resolves any still-outstanding continuation so a test that never
     /// calls `expireCurrentArm()` on its final arm doesn't leak it.
     func finish() {
-        current?.resume()
-        current = nil
+        expireCurrentArm()
     }
 }
 
