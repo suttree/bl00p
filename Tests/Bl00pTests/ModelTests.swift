@@ -13068,13 +13068,18 @@ private final class ManualIdleWatchdogGate: @unchecked Sendable {
         continuation: CheckedContinuation<Void, Never>
     ) {
         lock.lock()
-        if pendingExpiry {
-            pendingExpiry = false
+        // Check cancellation first: a cancelled arm must resolve itself
+        // without touching `pendingExpiry`, otherwise it would steal an
+        // expiry intended for its live successor, leaving that successor
+        // to suspend forever once it registers and finds pendingExpiry
+        // already consumed.
+        if Task.isCancelled {
             lock.unlock()
             continuation.resume()
             return
         }
-        if Task.isCancelled {
+        if pendingExpiry {
+            pendingExpiry = false
             lock.unlock()
             continuation.resume()
             return
