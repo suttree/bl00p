@@ -1719,6 +1719,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The manager-visible action on a paused workflow's banner: resumes a
+    /// workflow restored after an app restart (`resumeAvailableAfterRestart`)
+    /// and retries one whose active participant stalled and exhausted
+    /// bounded automatic recovery (`awaitingStallRecovery`). Both cases stop
+    /// whatever the runtime is doing for that participant, reset its session
+    /// out of `working`/`launching`, and redispatch — required for the stall
+    /// case since the session can still be sitting at `.working` (the
+    /// watchdog pauses the *workflow* without changing session status), and
+    /// harmless for the restart case since the runtime has nothing live to
+    /// stop.
     func resumeWorkflow(_ managerProfileOrSessionID: UUID) {
         let managerID =
             managerWorkflows[managerProfileOrSessionID] != nil
@@ -1728,13 +1738,14 @@ final class AppModel: ObservableObject {
         guard var workflow = managerWorkflows[managerID],
               workflow.stage != .completed,
               workflow.planApprovalEntryID == nil,
-              workflow.resumeAvailableAfterRestart == true,
+              workflow.resumeAvailableAfterRestart == true
+                  || workflow.awaitingStallRecovery == true,
               let activeSessionID = expectedProfileID(for: workflow) else {
             return
         }
         let activeProfileID =
             sessions[activeSessionID]?.ownerProfileID ?? activeSessionID
-        guard profiles.contains(where: {
+        guard let profile = profiles.first(where: {
             $0.id == activeProfileID
         }) else {
             return
@@ -1757,9 +1768,14 @@ final class AppModel: ObservableObject {
         workflow.pauseReason = nil
         workflow.resumeAvailableAfterRestart = false
         workflow.awaitingStallRecovery = false
+        // A manual retry is a deliberate, fresh attempt — give it its own
+        // bound instead of counting against whatever automatic recovery
+        // already used for this stage.
+        workflow.stallRecoveryAttempts = 0
+        workflow.stallRecoveryStage = nil
         workflow.updatedAt = .now
         managerWorkflows[managerID] = workflow
-        save()
+        save(immediately: true)
         append(
             .init(
                 kind: .system,
@@ -1768,10 +1784,11 @@ final class AppModel: ObservableObject {
             ),
             to: managerID
         )
-        performSend(
-            redispatchInstruction(for: workflow),
-            to: activeProfileID,
-            sessionID: activeSessionID
+        redispatchStalledParticipant(
+            instruction: redispatchInstruction(for: workflow),
+            activeSessionID: activeSessionID,
+            activeProfileID: activeProfileID,
+            profile: profile
         )
     }
 
@@ -1996,7 +2013,6 @@ final class AppModel: ObservableObject {
         save(immediately: true)
 
         let attempt = workflow.stallRecoveryAttempts
-        let instruction = redispatchInstruction(for: workflow)
         append(
             .init(
                 kind: .system,
@@ -2007,6 +2023,25 @@ final class AppModel: ObservableObject {
             immediately: true
         )
 
+        redispatchStalledParticipant(
+            instruction: redispatchInstruction(for: workflow),
+            activeSessionID: activeSessionID,
+            activeProfileID: activeProfileID,
+            profile: profile
+        )
+    }
+
+    /// Stops the wedged runtime, resets the participant session out of
+    /// `working`/`launching` (bypassing `apply`/`handleWorkflowStatus`, since
+    /// this is an internal recovery step, not a user-visible stop), and
+    /// redispatches the given instruction on a fresh generation. Shared by
+    /// bounded automatic stall recovery and the manual retry action.
+    private func redispatchStalledParticipant(
+        instruction: String,
+        activeSessionID: UUID,
+        activeProfileID: UUID,
+        profile: BotProfile
+    ) {
         runGenerations[activeSessionID] = UUID()
         cancelIdleWatchdog(for: activeSessionID)
         resetStalledSessionForRecovery(activeSessionID)

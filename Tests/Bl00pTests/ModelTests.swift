@@ -4742,6 +4742,158 @@ func stalledBuilderResolvesViaBypassWhenBoundedRecoveryIsExhausted() async throw
     #expect(!advanced.isPaused)
 }
 
+/// The manager-visible "Retry" action (`ManagerWorkflowBanner`, wired to
+/// `resumeWorkflow`) must actually work on a stall pause, not just a
+/// restart pause. The participant session is still sitting at `.working` —
+/// the watchdog pauses the *workflow*, not the session — so `resumeWorkflow`
+/// must stop the wedged runtime and reset that session itself rather than
+/// handing straight to `performSend`, whose `status != .working` guard
+/// would otherwise silently swallow the retry.
+@MainActor
+@Test
+func manualRetryRedispatchesAParticipantStillStuckAtWorking() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-manual-retry-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/manual-retry-feature",
+        baseRevision: "abc123"
+    )
+    let readyPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "def456",
+        taskContext: "Ship the feature",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        testEvidenceAt: .distantFuture,
+        workingTreeSummary: "Clean"
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builderID,
+        reviewerProfileID: reviewerID,
+        publisherProfileID: publisherID
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement.",
+        workingDirectory: ownership.repositoryPath,
+        worktree: ownership
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Publish.",
+        workingDirectory: ownership.repositoryPath
+    )
+    // Recovery is already bounded out for `.building`, so the watchdog
+    // pauses without redispatching — the original hung turn is left
+    // exactly as a real exhausted-recovery pause would leave it.
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        repositoryPath: ownership.repositoryPath,
+        team: team,
+        request: "Ship the feature",
+        implementationPlan: "Implement the feature end to end.",
+        stage: .building,
+        branch: ownership.branch,
+        stallRecoveryAttempts: 2,
+        stallRecoveryStage: .building
+    )
+    let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    store.save(PersistedAppState(
+        profiles: [manager, builder, reviewer, publisher],
+        sessions: [
+            managerID: AgentSessionState(),
+            builderID: AgentSessionState(entries: [
+                .init(kind: .handoff, title: "Implementation brief", text: "Implement the feature end to end.")
+            ]),
+            reviewerID: AgentSessionState(),
+            publisherID: AgentSessionState()
+        ],
+        selectedBotID: builderID,
+        managerWorkflows: [managerID: workflow]
+    ))
+    // Only the first attempt hangs — a manual retry resets the bounded
+    // recovery counter (it's a deliberate, fresh attempt), so if the
+    // redispatched turn hung again too, a second *automatic* watchdog
+    // cycle could legitimately fire and redispatch a third time. Using a
+    // runtime that resolves cleanly on retry isolates this test to the one
+    // question it's asking — does the manual action redispatch at all —
+    // without racing that separate, already-covered bounded-recovery path.
+    let runtime = HangOnceThenSucceedRuntime()
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            package: readyPackage,
+            preparedOwnership: ownership
+        ),
+        store: store,
+        stallIdleDeadline: .milliseconds(30)
+    )
+
+    model.send("Implement the feature", to: builderID)
+    for _ in 0..<500 where model.workflow(for: managerID)?.pauseReason?.contains("stalled") != true {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let stalled = try #require(model.workflow(for: managerID))
+    #expect(stalled.isPaused)
+    #expect(stalled.awaitingStallRecovery)
+    // This is the exact hazard under test: the pause is on the *workflow*,
+    // the participant session itself is still mid-turn.
+    #expect(model.session(for: builderID).status == .working)
+    #expect(await runtime.builderAttempts == 1)
+
+    // The manager-visible retry affordance is now available for this pause.
+    model.resumeWorkflow(managerID)
+
+    for _ in 0..<500 where model.workflow(for: managerID)?.stage != .reviewing {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(await runtime.builderAttempts == 2)
+    let retried = try #require(model.workflow(for: managerID))
+    #expect(retried.stage == .reviewing)
+    #expect(!retried.isPaused)
+    #expect(!retried.awaitingStallRecovery)
+    #expect(retried.stallRecoveryAttempts == 0)
+    #expect(retried.stallRecoveryStage == nil)
+}
+
 /// The idle watchdog resets on every event, including tool output, so a
 /// slow-but-alive turn is never mistaken for a hang.
 @MainActor
@@ -12514,6 +12666,71 @@ private actor ControllableHangRuntime: AgentRuntime {
         continuation?.finish()
         continuation = nil
     }
+}
+
+/// The Builder's first turn hangs on `.working` forever; its second turn
+/// (and any other role's turn) completes immediately. Non-builder roles
+/// complete rather than hang — matching `NonTerminalThenSuccessRuntime` and
+/// `BuilderStatusStubRuntime`'s convention — only because they need not to
+/// cascade the workflow past the state under test; per-role, not global,
+/// attempt tracking is what actually matters here: unlike
+/// `ControllableHangRuntime`, this needs no manual resolution and cannot
+/// itself re-stall, so a test can assert a single redispatch landed without
+/// racing a second bounded recovery cycle if the retried turn also hung.
+private actor HangOnceThenSucceedRuntime: AgentRuntime {
+    private(set) var respondCount = 0
+    private(set) var builderAttempts = 0
+
+    func start(
+        profile: BotProfile,
+        resumeThreadID: String?
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(
+                .sessionID(resumeThreadID ?? "session-\(profile.id.uuidString)")
+            )
+            continuation.yield(.status(.needsAnswer))
+            continuation.finish()
+        }
+    }
+
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        respondCount += 1
+        guard profile.role == .builder else {
+            // Left mid-turn deliberately, like `BuilderStatusStubRuntime`
+            // and `NonTerminalThenSuccessRuntime` — completing the Reviewer
+            // here would cascade the workflow into a revision pass, past
+            // `.reviewing`, the state under test.
+            return AsyncStream { continuation in
+                continuation.yield(.status(.working))
+            }
+        }
+        builderAttempts += 1
+        let isFirstAttempt = builderAttempts == 1
+        return AsyncStream { continuation in
+            continuation.yield(.status(.working))
+            guard !isFirstAttempt else { return }
+            continuation.yield(
+                .entry(.init(kind: .assistant, text: "Implementation committed and tests passed."))
+            )
+            continuation.yield(.status(.completed))
+            continuation.finish()
+        }
+    }
+
+    func resolveApproval(
+        entryID: UUID,
+        approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func stop(profile: BotProfile) async {}
 }
 
 /// Emits a burst of assistant entries spaced well under the watchdog
