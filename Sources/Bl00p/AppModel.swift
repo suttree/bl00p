@@ -99,12 +99,21 @@ final class AppModel: ObservableObject {
     private var workflowStageStartedAt: [UUID: ContinuousClock.Instant] = [:]
     private var idleWatchdogTasks: [UUID: Task<Void, Never>] = [:]
     private let stallIdleDeadline: Duration
+    private let idleWatchdogSleeper: IdleWatchdogSleeper
 
     /// Bounds automatic redispatch attempts for a single stalled stage. Reset
     /// whenever the workflow genuinely moves to a different stage (see
     /// `ManagerWorkflow.stallRecoveryStage`), so this bounds retries per
     /// stall episode rather than across the workflow's whole lifetime.
     private static let maximumStallRecoveryAttempts = 2
+
+    /// The wait `armIdleWatchdog` performs before treating a session as
+    /// stalled. Defaults to a real `Task.sleep`, so production behavior and
+    /// the default 240s deadline are unchanged; tests inject a controllable
+    /// sleeper instead so they can assert on every arm/reset and trigger
+    /// expiry deterministically, rather than racing a real wall-clock
+    /// deadline against real event delivery.
+    typealias IdleWatchdogSleeper = @Sendable (Duration) async -> Void
 
     init(
         runtime: any AgentRuntime = AgentRuntimeRouter(),
@@ -114,7 +123,10 @@ final class AppModel: ObservableObject {
         isAppWindowActive: @escaping () -> Bool = {
             AppWindowActivity.isActive
         },
-        stallIdleDeadline: Duration = .seconds(240)
+        stallIdleDeadline: Duration = .seconds(240),
+        idleWatchdogSleeper: @escaping IdleWatchdogSleeper = { duration in
+            try? await Task.sleep(for: duration)
+        }
     ) {
         self.runtime = runtime
         self.worktrees = worktrees
@@ -122,6 +134,7 @@ final class AppModel: ObservableObject {
         self.notifications = notifications
         self.isAppWindowActive = isAppWindowActive
         self.stallIdleDeadline = stallIdleDeadline
+        self.idleWatchdogSleeper = idleWatchdogSleeper
 
         if let saved = store.load(), !saved.profiles.isEmpty {
             let restoredProfiles = saved.profiles.map(Self.migrateLegacyDefaultName)
@@ -1918,8 +1931,9 @@ final class AppModel: ObservableObject {
         guard containingManagerWorkflowID(for: sessionID) != nil else { return }
         idleWatchdogTasks[sessionID]?.cancel()
         let deadline = stallIdleDeadline
+        let sleeper = idleWatchdogSleeper
         idleWatchdogTasks[sessionID] = Task { [weak self] in
-            try? await Task.sleep(for: deadline)
+            await sleeper(deadline)
             guard !Task.isCancelled else { return }
             self?.handleIdleWatchdogExpiry(sessionID: sessionID, generation: generation)
         }

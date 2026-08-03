@@ -4708,6 +4708,7 @@ func stalledBuilderResolvesViaBypassWhenBoundedRecoveryIsExhausted() async throw
         managerWorkflows: [managerID: workflow]
     ))
     let runtime = ControllableHangRuntime()
+    let gate = ManualIdleWatchdogGate()
     let model = AppModel(
         runtime: runtime,
         worktrees: StubWorktreeManager(
@@ -4715,10 +4716,20 @@ func stalledBuilderResolvesViaBypassWhenBoundedRecoveryIsExhausted() async throw
             preparedOwnership: ownership
         ),
         store: store,
-        stallIdleDeadline: .milliseconds(30)
+        idleWatchdogSleeper: { duration in await gate.sleeper(duration) }
     )
 
     model.send("Implement the feature", to: builderID)
+    for _ in 0..<500 where await runtime.respondCount < 1 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    for _ in 0..<500 where model.session(for: builderID).status != .working {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    // Trigger the watchdog's expiry deterministically instead of waiting
+    // out a real deadline racing the Builder's genuinely-hung turn.
+    await gate.expireCurrentArm()
+
     for _ in 0..<500 where model.workflow(for: managerID)?.pauseReason?.contains("stalled") != true {
         try await Task.sleep(for: .milliseconds(10))
     }
@@ -4855,6 +4866,7 @@ func manualRetryRedispatchesAParticipantStillStuckAtWorking() async throws {
     // question it's asking — does the manual action redispatch at all —
     // without racing that separate, already-covered bounded-recovery path.
     let runtime = HangOnceThenSucceedRuntime()
+    let gate = ManualIdleWatchdogGate()
     let model = AppModel(
         runtime: runtime,
         worktrees: StubWorktreeManager(
@@ -4862,10 +4874,20 @@ func manualRetryRedispatchesAParticipantStillStuckAtWorking() async throws {
             preparedOwnership: ownership
         ),
         store: store,
-        stallIdleDeadline: .milliseconds(30)
+        idleWatchdogSleeper: { duration in await gate.sleeper(duration) }
     )
 
     model.send("Implement the feature", to: builderID)
+    for _ in 0..<500 where await runtime.builderAttempts < 1 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    for _ in 0..<500 where model.session(for: builderID).status != .working {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    // Trigger the watchdog's expiry deterministically instead of waiting
+    // out a real deadline racing the Builder's genuinely-hung first turn.
+    await gate.expireCurrentArm()
+
     for _ in 0..<500 where model.workflow(for: managerID)?.pauseReason?.contains("stalled") != true {
         try await Task.sleep(for: .milliseconds(10))
     }
@@ -4989,12 +5011,15 @@ func toolOutputEventsResetTheIdleWatchdog() async throws {
         selectedBotID: builderID,
         managerWorkflows: [managerID: workflow]
     ))
-    // Each gap between events is well under the deadline, but the whole
-    // turn runs far longer than it — a naive one-shot timer would trip.
     let runtime = HeartbeatingRuntime(
         eventCount: 5,
-        gap: .milliseconds(25)
+        gap: .milliseconds(5)
     )
+    // The gate never resolves an arm unless the test explicitly expires it
+    // (which this test never does), so the watchdog cannot fire no matter
+    // how real event delivery is scheduled — this is what actually removes
+    // the flake, rather than tuning the gap/deadline milliseconds tighter.
+    let gate = ManualIdleWatchdogGate()
     let model = AppModel(
         runtime: runtime,
         worktrees: StubWorktreeManager(
@@ -5002,7 +5027,7 @@ func toolOutputEventsResetTheIdleWatchdog() async throws {
             preparedOwnership: ownership
         ),
         store: store,
-        stallIdleDeadline: .milliseconds(60)
+        idleWatchdogSleeper: { duration in await gate.sleeper(duration) }
     )
 
     model.send("Implement the feature", to: builderID)
@@ -5017,6 +5042,11 @@ func toolOutputEventsResetTheIdleWatchdog() async throws {
     #expect(!model.session(for: builderID).entries.contains {
         $0.text.contains("stalled")
     })
+    // The watchdog was armed/reset on every event the drain loop
+    // processed (each heartbeat plus the final completion) — proof it
+    // resets logically on each event, verified directly via the seam
+    // instead of by racing a real turn against a real deadline.
+    #expect(await gate.armCount >= 6)
 }
 
 /// A Reviewer that never reaches a terminal status — the same shape
@@ -5120,6 +5150,7 @@ func stalledReviewerBoundsAutomaticRecoveryAndPausesWithStallReason() async thro
         managerWorkflows: [managerID: workflow]
     ))
     let runtime = BuilderStatusStubRuntime(builderFinalStatus: .completed)
+    let gate = ManualIdleWatchdogGate()
     let model = AppModel(
         runtime: runtime,
         worktrees: StubWorktreeManager(
@@ -5127,16 +5158,27 @@ func stalledReviewerBoundsAutomaticRecoveryAndPausesWithStallReason() async thro
             preparedOwnership: ownership
         ),
         store: store,
-        stallIdleDeadline: .milliseconds(30)
+        idleWatchdogSleeper: { duration in await gate.sleeper(duration) }
     )
 
     model.send("Implement the feature", to: builderID)
-    // Each bounded redispatch reports `.working` before re-stalling, which
-    // transiently resumes the workflow — wait for the full cycle (original
-    // turn + two redispatches) rather than the first, premature moment
-    // `stallRecoveryAttempts` reaches its bound.
-    for _ in 0..<500 where await runtime.calls.filter({ $0 == .reviewer }).count < 3 {
-        try await Task.sleep(for: .milliseconds(10))
+    // The Reviewer never reaches a terminal status
+    // (`BuilderStatusStubRuntime`'s non-builder path stays open at
+    // `.working`), so only the idle watchdog resolves each of its turns.
+    // Trigger three expiries deterministically — the original stall plus
+    // the two bounded-recovery redispatches — instead of waiting out three
+    // real watchdog deadlines. Each redispatch goes through a fresh
+    // launch+respond turn, so wait for both the new `respond()` call and
+    // the session settling back at `.working` before expiring the next one.
+    for expectedReviewerCalls in 1...3 {
+        for _ in 0..<500
+        where await runtime.calls.filter({ $0 == .reviewer }).count < expectedReviewerCalls {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        for _ in 0..<500 where model.session(for: reviewerID).status != .working {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        await gate.expireCurrentArm()
     }
     for _ in 0..<500
     where model.workflow(for: managerID)?.pauseReason?.contains("appears stalled") != true {
@@ -12792,6 +12834,39 @@ private actor HeartbeatingRuntime: AgentRuntime {
     }
 
     func stop(profile: BotProfile) async {}
+}
+
+/// Test-only seam plugged into `AppModel`'s `idleWatchdogSleeper` in place
+/// of a real `Task.sleep`. Every arm of the watchdog (`armIdleWatchdog`)
+/// calls `sleeper(_:)`, which blocks until the test explicitly resolves it
+/// via `expireCurrentArm()` — so a test can assert on how many times the
+/// watchdog was armed/reset (`armCount`) and trigger expiry deterministically,
+/// instead of racing a real wall-clock deadline against real event delivery.
+///
+/// `armIdleWatchdog` always cancels the previous arm's `Task` before
+/// starting a new one, so only the most recently stored continuation is
+/// ever meaningfully awaited; resolving the previous one when a new arm
+/// comes in just lets that already-cancelled `Task` fall through its
+/// `guard !Task.isCancelled` check harmlessly, avoiding a leaked
+/// continuation.
+private actor ManualIdleWatchdogGate {
+    private(set) var armCount = 0
+    private var current: CheckedContinuation<Void, Never>?
+
+    func sleeper(_ duration: Duration) async {
+        armCount += 1
+        current?.resume()
+        await withCheckedContinuation { continuation in
+            current = continuation
+        }
+    }
+
+    /// Resolves whichever arm is currently outstanding, simulating its
+    /// idle deadline elapsing right now.
+    func expireCurrentArm() {
+        current?.resume()
+        current = nil
+    }
 }
 
 /// Simulates a Builder that ends its first turn `.blocked`, then reaches a
