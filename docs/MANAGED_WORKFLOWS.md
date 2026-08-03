@@ -138,6 +138,14 @@ push, or publish in either mode. `allowedTools(for:)` intentionally keeps
 shell access out of the Manager's preapproved tool list so these requests keep
 flowing through the runtime policy. Codex Managers remain read-only.
 
+If a Claude Manager finishes the planning turn with non-empty plan text, any
+permission denials from read-only inspection commands are treated as
+non-blocking workflow noise rather than an actionable blocked state. This
+keeps the produced plan on the normal approval path instead of replacing it
+with a generic blocked pause. A planning turn with no non-empty assistant
+response still pauses as incomplete, so missing plans are not silently treated
+as approved-ready output.
+
 The persisted workflow stores the implementation plan and the ID of its
 approval timeline entry. The session stores the corresponding pending
 approval card with the title
@@ -182,6 +190,8 @@ The model tests covering these invariants include:
 - `relaunchDoesNotTurnARuntimeApprovalIntoAPlanApproval`
 - `relaunchAdoptsAPlanApprovalCardWhoseWorkflowIDWasNotSaved`
 - `relaunchDoesNotRestoreIncompleteOrResolvedManagerPlans`
+- `managerDenialsAreSuppressedWhenAPlanWasProduced`
+- `managerDenialsArePreservedWhenNoPlanWasProduced`
 
 The Builder handoff readiness gate is covered by:
 
@@ -213,6 +223,19 @@ Run the complete suite with:
 ```sh
 xcrun swift test --disable-sandbox
 ```
+
+## Managed worktree setup
+
+`GitWorktreeManager` must treat repository worktrees as isolated automation
+state, not as an interactive developer shell. Its internal git plumbing
+commands therefore force `core.hooksPath=/dev/null` so repository hooks such
+as `post-checkout` cannot break `worktree add`, cleanup, or status checks by
+depending on tools that are absent from bl00p's launch environment.
+
+This hook bypass is intentionally scoped to bl00p's own repository-management
+commands. It does not change the environment inside a prepared worktree when a
+Builder, Reviewer, or Documenter session later runs normal project commands.
+Keep that distinction intact if worktree setup is refactored.
 ## Structured evidence and automatic repair
 
 Builder-to-Reviewer handoffs require a new local commit, a clean worktree,
