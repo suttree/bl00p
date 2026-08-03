@@ -6373,6 +6373,7 @@ func managedWorkflowResetsRevisionRoundsOnRelaunchResumeAfterLimitReached() asyn
     #expect(workflow.revisionRounds == 2)
     #expect(workflow.revisionLimitReached == true)
 
+    await harness.model.flushPersistence()
     let storeURL = harness.directory.appendingPathComponent("state.json")
     let relaunched = AppModel(
         runtime: SuspendedWorkflowRuntime(),
