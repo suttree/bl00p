@@ -1740,6 +1740,10 @@ final class AppModel: ObservableObject {
         workflow.isPaused = false
         workflow.pauseReason = nil
         workflow.resumeAvailableAfterRestart = false
+        if workflow.revisionLimitReached {
+            workflow.revisionRounds = 0
+            workflow.revisionLimitReached = false
+        }
         workflow.updatedAt = .now
         managerWorkflows[managerID] = workflow
         save()

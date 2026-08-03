@@ -267,4 +267,5 @@ explicit human direction via the Manager or the Reviewer's next message.
 Tests covering the revision loop and resumption include:
 
 - `managedWorkflowPausesAfterTwoUnresolvedRevisionRounds`
-- `managedWorkflowResetsRevisionRoundsWhenResumingAfterLimitReached`
+- `managedWorkflowResetsRevisionRoundsWhenResumingAfterLimitReached` — explicit send resume
+- `managedWorkflowResetsRevisionRoundsOnRelaunchResumeAfterLimitReached` — app-relaunch resume

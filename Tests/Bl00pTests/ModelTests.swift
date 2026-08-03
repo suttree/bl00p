@@ -5480,6 +5480,92 @@ func managedWorkflowResetsRevisionRoundsWhenResumingAfterLimitReached() async th
 
 @MainActor
 @Test
+func managedWorkflowResetsRevisionRoundsOnRelaunchResumeAfterLimitReached() async throws {
+    let unresolved = """
+    A blocking finding remains.
+    BL00P_REVIEW_DISPOSITION: changesRequested
+    """
+    let harness = try makeManagedWorkflowHarness(
+        reviewerResponses: [unresolved, unresolved]
+    )
+    defer { try? FileManager.default.removeItem(at: harness.directory) }
+
+    harness.model.send("Speed up orchestration", to: harness.managerID)
+    for _ in 0..<100
+        where harness.model.session(for: harness.managerID).status
+            != .needsApproval {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    let approval = try #require(
+        harness.model.session(for: harness.managerID).entries.last(where: {
+            $0.kind == .approval && $0.approvalState == .pending
+        })
+    )
+    harness.model.resolveApproval(
+        approval.id,
+        approved: true,
+        for: harness.managerID
+    )
+    for _ in 0..<200 {
+        if harness.model.workflow(for: harness.managerID)?.isPaused == true,
+           harness.model.workflow(for: harness.managerID)?.revisionRounds == 2 {
+            break
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    var workflow = try #require(
+        harness.model.workflow(for: harness.managerID)
+    )
+    #expect(workflow.stage == .verifying)
+    #expect(workflow.isPaused)
+    #expect(workflow.revisionRounds == 2)
+    #expect(workflow.revisionLimitReached == true)
+
+    let storeURL = harness.directory.appendingPathComponent("state.json")
+    let relaunched = AppModel(
+        runtime: SuspendedWorkflowRuntime(),
+        worktrees: StubWorktreeManager(
+            packages: [
+                GitHandoffPackage(
+                    sourceProfileID: workflow.team.reviewerProfileID ?? UUID(),
+                    sourceName: "Reviewer",
+                    repositoryPath: "/tmp/project",
+                    worktreePath: "/tmp/.bl00p-worktrees/project-reviewer",
+                    branch: workflow.branch ?? "bl00p/managed-fixture",
+                    baseRevision: "abc123",
+                    headRevision: "fedcba",
+                    taskContext: "Speed up orchestration",
+                    testStatus: .passed,
+                    testSummary: "`swift test` — passed",
+                    workingTreeSummary: "Clean"
+                )
+            ],
+            preparedOwnership: GitWorktreeOwnership(
+                ownerProfileID: workflow.team.builderProfileID ?? UUID(),
+                repositoryPath: "/tmp/project",
+                worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+                branch: workflow.branch ?? "bl00p/managed-fixture",
+                baseRevision: "abc123"
+            )
+        ),
+        store: AppStateStore(fileURL: storeURL)
+    )
+    try await Task.sleep(for: .milliseconds(50))
+
+    relaunched.resumeWorkflow(harness.managerID)
+    try await Task.sleep(for: .milliseconds(50))
+
+    workflow = try #require(
+        relaunched.workflow(for: harness.managerID)
+    )
+    #expect(workflow.isPaused == false)
+    #expect(workflow.revisionRounds == 0)
+    #expect(workflow.revisionLimitReached == false)
+}
+
+@MainActor
+@Test
 func pendingManagerDispatchRecoversOnceAndDeliveredWorkCanResume() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(
