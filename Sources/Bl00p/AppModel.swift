@@ -97,6 +97,14 @@ final class AppModel: ObservableObject {
     private var launchedProfileIDs: Set<UUID> = []
     private var turnEntryStartIndices: [UUID: Int] = [:]
     private var workflowStageStartedAt: [UUID: ContinuousClock.Instant] = [:]
+    private var idleWatchdogTasks: [UUID: Task<Void, Never>] = [:]
+    private let stallIdleDeadline: Duration
+
+    /// Bounds automatic redispatch attempts for a single stalled stage. Reset
+    /// whenever the workflow genuinely moves to a different stage (see
+    /// `ManagerWorkflow.stallRecoveryStage`), so this bounds retries per
+    /// stall episode rather than across the workflow's whole lifetime.
+    private static let maximumStallRecoveryAttempts = 2
 
     init(
         runtime: any AgentRuntime = AgentRuntimeRouter(),
@@ -105,13 +113,15 @@ final class AppModel: ObservableObject {
         notifications: (any AgentNotificationDelivering)? = nil,
         isAppWindowActive: @escaping () -> Bool = {
             AppWindowActivity.isActive
-        }
+        },
+        stallIdleDeadline: Duration = .seconds(240)
     ) {
         self.runtime = runtime
         self.worktrees = worktrees
         self.store = store
         self.notifications = notifications
         self.isAppWindowActive = isAppWindowActive
+        self.stallIdleDeadline = stallIdleDeadline
 
         if let saved = store.load(), !saved.profiles.isEmpty {
             let restoredProfiles = saved.profiles.map(Self.migrateLegacyDefaultName)
@@ -1254,6 +1264,7 @@ final class AppModel: ObservableObject {
         launchedProfileIDs.remove(profileID)
         planningTurnAssistantEntryIDs.removeValue(forKey: chatID)
         runGenerations[chatID] = UUID()
+        cancelIdleWatchdog(for: chatID)
         Task {
             await runtime.stop(
                 profile: runtimeProfile(for: profile, sessionID: chatID)
@@ -1451,8 +1462,10 @@ final class AppModel: ObservableObject {
                     coldStart: isColdStart
                 )
                 var reachedReady = false
+                refreshIdleWatchdog(for: chatID, generation: generation)
                 for await event in launchStream {
                     guard runGenerations[chatID] == generation else { return }
+                    refreshIdleWatchdog(for: chatID, generation: generation)
                     if case .entry(let entry) = event, entry.kind == .question {
                         continue
                     }
@@ -1465,11 +1478,20 @@ final class AppModel: ObservableObject {
                         break
                     }
                 }
-                guard reachedReady else { return }
+                cancelIdleWatchdog(for: chatID)
+                guard reachedReady else {
+                    reconcileNonTerminalStreamEnd(for: chatID, generation: generation)
+                    return
+                }
                 // The launch stream stays open as this session's lifecycle
                 // channel; keep consuming it so a later idle disconnect is
                 // still reported to the UI.
-                consume(launchStream, for: chatID, generation: generation)
+                consume(
+                    launchStream,
+                    for: chatID,
+                    generation: generation,
+                    reconcileOnNaturalEnd: false
+                )
             }
 
             if pendingHandoff != nil {
@@ -1498,8 +1520,10 @@ final class AppModel: ObservableObject {
             turnEntryStartIndices[chatID] =
                 sessions[chatID]?.entries.count ?? 0
             var recordedFirstOutput = false
+            refreshIdleWatchdog(for: chatID, generation: generation)
             for await event in responseStream {
                 guard runGenerations[chatID] == generation else { return }
+                refreshIdleWatchdog(for: chatID, generation: generation)
                 if !recordedFirstOutput {
                     switch event {
                     case .entry, .upsertEntry:
@@ -1522,6 +1546,9 @@ final class AppModel: ObservableObject {
                     )
                 }
             }
+            cancelIdleWatchdog(for: chatID)
+            guard runGenerations[chatID] == generation else { return }
+            reconcileNonTerminalStreamEnd(for: chatID, generation: generation)
         }
     }
 
@@ -1692,6 +1719,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The manager-visible action on a paused workflow's banner: resumes a
+    /// workflow restored after an app restart (`resumeAvailableAfterRestart`)
+    /// and retries one whose active participant stalled and exhausted
+    /// bounded automatic recovery (`awaitingStallRecovery`). Both cases stop
+    /// whatever the runtime is doing for that participant, reset its session
+    /// out of `working`/`launching`, and redispatch — required for the stall
+    /// case since the session can still be sitting at `.working` (the
+    /// watchdog pauses the *workflow* without changing session status), and
+    /// harmless for the restart case since the runtime has nothing live to
+    /// stop.
     func resumeWorkflow(_ managerProfileOrSessionID: UUID) {
         let managerID =
             managerWorkflows[managerProfileOrSessionID] != nil
@@ -1701,48 +1738,44 @@ final class AppModel: ObservableObject {
         guard var workflow = managerWorkflows[managerID],
               workflow.stage != .completed,
               workflow.planApprovalEntryID == nil,
-              workflow.resumeAvailableAfterRestart == true,
+              workflow.resumeAvailableAfterRestart == true
+                  || workflow.awaitingStallRecovery == true,
               let activeSessionID = expectedProfileID(for: workflow) else {
             return
         }
         let activeProfileID =
             sessions[activeSessionID]?.ownerProfileID ?? activeSessionID
-        guard profiles.contains(where: {
+        guard let profile = profiles.first(where: {
             $0.id == activeProfileID
         }) else {
             return
         }
 
-        if workflow.stage == .reviewing
-            || workflow.stage == .verifying
-            || workflow.stage == .publishing {
-            let activeRole: AgentRole =
-                workflow.stage == .publishing ? .publisher : .reviewer
-            guard let handoff = workflow.latestHandoff,
-                  let handoffSessionID = participantSessionID(
-                      activeRole,
-                      in: workflow
-                  ),
-                  prepareWorkflowHandoff(
-                      handoff,
-                      for: sessions[handoffSessionID]?.ownerProfileID
-                          ?? activeProfileID,
-                      sessionID: handoffSessionID
-                  ) else {
-                pauseWorkflow(
-                    managerID,
-                    reason: "The persisted workflow handoff could not be restored."
-                )
-                return
-            }
+        guard restoreWorkflowHandoffIfNeeded(
+            workflow,
+            managerID: managerID,
+            activeSessionID: activeSessionID,
+            activeProfileID: activeProfileID
+        ) else {
+            pauseWorkflow(
+                managerID,
+                reason: "The persisted workflow handoff could not be restored."
+            )
+            return
         }
 
         workflow.isPaused = false
         workflow.pauseReason = nil
         workflow.resumeAvailableAfterRestart = false
+        workflow.awaitingStallRecovery = false
+        // A manual retry is a deliberate, fresh attempt — give it its own
+        // bound instead of counting against whatever automatic recovery
+        // already used for this stage.
+        workflow.stallRecoveryAttempts = 0
+        workflow.stallRecoveryStage = nil
         workflow.updatedAt = .now
         managerWorkflows[managerID] = workflow
-        save()
+        save(immediately: true)
         append(
             .init(
                 kind: .system,
@@ -1751,20 +1784,56 @@ final class AppModel: ObservableObject {
             ),
             to: managerID
         )
-        let instruction: String
+        redispatchStalledParticipant(
+            instruction: redispatchInstruction(for: workflow),
+            activeSessionID: activeSessionID,
+            activeProfileID: activeProfileID,
+            profile: profile
+        )
+    }
+
+    /// Restores the pending Builder->Reviewer/Publisher git handoff onto the
+    /// active participant session if this stage needs one. Returns `true`
+    /// when nothing needed restoring (e.g. `.building`/`.planning`).
+    private func restoreWorkflowHandoffIfNeeded(
+        _ workflow: ManagerWorkflow,
+        managerID: UUID,
+        activeSessionID: UUID,
+        activeProfileID: UUID
+    ) -> Bool {
+        guard workflow.stage == .reviewing
+            || workflow.stage == .verifying
+            || workflow.stage == .publishing else {
+            return true
+        }
+        let activeRole: AgentRole =
+            workflow.stage == .publishing ? .publisher : .reviewer
+        guard let handoff = workflow.latestHandoff,
+              let handoffSessionID = participantSessionID(
+                  activeRole,
+                  in: workflow
+              ),
+              prepareWorkflowHandoff(
+                  handoff,
+                  for: sessions[handoffSessionID]?.ownerProfileID
+                      ?? activeProfileID,
+                  sessionID: handoffSessionID
+              ) else {
+            return false
+        }
+        return true
+    }
+
+    /// The instruction to send when continuing a workflow stage that was
+    /// interrupted — by an app restart or by bounded stall recovery.
+    private func redispatchInstruction(for workflow: ManagerWorkflow) -> String {
         if let dispatch = workflow.deliveredDispatch,
            dispatch.id == workflow.deliveredDispatchID {
-            instruction = dispatch.kind == .initialBuild
+            return dispatch.kind == .initialBuild
                 ? resumeInstruction(for: workflow)
                 : runtimeInstruction(for: dispatch, workflow: workflow)
-        } else {
-            instruction = resumeInstruction(for: workflow)
         }
-        performSend(
-            instruction,
-            to: activeProfileID,
-            sessionID: activeSessionID
-        )
+        return resumeInstruction(for: workflow)
     }
 
     func markViewed(_ profileID: UUID, sessionID explicitSessionID: UUID? = nil) {
@@ -1785,17 +1854,220 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// - Parameter reconcileOnNaturalEnd: Pass `false` for a channel whose
+    ///   natural end carries no information about the session's own status —
+    ///   the post-handshake launch stream finishes immediately in the real
+    ///   Claude runtime (see `ClaudeRuntime.start`), well before any turn on
+    ///   that session even begins, so treating that as a stalled/failed turn
+    ///   would be a false positive. `resolveApproval`/`resolveQuestion`
+    ///   streams drive the session's status directly, so they keep the
+    ///   default and are reconciled like any other turn.
     private func consume(
         _ stream: AsyncStream<AgentEvent>,
         for profileID: UUID,
-        generation: UUID
+        generation: UUID,
+        reconcileOnNaturalEnd: Bool = true
     ) {
         Task { [weak self] in
+            guard let self else { return }
             for await event in stream {
-                guard !Task.isCancelled else { break }
-                guard self?.runGenerations[profileID] == generation else { break }
-                self?.apply(event, to: profileID)
+                guard !Task.isCancelled else { return }
+                guard self.runGenerations[profileID] == generation else { return }
+                self.apply(event, to: profileID)
+                self.refreshIdleWatchdog(for: profileID, generation: generation)
             }
+            guard reconcileOnNaturalEnd,
+                  !Task.isCancelled,
+                  self.runGenerations[profileID] == generation else { return }
+            self.reconcileNonTerminalStreamEnd(for: profileID, generation: generation)
+        }
+    }
+
+    // MARK: - Turn supervision
+
+    /// Every workflow participant turn must resolve into an advance/handoff
+    /// or a visible, resumable pause — never a silent wedge on `.working` /
+    /// `.launching`. Two backstops guarantee that:
+    ///
+    /// - `reconcileNonTerminalStreamEnd` catches a stream that finishes
+    ///   without ever reporting a terminal status (a runtime bug or a
+    ///   disconnect).
+    /// - The idle watchdog (`armIdleWatchdog` / `handleIdleWatchdogExpiry`)
+    ///   catches a transport that stays open but stops emitting events (a
+    ///   hung subprocess). It resets on every event — including tool
+    ///   output — so a long-running test suite doesn't trip it.
+    ///
+    /// Both funnel into `attemptStallRecovery`, which stops the wedged
+    /// runtime and redispatches the same stage a bounded number of times.
+
+    private func containingManagerWorkflowID(for sessionID: UUID) -> UUID? {
+        if managerWorkflows[sessionID] != nil { return sessionID }
+        return managerWorkflowID(containingParticipantSession: sessionID)
+    }
+
+    private func refreshIdleWatchdog(for sessionID: UUID, generation: UUID) {
+        guard let status = sessions[sessionID]?.status,
+              status == .working || status == .launching else {
+            cancelIdleWatchdog(for: sessionID)
+            return
+        }
+        armIdleWatchdog(for: sessionID, generation: generation)
+    }
+
+    private func armIdleWatchdog(for sessionID: UUID, generation: UUID) {
+        guard containingManagerWorkflowID(for: sessionID) != nil else { return }
+        idleWatchdogTasks[sessionID]?.cancel()
+        let deadline = stallIdleDeadline
+        idleWatchdogTasks[sessionID] = Task { [weak self] in
+            try? await Task.sleep(for: deadline)
+            guard !Task.isCancelled else { return }
+            self?.handleIdleWatchdogExpiry(sessionID: sessionID, generation: generation)
+        }
+    }
+
+    private func cancelIdleWatchdog(for sessionID: UUID) {
+        idleWatchdogTasks.removeValue(forKey: sessionID)?.cancel()
+    }
+
+    private func handleIdleWatchdogExpiry(sessionID: UUID, generation: UUID) {
+        idleWatchdogTasks[sessionID] = nil
+        guard runGenerations[sessionID] == generation else { return }
+        guard let status = sessions[sessionID]?.status,
+              status == .working || status == .launching else { return }
+        guard let managerID = containingManagerWorkflowID(for: sessionID),
+              managerWorkflows[managerID]?.isPaused != true else { return }
+
+        if var workflow = managerWorkflows[managerID] {
+            workflow.awaitingStallRecovery = true
+            workflow.updatedAt = .now
+            managerWorkflows[managerID] = workflow
+        }
+        let minutes = max(1, Int(stallIdleDeadline.components.seconds / 60))
+        pauseWorkflow(
+            managerID,
+            reason: "\(profileNameForSession(sessionID)) appears stalled — no activity for \(minutes) min.",
+            presentation: .failure
+        )
+        attemptStallRecovery(for: managerID)
+    }
+
+    /// A stream that finishes without ever reporting a terminal status
+    /// leaves the session silently stuck on `.working` / `.launching`
+    /// forever. Synthesize `.failed` so the normal pause machinery in
+    /// `handleWorkflowStatus` always runs, then try bounded recovery.
+    private func reconcileNonTerminalStreamEnd(for sessionID: UUID, generation: UUID) {
+        guard runGenerations[sessionID] == generation else { return }
+        guard let status = sessions[sessionID]?.status,
+              status == .working || status == .launching else { return }
+        append(
+            .init(
+                kind: .system,
+                text: "Agent ended without reporting a result",
+                presentation: .failure
+            ),
+            to: sessionID
+        )
+        apply(.status(.failed), to: sessionID)
+        if let managerID = containingManagerWorkflowID(for: sessionID) {
+            attemptStallRecovery(for: managerID)
+        }
+    }
+
+    /// Stops the wedged runtime, then redispatches the same stage. Bounded
+    /// per stage (`ManagerWorkflow.stallRecoveryStage`) and persisted before
+    /// the redispatch so a relaunch mid-recovery can't duplicate it. Leaves
+    /// the visible pause in place — for the user to resolve manually — if
+    /// bounds are exhausted or the handoff can't be restored.
+    private func attemptStallRecovery(for managerID: UUID) {
+        guard var workflow = managerWorkflows[managerID],
+              workflow.stage != .completed,
+              workflow.planApprovalEntryID == nil,
+              let activeSessionID = expectedProfileID(for: workflow),
+              let activeProfileID = sessions[activeSessionID]?.ownerProfileID,
+              let profile = profiles.first(where: { $0.id == activeProfileID })
+        else {
+            return
+        }
+
+        if workflow.stallRecoveryStage != workflow.stage {
+            workflow.stallRecoveryStage = workflow.stage
+            workflow.stallRecoveryAttempts = 0
+        }
+        guard workflow.stallRecoveryAttempts < Self.maximumStallRecoveryAttempts,
+              restoreWorkflowHandoffIfNeeded(
+                  workflow,
+                  managerID: managerID,
+                  activeSessionID: activeSessionID,
+                  activeProfileID: activeProfileID
+              )
+        else {
+            managerWorkflows[managerID] = workflow
+            save(immediately: true)
+            return
+        }
+
+        workflow.stallRecoveryAttempts += 1
+        workflow.awaitingStallRecovery = true
+        workflow.updatedAt = .now
+        managerWorkflows[managerID] = workflow
+        save(immediately: true)
+
+        let attempt = workflow.stallRecoveryAttempts
+        append(
+            .init(
+                kind: .system,
+                text: "Recovering stalled turn",
+                detail: "Automatic recovery attempt \(attempt) of \(Self.maximumStallRecoveryAttempts) for \(profileNameForSession(activeSessionID))."
+            ),
+            to: managerID,
+            immediately: true
+        )
+
+        redispatchStalledParticipant(
+            instruction: redispatchInstruction(for: workflow),
+            activeSessionID: activeSessionID,
+            activeProfileID: activeProfileID,
+            profile: profile
+        )
+    }
+
+    /// Stops the wedged runtime, resets the participant session out of
+    /// `working`/`launching` (bypassing `apply`/`handleWorkflowStatus`, since
+    /// this is an internal recovery step, not a user-visible stop), and
+    /// redispatches the given instruction on a fresh generation. Shared by
+    /// bounded automatic stall recovery and the manual retry action.
+    private func redispatchStalledParticipant(
+        instruction: String,
+        activeSessionID: UUID,
+        activeProfileID: UUID,
+        profile: BotProfile
+    ) {
+        runGenerations[activeSessionID] = UUID()
+        cancelIdleWatchdog(for: activeSessionID)
+        resetStalledSessionForRecovery(activeSessionID)
+
+        Task { [weak self] in
+            guard let self else { return }
+            await runtime.stop(
+                profile: runtimeProfile(for: profile, sessionID: activeSessionID)
+            )
+            performSend(instruction, to: activeProfileID, sessionID: activeSessionID)
+        }
+    }
+
+    /// Directly resets the wedged session's state without routing through
+    /// `apply`/`handleWorkflowStatus` — this is an internal recovery step,
+    /// not a user-visible stop, and going through the normal `.stopped`
+    /// pipeline would announce and re-pause the workflow we are about to
+    /// redispatch.
+    private func resetStalledSessionForRecovery(_ sessionID: UUID) {
+        guard var state = sessions[sessionID] else { return }
+        state.status = .stopped
+        state.updatedAt = .now
+        sessions[sessionID] = state
+        connectedProfileIDs.remove(sessionID)
+        if let ownerID = state.ownerProfileID {
+            launchedProfileIDs.remove(ownerID)
         }
     }
 
@@ -2067,7 +2339,11 @@ final class AppModel: ObservableObject {
                     || (workflow.awaitingBuilderHandoffRetry
                         && (workflow.stage == .building
                             || workflow.stage == .revising)
-                        && (status == .completed || status == .blocked)))
+                        && (status == .completed || status == .blocked))
+                    // A stall-paused workflow's turn may still be alive.
+                    // Let a subsequent real terminal status resolve it
+                    // instead of wedging behind the pause indefinitely.
+                    || workflow.awaitingStallRecovery)
                 && (workflow.participantSessionIDs.isEmpty
                     || workflow.participantSessionIDs.values.contains(profileID))
                 && expectedProfileID(for: workflow) == profileID
@@ -2246,6 +2522,7 @@ final class AppModel: ObservableObject {
         workflow.pauseReason = nil
         workflow.resumeAvailableAfterRestart = false
         workflow.awaitingBuilderHandoffRetry = false
+        workflow.awaitingStallRecovery = false
         workflow.updatedAt = .now
         managerWorkflows[managerID] = workflow
         save(immediately: true)
