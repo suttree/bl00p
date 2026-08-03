@@ -522,6 +522,13 @@ private struct ManagerWorkflowBanner: View {
                     #if os(macOS)
                     .accessibilityHint("Continues the restored managed workflow")
                     #endif
+            } else if workflow?.awaitingStallRecovery == true {
+                Button("Retry", action: resume)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.bl00pPink)
+                    #if os(macOS)
+                    .accessibilityHint("Stops the stalled turn and redispatches it")
+                    #endif
             }
         }
         .padding(.horizontal, 18)
