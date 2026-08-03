@@ -2229,6 +2229,77 @@ func worktreeManagerCreatesIsolatedBranchesAndHandoffSnapshots() async throws {
 }
 
 @Test
+func worktreeManagerSucceedsWhenPostCheckoutHookFails() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-worktrees-hook-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    let repository = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: repository,
+        withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try await runGit(["init", "-b", "main"], in: repository)
+    try Data("initial\n".utf8).write(
+        to: repository.appendingPathComponent("README.md")
+    )
+    try await runGit(["add", "README.md"], in: repository)
+    try await runGit(
+        [
+            "-c", "user.name=bl00p Tests",
+            "-c", "user.email=tests@bl00p.dev",
+            "commit", "-m", "Initial commit"
+        ],
+        in: repository
+    )
+
+    let hooksDirectory = repository
+        .appendingPathComponent(".git", isDirectory: true)
+        .appendingPathComponent("hooks", isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: hooksDirectory,
+        withIntermediateDirectories: true
+    )
+    let postCheckoutHook = hooksDirectory
+        .appendingPathComponent("post-checkout")
+    try Data(
+        """
+        #!/bin/sh
+        echo "post-checkout: line 2: exec: mise: not found" >&2
+        exit 127
+        """.utf8
+    ).write(to: postCheckoutHook)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: postCheckoutHook.path
+    )
+
+    let builder = BotProfile(
+        name: "Hook Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "",
+        workingDirectory: repository.path
+    )
+    let manager = GitWorktreeManager()
+    let ownership = try await manager.prepareWorktree(
+        for: builder,
+        startingPoint: nil,
+        handoffID: nil
+    )
+
+    #expect(
+        FileManager.default.fileExists(
+            atPath: ownership.worktreePath
+        )
+    )
+    #expect(ownership.repositoryPath == repository.path)
+}
+
+@Test
 func worktreeManagerRecoversARegisteredWorktreeAfterItsBranchIsRenamed() async throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent(
