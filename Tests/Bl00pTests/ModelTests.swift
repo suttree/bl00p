@@ -9692,6 +9692,75 @@ func permissionDenialsProduceAReadableAttentionState() throws {
 }
 
 @Test
+func managerDenialsAreSuppressedWhenAPlanWasProduced() throws {
+    let denial = try JSONDecoder().decode(
+        JSONValue.self,
+        from: Data(
+            """
+            {
+              "tool_name": "Bash",
+              "tool_input": {
+                "description": "Check the PR",
+                "command": "gh pr view 123"
+              }
+            }
+            """.utf8
+        )
+    )
+
+    #expect(
+        ClaudeTurnOutcome.permissionDenialsRequiringAttention(
+            [denial],
+            role: .manager,
+            responses: ["Here is the implementation plan..."]
+        ).isEmpty
+    )
+    #expect(
+        ClaudeTurnOutcome.status(
+            failed: false,
+            permissionDenials: ClaudeTurnOutcome.permissionDenialsRequiringAttention(
+                [denial],
+                role: .manager,
+                responses: ["Here is the implementation plan..."]
+            )
+        ) == .completed
+    )
+}
+
+@Test
+func managerDenialsArePreservedWhenNoPlanWasProduced() throws {
+    let denial = try JSONDecoder().decode(
+        JSONValue.self,
+        from: Data(
+            """
+            {
+              "tool_name": "Bash",
+              "tool_input": {
+                "description": "Check the PR",
+                "command": "gh pr view 123"
+              }
+            }
+            """.utf8
+        )
+    )
+
+    #expect(
+        ClaudeTurnOutcome.permissionDenialsRequiringAttention(
+            [denial],
+            role: .manager,
+            responses: ["", "   "]
+        ) == [denial]
+    )
+    #expect(
+        ClaudeTurnOutcome.permissionDenialsRequiringAttention(
+            [denial],
+            role: .manager,
+            responses: []
+        ) == [denial]
+    )
+}
+
+@Test
 func permissionDenialsAreDeduplicatedByUnderlyingAction() throws {
     let denials = try JSONDecoder().decode(
         [JSONValue].self,

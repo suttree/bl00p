@@ -1234,13 +1234,31 @@ enum ClaudeTurnOutcome {
         role: AgentRole?,
         responses: [String]
     ) -> [JSONValue] {
-        guard role == .reviewer,
-              responses.contains(where: {
-                  ReviewDisposition.parse(from: $0) != nil
-              }) else {
+        switch role {
+        case .reviewer:
+            guard responses.contains(where: {
+                ReviewDisposition.parse(from: $0) != nil
+            }) else {
+                return permissionDenials
+            }
+            return []
+        case .manager:
+            // The manager is strictly read-only and its sole deliverable is
+            // a plan a human approves next, so a denied *inspection*
+            // command (e.g. `gh pr view`) must never dead-end the
+            // workflow behind a generic "blocked" pause when a plan was
+            // actually produced — the human approval step is already the
+            // gate. A manager turn with no plan text still surfaces its
+            // denials so it isn't silently treated as complete.
+            guard responses.contains(where: {
+                !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }) else {
+                return permissionDenials
+            }
+            return []
+        default:
             return permissionDenials
         }
-        return []
     }
 
     static func status(
