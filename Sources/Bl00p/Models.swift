@@ -627,6 +627,9 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     /// relaunch and bounds recovery for each initial or revision pass.
     var builderHandoffRepairAttempts: Int
     var builderHandoffRepairPass: BuilderHandoffRepairPass?
+    /// Set when the revision round limit is reached. Cleared when the workflow
+    /// is resumed so the automatic revision loop gets a fresh bounded budget.
+    var revisionLimitReached: Bool
     /// Set when this workflow is paused because its active participant's
     /// turn idled past the stall watchdog deadline. Lets a late terminal
     /// status from that same turn — one bounded auto-recovery couldn't
@@ -669,6 +672,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         awaitingBuilderHandoffRetry: Bool = false,
         builderHandoffRepairAttempts: Int = 0,
         builderHandoffRepairPass: BuilderHandoffRepairPass? = nil,
+        revisionLimitReached: Bool = false,
         awaitingStallRecovery: Bool = false,
         stallRecoveryAttempts: Int = 0,
         stallRecoveryStage: ManagerWorkflowStage? = nil,
@@ -702,6 +706,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         self.awaitingBuilderHandoffRetry = awaitingBuilderHandoffRetry
         self.builderHandoffRepairAttempts = builderHandoffRepairAttempts
         self.builderHandoffRepairPass = builderHandoffRepairPass
+        self.revisionLimitReached = revisionLimitReached
         self.awaitingStallRecovery = awaitingStallRecovery
         self.stallRecoveryAttempts = stallRecoveryAttempts
         self.stallRecoveryStage = stallRecoveryStage
@@ -719,7 +724,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         case verificationSummary, publisherSummary, revisionRounds
         case latestHandoff, reviewSummary, revisionStartedAt
         case isPaused, pauseReason, awaitingBuilderHandoffRetry
-        case builderHandoffRepairAttempts, builderHandoffRepairPass
+        case builderHandoffRepairAttempts, builderHandoffRepairPass, revisionLimitReached
         case awaitingStallRecovery, stallRecoveryAttempts, stallRecoveryStage
         case startedAt, updatedAt, participantSessionIDs
     }
@@ -794,6 +799,10 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
             BuilderHandoffRepairPass.self,
             forKey: .builderHandoffRepairPass
         )
+        revisionLimitReached = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .revisionLimitReached
+        ) ?? false
         awaitingStallRecovery = try container.decodeIfPresent(
             Bool.self,
             forKey: .awaitingStallRecovery
