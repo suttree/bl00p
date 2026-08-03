@@ -2229,6 +2229,77 @@ func worktreeManagerCreatesIsolatedBranchesAndHandoffSnapshots() async throws {
 }
 
 @Test
+func worktreeManagerSucceedsWhenPostCheckoutHookFails() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-worktrees-hook-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    let repository = root.appendingPathComponent("project", isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: repository,
+        withIntermediateDirectories: true
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try await runGit(["init", "-b", "main"], in: repository)
+    try Data("initial\n".utf8).write(
+        to: repository.appendingPathComponent("README.md")
+    )
+    try await runGit(["add", "README.md"], in: repository)
+    try await runGit(
+        [
+            "-c", "user.name=bl00p Tests",
+            "-c", "user.email=tests@bl00p.dev",
+            "commit", "-m", "Initial commit"
+        ],
+        in: repository
+    )
+
+    let hooksDirectory = repository
+        .appendingPathComponent(".git", isDirectory: true)
+        .appendingPathComponent("hooks", isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: hooksDirectory,
+        withIntermediateDirectories: true
+    )
+    let postCheckoutHook = hooksDirectory
+        .appendingPathComponent("post-checkout")
+    try Data(
+        """
+        #!/bin/sh
+        echo "post-checkout: line 2: exec: mise: not found" >&2
+        exit 127
+        """.utf8
+    ).write(to: postCheckoutHook)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: postCheckoutHook.path
+    )
+
+    let builder = BotProfile(
+        name: "Hook Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "",
+        workingDirectory: repository.path
+    )
+    let manager = GitWorktreeManager()
+    let ownership = try await manager.prepareWorktree(
+        for: builder,
+        startingPoint: nil,
+        handoffID: nil
+    )
+
+    #expect(
+        FileManager.default.fileExists(
+            atPath: ownership.worktreePath
+        )
+    )
+    #expect(ownership.repositoryPath == repository.path)
+}
+
+@Test
 func worktreeManagerRecoversARegisteredWorktreeAfterItsBranchIsRenamed() async throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent(
@@ -2476,6 +2547,26 @@ func handoffEvidencePrefersStructuredOutcomesAndCompletionTimes() {
         )
     ])
     #expect(running.status == .notRun)
+}
+
+@Test
+func stallRecoveryStateSurvivesWorkflowPersistence() throws {
+    let workflow = ManagerWorkflow(
+        managerProfileID: UUID(),
+        team: .init(),
+        request: "Ship the feature",
+        stage: .reviewing,
+        awaitingStallRecovery: true,
+        stallRecoveryAttempts: 2,
+        stallRecoveryStage: .reviewing
+    )
+    let decoded = try JSONDecoder().decode(
+        ManagerWorkflow.self,
+        from: JSONEncoder().encode(workflow)
+    )
+    #expect(decoded.awaitingStallRecovery)
+    #expect(decoded.stallRecoveryAttempts == 2)
+    #expect(decoded.stallRecoveryStage == .reviewing)
 }
 
 @Test
@@ -4438,6 +4529,766 @@ func completedBuilderHandoffStopsAfterBoundedAutomaticRepairs() async throws {
     #expect(paused.pauseReason?.contains("no local commit") == true)
     #expect(await runtime.calls == [.builder, .builder, .builder])
     #expect(model.session(for: reviewerID).entries.isEmpty)
+}
+
+@MainActor
+@Test
+func nonWorkflowTurnEndingWithoutTerminalStatusReconcilesToFailed() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-reconcile-standalone-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    let model = AppModel(runtime: NonTerminalOnceRuntime(), store: store)
+    let profile = try #require(model.profiles.dropFirst().first)
+    let sessionID = try #require(model.selectedSessionID(for: profile.id))
+    #expect(model.setRepositoryPath("/tmp/reconcile-standalone", for: sessionID))
+
+    model.send("Do something", to: profile.id)
+    for _ in 0..<300 where model.session(for: profile.id).status != .failed {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(model.session(for: profile.id).status == .failed)
+    #expect(model.session(for: profile.id).entries.contains {
+        $0.text == "Agent ended without reporting a result"
+    })
+}
+
+/// A stream finishing without a terminal status must not silently wedge the
+/// workflow. Reconciliation synthesizes `.failed`, which pauses the workflow
+/// and immediately attempts bounded recovery; a subsequently healthy
+/// redispatch resolves the pause and advances the workflow — no manual
+/// resume required.
+@MainActor
+@Test
+func nonTerminalStreamEndDuringBuildingRecoversAndAdvancesWorkflow() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-reconcile-recovery-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/recovered-feature",
+        baseRevision: "abc123"
+    )
+    let readyPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "def456",
+        taskContext: "Ship the feature",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        testEvidenceAt: .distantFuture,
+        workingTreeSummary: "Clean"
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builderID,
+        reviewerProfileID: reviewerID,
+        publisherProfileID: publisherID
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement.",
+        workingDirectory: ownership.repositoryPath,
+        worktree: ownership
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Publish.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        repositoryPath: ownership.repositoryPath,
+        team: team,
+        request: "Ship the feature",
+        implementationPlan: "Implement the feature end to end.",
+        stage: .building,
+        branch: ownership.branch
+    )
+    let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    store.save(PersistedAppState(
+        profiles: [manager, builder, reviewer, publisher],
+        sessions: [
+            managerID: AgentSessionState(),
+            builderID: AgentSessionState(entries: [
+                .init(kind: .handoff, title: "Implementation brief", text: "Implement the feature end to end.")
+            ]),
+            reviewerID: AgentSessionState(),
+            publisherID: AgentSessionState()
+        ],
+        selectedBotID: builderID,
+        managerWorkflows: [managerID: workflow]
+    ))
+    let runtime = NonTerminalThenSuccessRuntime()
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            package: readyPackage,
+            preparedOwnership: ownership
+        ),
+        store: store,
+        stallIdleDeadline: .seconds(240)
+    )
+
+    model.send("Implement the feature", to: builderID)
+    for _ in 0..<500 where model.workflow(for: managerID)?.stage != .reviewing {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let advanced = try #require(model.workflow(for: managerID))
+    #expect(advanced.stage == .reviewing)
+    #expect(!advanced.isPaused)
+    #expect(await runtime.builderAttempts == 2)
+    #expect(model.session(for: builderID).entries.contains {
+        $0.text == "Agent ended without reporting a result"
+    })
+}
+
+/// When bounded recovery can't act (attempts already exhausted for this
+/// stage), the original — possibly still-live — turn must still be able to
+/// resolve the pause on its own via `awaitingStallRecovery`, instead of
+/// requiring a manual resume.
+@MainActor
+@Test
+func stalledBuilderResolvesViaBypassWhenBoundedRecoveryIsExhausted() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-stall-bypass-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/bypass-feature",
+        baseRevision: "abc123"
+    )
+    let readyPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "def456",
+        taskContext: "Ship the feature",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        testEvidenceAt: .distantFuture,
+        workingTreeSummary: "Clean"
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builderID,
+        reviewerProfileID: reviewerID,
+        publisherProfileID: publisherID
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement.",
+        workingDirectory: ownership.repositoryPath,
+        worktree: ownership
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Publish.",
+        workingDirectory: ownership.repositoryPath
+    )
+    // Recovery is already bounded out for `.building` before the watchdog
+    // even fires, so the first stall must bail without redispatching.
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        repositoryPath: ownership.repositoryPath,
+        team: team,
+        request: "Ship the feature",
+        implementationPlan: "Implement the feature end to end.",
+        stage: .building,
+        branch: ownership.branch,
+        stallRecoveryAttempts: 2,
+        stallRecoveryStage: .building
+    )
+    let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    store.save(PersistedAppState(
+        profiles: [manager, builder, reviewer, publisher],
+        sessions: [
+            managerID: AgentSessionState(),
+            builderID: AgentSessionState(entries: [
+                .init(kind: .handoff, title: "Implementation brief", text: "Implement the feature end to end.")
+            ]),
+            reviewerID: AgentSessionState(),
+            publisherID: AgentSessionState()
+        ],
+        selectedBotID: builderID,
+        managerWorkflows: [managerID: workflow]
+    ))
+    let runtime = ControllableHangRuntime()
+    let gate = ManualIdleWatchdogGate()
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            package: readyPackage,
+            preparedOwnership: ownership
+        ),
+        store: store,
+        idleWatchdogSleeper: { duration in await gate.sleeper(duration) }
+    )
+
+    model.send("Implement the feature", to: builderID)
+    for _ in 0..<500 where await runtime.respondCount < 1 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    for _ in 0..<500 where model.session(for: builderID).status != .working {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    // Trigger the watchdog's expiry deterministically instead of waiting
+    // out a real deadline racing the Builder's genuinely-hung turn.
+    // Order-independent by construction (see `ManualIdleWatchdogGate`'s
+    // doc comment) — no extra synchronization needed before expiring.
+    gate.expireCurrentArm()
+
+    for _ in 0..<500 where model.workflow(for: managerID)?.pauseReason?.contains("stalled") != true {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let stalled = try #require(model.workflow(for: managerID))
+    #expect(stalled.isPaused)
+    #expect(stalled.awaitingStallRecovery)
+    // Bounded recovery bailed without incrementing the counter further.
+    #expect(stalled.stallRecoveryAttempts == 2)
+    #expect(await runtime.respondCount == 1)
+
+    await runtime.completeHangingTurn(
+        text: "Implementation committed and tests passed."
+    )
+    for _ in 0..<500 where model.workflow(for: managerID)?.stage != .reviewing {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let advanced = try #require(model.workflow(for: managerID))
+    #expect(advanced.stage == .reviewing)
+    #expect(!advanced.isPaused)
+}
+
+/// The manager-visible "Retry" action (`ManagerWorkflowBanner`, wired to
+/// `resumeWorkflow`) must actually work on a stall pause, not just a
+/// restart pause. The participant session is still sitting at `.working` —
+/// the watchdog pauses the *workflow*, not the session — so `resumeWorkflow`
+/// must stop the wedged runtime and reset that session itself rather than
+/// handing straight to `performSend`, whose `status != .working` guard
+/// would otherwise silently swallow the retry.
+@MainActor
+@Test
+func manualRetryRedispatchesAParticipantStillStuckAtWorking() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-manual-retry-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/manual-retry-feature",
+        baseRevision: "abc123"
+    )
+    let readyPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "def456",
+        taskContext: "Ship the feature",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        testEvidenceAt: .distantFuture,
+        workingTreeSummary: "Clean"
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builderID,
+        reviewerProfileID: reviewerID,
+        publisherProfileID: publisherID
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement.",
+        workingDirectory: ownership.repositoryPath,
+        worktree: ownership
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Publish.",
+        workingDirectory: ownership.repositoryPath
+    )
+    // Recovery is already bounded out for `.building`, so the watchdog
+    // pauses without redispatching — the original hung turn is left
+    // exactly as a real exhausted-recovery pause would leave it.
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        repositoryPath: ownership.repositoryPath,
+        team: team,
+        request: "Ship the feature",
+        implementationPlan: "Implement the feature end to end.",
+        stage: .building,
+        branch: ownership.branch,
+        stallRecoveryAttempts: 2,
+        stallRecoveryStage: .building
+    )
+    let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    store.save(PersistedAppState(
+        profiles: [manager, builder, reviewer, publisher],
+        sessions: [
+            managerID: AgentSessionState(),
+            builderID: AgentSessionState(entries: [
+                .init(kind: .handoff, title: "Implementation brief", text: "Implement the feature end to end.")
+            ]),
+            reviewerID: AgentSessionState(),
+            publisherID: AgentSessionState()
+        ],
+        selectedBotID: builderID,
+        managerWorkflows: [managerID: workflow]
+    ))
+    // Only the first attempt hangs — a manual retry resets the bounded
+    // recovery counter (it's a deliberate, fresh attempt), so if the
+    // redispatched turn hung again too, a second *automatic* watchdog
+    // cycle could legitimately fire and redispatch a third time. Using a
+    // runtime that resolves cleanly on retry isolates this test to the one
+    // question it's asking — does the manual action redispatch at all —
+    // without racing that separate, already-covered bounded-recovery path.
+    let runtime = HangOnceThenSucceedRuntime()
+    let gate = ManualIdleWatchdogGate()
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            package: readyPackage,
+            preparedOwnership: ownership
+        ),
+        store: store,
+        idleWatchdogSleeper: { duration in await gate.sleeper(duration) }
+    )
+
+    model.send("Implement the feature", to: builderID)
+    for _ in 0..<500 where await runtime.builderAttempts < 1 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    for _ in 0..<500 where model.session(for: builderID).status != .working {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    // Trigger the watchdog's expiry deterministically instead of waiting
+    // out a real deadline racing the Builder's genuinely-hung first turn.
+    // Order-independent by construction (see `ManualIdleWatchdogGate`'s
+    // doc comment) — no extra synchronization needed before expiring.
+    gate.expireCurrentArm()
+
+    for _ in 0..<500 where model.workflow(for: managerID)?.pauseReason?.contains("stalled") != true {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let stalled = try #require(model.workflow(for: managerID))
+    #expect(stalled.isPaused)
+    #expect(stalled.awaitingStallRecovery)
+    // This is the exact hazard under test: the pause is on the *workflow*,
+    // the participant session itself is still mid-turn.
+    #expect(model.session(for: builderID).status == .working)
+    #expect(await runtime.builderAttempts == 1)
+
+    // The manager-visible retry affordance is now available for this pause.
+    model.resumeWorkflow(managerID)
+
+    for _ in 0..<500 where model.workflow(for: managerID)?.stage != .reviewing {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(await runtime.builderAttempts == 2)
+    let retried = try #require(model.workflow(for: managerID))
+    #expect(retried.stage == .reviewing)
+    #expect(!retried.isPaused)
+    #expect(!retried.awaitingStallRecovery)
+    #expect(retried.stallRecoveryAttempts == 0)
+    #expect(retried.stallRecoveryStage == nil)
+}
+
+/// The idle watchdog resets on every event, including tool output, so a
+/// slow-but-alive turn is never mistaken for a hang.
+@MainActor
+@Test
+func toolOutputEventsResetTheIdleWatchdog() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-watchdog-heartbeat-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/heartbeat-feature",
+        baseRevision: "abc123"
+    )
+    let readyPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "def456",
+        taskContext: "Ship the feature",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        testEvidenceAt: .distantFuture,
+        workingTreeSummary: "Clean"
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builderID,
+        reviewerProfileID: reviewerID,
+        publisherProfileID: publisherID
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement.",
+        workingDirectory: ownership.repositoryPath,
+        worktree: ownership
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Publish.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        repositoryPath: ownership.repositoryPath,
+        team: team,
+        request: "Ship the feature",
+        implementationPlan: "Implement the feature end to end.",
+        stage: .building,
+        branch: ownership.branch
+    )
+    let store = AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    store.save(PersistedAppState(
+        profiles: [manager, builder, reviewer, publisher],
+        sessions: [
+            managerID: AgentSessionState(),
+            builderID: AgentSessionState(entries: [
+                .init(kind: .handoff, title: "Implementation brief", text: "Implement the feature end to end.")
+            ]),
+            reviewerID: AgentSessionState(),
+            publisherID: AgentSessionState()
+        ],
+        selectedBotID: builderID,
+        managerWorkflows: [managerID: workflow]
+    ))
+    let runtime = HeartbeatingRuntime(
+        eventCount: 5,
+        gap: .milliseconds(5)
+    )
+    // The gate never resolves an arm unless the test explicitly expires it
+    // (which this test never does), so the watchdog cannot fire no matter
+    // how real event delivery is scheduled — this is what actually removes
+    // the flake, rather than tuning the gap/deadline milliseconds tighter.
+    let gate = ManualIdleWatchdogGate()
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            package: readyPackage,
+            preparedOwnership: ownership
+        ),
+        store: store,
+        idleWatchdogSleeper: { duration in await gate.sleeper(duration) }
+    )
+
+    model.send("Implement the feature", to: builderID)
+    for _ in 0..<500 where model.workflow(for: managerID)?.stage != .reviewing {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let advanced = try #require(model.workflow(for: managerID))
+    #expect(advanced.stage == .reviewing)
+    #expect(!advanced.isPaused)
+    #expect(advanced.pauseReason == nil)
+    #expect(!model.session(for: builderID).entries.contains {
+        $0.text.contains("stalled")
+    })
+    // The watchdog was armed/reset on every event the drain loop
+    // processed (each heartbeat plus the final completion) — proof it
+    // resets logically on each event, verified directly via the seam
+    // instead of by racing a real turn against a real deadline.
+    #expect(gate.armCount >= 6)
+    // The final arm is left outstanding since this test never expires it;
+    // resolve it so its continuation isn't leaked at process exit.
+    gate.finish()
+}
+
+/// A Reviewer that never reaches a terminal status — the same shape
+/// `BuilderStatusStubRuntime` already uses to avoid cascading past
+/// `.reviewing` in other tests — trips the idle watchdog, which pauses on
+/// an actionable "stalled" reason and bounds automatic recovery at two
+/// attempts. Also verifies the new stall-recovery fields round-trip through
+/// persistence, mirroring `builderHandoffRepairStateSurvivesWorkflowPersistence`.
+@MainActor
+@Test
+func stalledReviewerBoundsAutomaticRecoveryAndPausesWithStallReason() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bl00p-stalled-reviewer-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let builderID = UUID()
+    let reviewerID = UUID()
+    let publisherID = UUID()
+    let managerID = UUID()
+    let ownership = GitWorktreeOwnership(
+        ownerProfileID: builderID,
+        repositoryPath: "/tmp/project",
+        worktreePath: "/tmp/.bl00p-worktrees/project-builder",
+        branch: "bl00p/stalled-reviewer-feature",
+        baseRevision: "abc123"
+    )
+    let readyPackage = GitHandoffPackage(
+        sourceProfileID: builderID,
+        sourceName: "Builder",
+        repositoryPath: ownership.repositoryPath,
+        worktreePath: ownership.worktreePath,
+        branch: ownership.branch,
+        baseRevision: ownership.baseRevision,
+        headRevision: "def456",
+        taskContext: "Ship the feature",
+        testStatus: .passed,
+        testSummary: "`swift test` — passed",
+        testEvidenceAt: .distantFuture,
+        workingTreeSummary: "Clean"
+    )
+    let team = ManagerTeamConfiguration(
+        builderProfileID: builderID,
+        reviewerProfileID: reviewerID,
+        publisherProfileID: publisherID
+    )
+    let manager = BotProfile(
+        id: managerID,
+        name: "Manager",
+        provider: .codex,
+        role: .manager,
+        instructions: "Coordinate.",
+        managerTeam: team
+    )
+    let builder = BotProfile(
+        id: builderID,
+        name: "Builder",
+        provider: .claude,
+        role: .builder,
+        instructions: "Implement.",
+        workingDirectory: ownership.repositoryPath,
+        worktree: ownership
+    )
+    let reviewer = BotProfile(
+        id: reviewerID,
+        name: "Reviewer",
+        provider: .codex,
+        role: .reviewer,
+        instructions: "Review.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let publisher = BotProfile(
+        id: publisherID,
+        name: "Documenter",
+        provider: .claude,
+        role: .publisher,
+        instructions: "Publish.",
+        workingDirectory: ownership.repositoryPath
+    )
+    let workflow = ManagerWorkflow(
+        managerProfileID: managerID,
+        repositoryPath: ownership.repositoryPath,
+        team: team,
+        request: "Ship the feature",
+        implementationPlan: "Implement the feature end to end.",
+        stage: .building,
+        branch: ownership.branch
+    )
+    let stateFileURL = directory.appendingPathComponent("state.json")
+    let store = AppStateStore(fileURL: stateFileURL)
+    store.save(PersistedAppState(
+        profiles: [manager, builder, reviewer, publisher],
+        sessions: [
+            managerID: AgentSessionState(),
+            builderID: AgentSessionState(entries: [
+                .init(kind: .handoff, title: "Implementation brief", text: "Implement the feature end to end.")
+            ]),
+            reviewerID: AgentSessionState(),
+            publisherID: AgentSessionState()
+        ],
+        selectedBotID: builderID,
+        managerWorkflows: [managerID: workflow]
+    ))
+    let runtime = BuilderStatusStubRuntime(builderFinalStatus: .completed)
+    let gate = ManualIdleWatchdogGate()
+    let model = AppModel(
+        runtime: runtime,
+        worktrees: StubWorktreeManager(
+            package: readyPackage,
+            preparedOwnership: ownership
+        ),
+        store: store,
+        idleWatchdogSleeper: { duration in await gate.sleeper(duration) }
+    )
+
+    model.send("Implement the feature", to: builderID)
+    // The Reviewer never reaches a terminal status
+    // (`BuilderStatusStubRuntime`'s non-builder path stays open at
+    // `.working`), so only the idle watchdog resolves each of its turns.
+    // Trigger three expiries deterministically — the original stall plus
+    // the two bounded-recovery redispatches — instead of waiting out three
+    // real watchdog deadlines. Each redispatch goes through a fresh
+    // launch+respond turn, so wait for both the new `respond()` call and
+    // the session settling back at `.working` before expiring the next one.
+    for expectedReviewerCalls in 1...3 {
+        for _ in 0..<500
+        where await runtime.calls.filter({ $0 == .reviewer }).count < expectedReviewerCalls {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        for _ in 0..<500 where model.session(for: reviewerID).status != .working {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        // Order-independent by construction (see `ManualIdleWatchdogGate`'s
+        // doc comment) — no extra synchronization needed before expiring.
+        gate.expireCurrentArm()
+    }
+    for _ in 0..<500
+    where model.workflow(for: managerID)?.pauseReason?.contains("appears stalled") != true {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let stalled = try #require(model.workflow(for: managerID))
+    #expect(stalled.stage == .reviewing)
+    #expect(stalled.isPaused)
+    #expect(stalled.awaitingStallRecovery)
+    #expect(stalled.stallRecoveryAttempts == 2)
+    #expect(stalled.stallRecoveryStage == .reviewing)
+    #expect(stalled.pauseReason?.contains("appears stalled") == true)
+    // The original turn plus two bounded recovery redispatches — a third
+    // stall does not trigger a further redispatch once bounded out.
+    let reviewerCalls = await runtime.calls.filter { $0 == .reviewer }.count
+    #expect(reviewerCalls == 3, "expected 3 reviewer calls, got \(reviewerCalls)")
+
+    // Persistence round-trip: the stall-recovery state must survive a
+    // relaunch, not just live in memory.
+    await model.flushPersistence()
+    guard let persisted = AppStateStore(fileURL: stateFileURL).load() else {
+        Issue.record("Expected persisted state to be loadable.")
+        return
+    }
+    let reloaded = try #require(persisted.managerWorkflows[managerID])
+    #expect(reloaded.stallRecoveryAttempts == 2)
+    #expect(reloaded.stallRecoveryStage == .reviewing)
+    #expect(reloaded.awaitingStallRecovery)
+    #expect(reloaded.isPaused)
 }
 
 @MainActor
@@ -9833,6 +10684,75 @@ func permissionDenialsProduceAReadableAttentionState() throws {
 }
 
 @Test
+func managerDenialsAreSuppressedWhenAPlanWasProduced() throws {
+    let denial = try JSONDecoder().decode(
+        JSONValue.self,
+        from: Data(
+            """
+            {
+              "tool_name": "Bash",
+              "tool_input": {
+                "description": "Check the PR",
+                "command": "gh pr view 123"
+              }
+            }
+            """.utf8
+        )
+    )
+
+    #expect(
+        ClaudeTurnOutcome.permissionDenialsRequiringAttention(
+            [denial],
+            role: .manager,
+            responses: ["Here is the implementation plan..."]
+        ).isEmpty
+    )
+    #expect(
+        ClaudeTurnOutcome.status(
+            failed: false,
+            permissionDenials: ClaudeTurnOutcome.permissionDenialsRequiringAttention(
+                [denial],
+                role: .manager,
+                responses: ["Here is the implementation plan..."]
+            )
+        ) == .completed
+    )
+}
+
+@Test
+func managerDenialsArePreservedWhenNoPlanWasProduced() throws {
+    let denial = try JSONDecoder().decode(
+        JSONValue.self,
+        from: Data(
+            """
+            {
+              "tool_name": "Bash",
+              "tool_input": {
+                "description": "Check the PR",
+                "command": "gh pr view 123"
+              }
+            }
+            """.utf8
+        )
+    )
+
+    #expect(
+        ClaudeTurnOutcome.permissionDenialsRequiringAttention(
+            [denial],
+            role: .manager,
+            responses: ["", "   "]
+        ) == [denial]
+    )
+    #expect(
+        ClaudeTurnOutcome.permissionDenialsRequiringAttention(
+            [denial],
+            role: .manager,
+            responses: []
+        ) == [denial]
+    )
+}
+
+@Test
 func permissionDenialsAreDeduplicatedByUnderlyingAction() throws {
     let denials = try JSONDecoder().decode(
         [JSONValue].self,
@@ -11487,9 +12407,11 @@ private actor RecoveredApprovalRuntime: AgentRuntime {
         if profile.role == .builder {
             builderDispatchCount += 1
         }
+        // Left open at `.working` rather than finished — see
+        // `SuspendedWorkflowRuntime` for why a genuinely-in-flight stub must
+        // not finish its stream.
         return AsyncStream { continuation in
             continuation.yield(.status(.working))
-            continuation.finish()
         }
     }
 
@@ -11926,6 +12848,436 @@ private actor BuilderStatusStubRuntime: AgentRuntime {
     func stop(profile: BotProfile) async {}
 }
 
+/// Every turn's stream finishes without ever reporting a terminal status —
+/// simulates a runtime bug or disconnect that stream-end reconciliation must
+/// catch.
+private actor NonTerminalOnceRuntime: AgentRuntime {
+    func start(
+        profile: BotProfile,
+        resumeThreadID: String?
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(
+                .sessionID(resumeThreadID ?? "session-\(profile.id.uuidString)")
+            )
+            continuation.yield(.status(.needsAnswer))
+            continuation.finish()
+        }
+    }
+
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(.status(.working))
+            continuation.yield(
+                .entry(.init(kind: .assistant, text: "Partial output before disconnect."))
+            )
+            continuation.finish()
+        }
+    }
+
+    func resolveApproval(
+        entryID: UUID,
+        approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func stop(profile: BotProfile) async {}
+}
+
+/// The Builder's first turn stream finishes without a terminal status; its
+/// second turn (the redispatch bounded recovery triggers) completes
+/// normally. Non-builder roles are left mid-turn, deliberately never
+/// reaching a terminal status — matching `BuilderStatusStubRuntime`'s
+/// convention — so the workflow doesn't cascade past `.reviewing`, the
+/// state under test. Verifies that reconciliation + bounded recovery can
+/// carry a workflow through a one-off disconnect without a manual resume.
+private actor NonTerminalThenSuccessRuntime: AgentRuntime {
+    private(set) var builderAttempts = 0
+
+    func start(
+        profile: BotProfile,
+        resumeThreadID: String?
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(
+                .sessionID(resumeThreadID ?? "session-\(profile.id.uuidString)")
+            )
+            continuation.yield(.status(.needsAnswer))
+            continuation.finish()
+        }
+    }
+
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        guard profile.role == .builder else {
+            return AsyncStream { continuation in
+                continuation.yield(.status(.working))
+            }
+        }
+        builderAttempts += 1
+        let isFirstAttempt = builderAttempts == 1
+        return AsyncStream { continuation in
+            continuation.yield(.status(.working))
+            if isFirstAttempt {
+                continuation.finish()
+                return
+            }
+            continuation.yield(
+                .entry(.init(kind: .assistant, text: "Implementation committed and tests passed."))
+            )
+            continuation.yield(.status(.completed))
+            continuation.finish()
+        }
+    }
+
+    func resolveApproval(
+        entryID: UUID,
+        approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func stop(profile: BotProfile) async {}
+}
+
+/// Every turn hangs on `.working` until the test explicitly resolves it via
+/// `completeHangingTurn`, letting a test assert on a turn that is stalled —
+/// but not actually dead — for as long as it needs to.
+private actor ControllableHangRuntime: AgentRuntime {
+    private var continuation: AsyncStream<AgentEvent>.Continuation?
+    private(set) var respondCount = 0
+
+    func start(
+        profile: BotProfile,
+        resumeThreadID: String?
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(
+                .sessionID(resumeThreadID ?? "session-\(profile.id.uuidString)")
+            )
+            continuation.yield(.status(.needsAnswer))
+            continuation.finish()
+        }
+    }
+
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        respondCount += 1
+        let pair = AsyncStream.makeStream(of: AgentEvent.self)
+        continuation = pair.continuation
+        pair.continuation.yield(.status(.working))
+        return pair.stream
+    }
+
+    func resolveApproval(
+        entryID: UUID,
+        approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func stop(profile: BotProfile) async {}
+
+    func completeHangingTurn(text: String) {
+        continuation?.yield(.entry(.init(kind: .assistant, text: text)))
+        continuation?.yield(.status(.completed))
+        continuation?.finish()
+        continuation = nil
+    }
+}
+
+/// The Builder's first turn hangs on `.working` forever; its second turn
+/// (and any other role's turn) completes immediately. Non-builder roles
+/// complete rather than hang — matching `NonTerminalThenSuccessRuntime` and
+/// `BuilderStatusStubRuntime`'s convention — only because they need not to
+/// cascade the workflow past the state under test; per-role, not global,
+/// attempt tracking is what actually matters here: unlike
+/// `ControllableHangRuntime`, this needs no manual resolution and cannot
+/// itself re-stall, so a test can assert a single redispatch landed without
+/// racing a second bounded recovery cycle if the retried turn also hung.
+private actor HangOnceThenSucceedRuntime: AgentRuntime {
+    private(set) var respondCount = 0
+    private(set) var builderAttempts = 0
+
+    func start(
+        profile: BotProfile,
+        resumeThreadID: String?
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(
+                .sessionID(resumeThreadID ?? "session-\(profile.id.uuidString)")
+            )
+            continuation.yield(.status(.needsAnswer))
+            continuation.finish()
+        }
+    }
+
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        respondCount += 1
+        guard profile.role == .builder else {
+            // Left mid-turn deliberately, like `BuilderStatusStubRuntime`
+            // and `NonTerminalThenSuccessRuntime` — completing the Reviewer
+            // here would cascade the workflow into a revision pass, past
+            // `.reviewing`, the state under test.
+            return AsyncStream { continuation in
+                continuation.yield(.status(.working))
+            }
+        }
+        builderAttempts += 1
+        let isFirstAttempt = builderAttempts == 1
+        return AsyncStream { continuation in
+            continuation.yield(.status(.working))
+            guard !isFirstAttempt else { return }
+            continuation.yield(
+                .entry(.init(kind: .assistant, text: "Implementation committed and tests passed."))
+            )
+            continuation.yield(.status(.completed))
+            continuation.finish()
+        }
+    }
+
+    func resolveApproval(
+        entryID: UUID,
+        approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func stop(profile: BotProfile) async {}
+}
+
+/// Emits a burst of assistant entries spaced well under the watchdog
+/// deadline, then completes — the whole turn runs far longer than the
+/// deadline, but no single gap between events does.
+private actor HeartbeatingRuntime: AgentRuntime {
+    private let eventCount: Int
+    private let gap: Duration
+
+    init(eventCount: Int, gap: Duration) {
+        self.eventCount = eventCount
+        self.gap = gap
+    }
+
+    func start(
+        profile: BotProfile,
+        resumeThreadID: String?
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(
+                .sessionID(resumeThreadID ?? "session-\(profile.id.uuidString)")
+            )
+            continuation.yield(.status(.needsAnswer))
+            continuation.finish()
+        }
+    }
+
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        let pair = AsyncStream.makeStream(of: AgentEvent.self)
+        pair.continuation.yield(.status(.working))
+        let eventCount = eventCount
+        let gap = gap
+        Task {
+            for index in 0..<eventCount {
+                try? await Task.sleep(for: gap)
+                pair.continuation.yield(
+                    .entry(.init(kind: .assistant, text: "Working step \(index)."))
+                )
+            }
+            pair.continuation.yield(
+                .entry(.init(kind: .assistant, text: "Implementation committed and tests passed."))
+            )
+            pair.continuation.yield(.status(.completed))
+            pair.continuation.finish()
+        }
+        return pair.stream
+    }
+
+    func resolveApproval(
+        entryID: UUID,
+        approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func stop(profile: BotProfile) async {}
+}
+
+/// Test-only seam plugged into `AppModel`'s `idleWatchdogSleeper` in place
+/// of a real `Task.sleep`. Every arm of the watchdog (`armIdleWatchdog`)
+/// calls `sleeper(_:)`, which blocks until the test explicitly resolves it
+/// via `expireCurrentArm()` — so a test can assert on how many times the
+/// watchdog was armed/reset (`armCount`) and trigger expiry deterministically,
+/// instead of racing a real wall-clock deadline against real event delivery.
+///
+/// `armIdleWatchdog` always cancels the previous arm's `Task` before
+/// starting a new one, so only the most recently stored continuation is
+/// ever meaningfully awaited; resolving the previous one when a new arm
+/// comes in just lets that already-cancelled `Task` fall through its
+/// `guard !Task.isCancelled` check harmlessly, avoiding a leaked
+/// continuation.
+///
+/// A caller observes a session settling at `.working`/`.launching` and
+/// only then calls `expireCurrentArm()` — but `performSend` re-arms the
+/// watchdog on *every* qualifying event, not just once: a single launch
+/// can cancel-and-recreate the arm several times in a row (once per
+/// launch-stream event, then again for the first response event) before
+/// settling on the one that will genuinely hang. Polling for the arm
+/// count to "settle" is still a wall-clock guess about when the dust has
+/// stopped — it narrows the window but doesn't close it. What actually
+/// closes it is `withTaskCancellationHandler`: Swift guarantees its
+/// `onCancel` handler runs the instant `Task.cancel()` is called — on
+/// the cancelling thread, synchronously with that call, not on some
+/// later scheduling pass — so an arm's own cancellation can clear this
+/// gate's state in lockstep with `armIdleWatchdog` cancelling its `Task`,
+/// with no timing gap for a test to race.
+///
+/// All state is protected by a plain lock rather than actor isolation
+/// specifically because `onCancel` must be synchronous and non-isolated
+/// — an actor hop here would reintroduce exactly the scheduling gap this
+/// is meant to close. Each arm gets a unique id; `currentArmID` and
+/// `currentContinuation` are always mutated together, atomically, so
+/// `expireCurrentArm()` never has to guess whether what it sees is live:
+///
+/// - If an arm has registered, `currentContinuation` is resumed directly.
+/// - If no arm has registered yet (nil), `pendingExpiry` is set and
+///   consumed by whichever arm's `sleeper(_:)` call registers next —
+///   there is always exactly one "next" registration for the turn under
+///   test, since the runtime doubles in this file deliberately stop
+///   producing events at the point being tested.
+/// - An arm that is already cancelled by the time it would register
+///   (checked via `Task.isCancelled` inside the same locked step)
+///   resolves itself immediately instead of becoming a stale `current`.
+/// - An arm that gets cancelled *after* registering is cleaned up by
+///   `onCancel`, synchronously, before `armIdleWatchdog`'s cancelling
+///   call even returns — so a subsequent `expireCurrentArm()` can never
+///   observe a dangling registration from an arm that's already dead.
+private final class ManualIdleWatchdogGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var nextArmID = 0
+    private var armCountStorage = 0
+    private var currentArmID: Int?
+    private var currentContinuation: CheckedContinuation<Void, Never>?
+    private var pendingExpiry = false
+
+    // `lock.lock()`/`unlock()` are only usable from synchronous, non-async
+    // scopes (the compiler flags them directly inside `async` functions —
+    // deliberately, since a suspension while holding a raw lock is a real
+    // hazard in general). None of these helpers ever suspend internally, so
+    // each is a plain sync method; `sleeper(_:)` below is the only place
+    // that's actually `async`, and it never calls the lock directly itself.
+
+    var armCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return armCountStorage
+    }
+
+    private func beginArm() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        armCountStorage += 1
+        nextArmID += 1
+        return nextArmID
+    }
+
+    private func registerOrResolveImmediately(
+        armID: Int,
+        continuation: CheckedContinuation<Void, Never>
+    ) {
+        lock.lock()
+        // Check cancellation first: a cancelled arm must resolve itself
+        // without touching `pendingExpiry`, otherwise it would steal an
+        // expiry intended for its live successor, leaving that successor
+        // to suspend forever once it registers and finds pendingExpiry
+        // already consumed.
+        if Task.isCancelled {
+            lock.unlock()
+            continuation.resume()
+            return
+        }
+        if pendingExpiry {
+            pendingExpiry = false
+            lock.unlock()
+            continuation.resume()
+            return
+        }
+        currentArmID = armID
+        currentContinuation = continuation
+        lock.unlock()
+    }
+
+    private func resolveIfStillCurrent(armID: Int) {
+        lock.lock()
+        if currentArmID == armID, let stale = currentContinuation {
+            currentContinuation = nil
+            currentArmID = nil
+            lock.unlock()
+            stale.resume()
+        } else {
+            lock.unlock()
+        }
+    }
+
+    func sleeper(_ duration: Duration) async {
+        let armID = beginArm()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                registerOrResolveImmediately(armID: armID, continuation: continuation)
+            }
+        } onCancel: {
+            self.resolveIfStillCurrent(armID: armID)
+        }
+    }
+
+    /// Resolves whichever arm is currently outstanding, simulating its
+    /// idle deadline elapsing right now. If no arm has registered yet,
+    /// records the expiry so the next arm to register resolves instantly
+    /// instead of suspending — order-independent by construction, not by
+    /// timing: see the type-level doc comment.
+    func expireCurrentArm() {
+        lock.lock()
+        if let live = currentContinuation {
+            currentContinuation = nil
+            currentArmID = nil
+            lock.unlock()
+            live.resume()
+        } else {
+            pendingExpiry = true
+            lock.unlock()
+        }
+    }
+
+    /// Resolves any still-outstanding continuation so a test that never
+    /// calls `expireCurrentArm()` on its final arm doesn't leak it.
+    func finish() {
+        expireCurrentArm()
+    }
+}
+
 /// Simulates a Builder that ends its first turn `.blocked`, then reaches a
 /// second terminal status purely via an approval resolution rather than a
 /// new explicit chat message — the self-healing retry path.
@@ -12120,9 +13472,13 @@ private actor SuspendedWorkflowRuntime: AgentRuntime {
                 workingDirectory: profile.runtimeWorkingDirectory
             )
         )
+        // Deliberately left open at `.working`, not finished: this stub
+        // represents a turn genuinely still in flight. Finishing the stream
+        // here would (correctly) trip stream-end reconciliation and trigger
+        // an unwanted extra redispatch — these tests assert on the single
+        // delivered call, not on turn completion.
         return AsyncStream { continuation in
             continuation.yield(.status(.working))
-            continuation.finish()
         }
     }
 

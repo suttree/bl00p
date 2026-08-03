@@ -422,6 +422,13 @@ actor GitWorktreeManager: GitWorktreeManaging {
     /// intermittently on Linux's swift-corelibs-foundation; the other used
     /// `DispatchGroup.notify(queue: .global())` for the final wait, still a
     /// shared pool.)
+    /// bl00p's own plumbing (`rev-parse`, `worktree add/list/remove`,
+    /// `status`, `show-ref`, `branch`, …) must never trigger the target
+    /// repository's hooks: a `post-checkout` hook that shells out to a tool
+    /// absent from bl00p's launch-time `PATH` (e.g. `mise`) would otherwise
+    /// fail `git worktree add` and abort worktree preparation entirely.
+    private static let hookBypassArguments = ["-c", "core.hooksPath=/dev/null"]
+
     private func git(
         _ arguments: [String],
         in directory: URL,
@@ -431,7 +438,7 @@ actor GitWorktreeManager: GitWorktreeManaging {
         let standardOutput = Pipe()
         let standardError = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = arguments
+        process.arguments = Self.hookBypassArguments + arguments
         process.currentDirectoryURL = directory
         process.standardOutput = standardOutput
         process.standardError = standardError

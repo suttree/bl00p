@@ -630,6 +630,17 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     /// Set when the revision round limit is reached. Cleared when the workflow
     /// is resumed so the automatic revision loop gets a fresh bounded budget.
     var revisionLimitReached: Bool
+    /// Set when this workflow is paused because its active participant's
+    /// turn idled past the stall watchdog deadline. Lets a late terminal
+    /// status from that same turn — one bounded auto-recovery couldn't
+    /// preempt — still resolve the pause instead of wedging it, mirroring
+    /// `awaitingBuilderHandoffRetry` but across every stage.
+    var awaitingStallRecovery: Bool
+    /// Persisted bounded-recovery counter for the idle-turn watchdog. Reset
+    /// whenever the stalled stage differs from the last recovery attempt, so
+    /// retries are bounded per stage rather than across the whole workflow.
+    var stallRecoveryAttempts: Int
+    var stallRecoveryStage: ManagerWorkflowStage?
     var startedAt: Date
     var updatedAt: Date
     var participantSessionIDs: [AgentRole: UUID]
@@ -662,6 +673,9 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         builderHandoffRepairAttempts: Int = 0,
         builderHandoffRepairPass: BuilderHandoffRepairPass? = nil,
         revisionLimitReached: Bool = false,
+        awaitingStallRecovery: Bool = false,
+        stallRecoveryAttempts: Int = 0,
+        stallRecoveryStage: ManagerWorkflowStage? = nil,
         startedAt: Date = .now,
         updatedAt: Date = .now,
         participantSessionIDs: [AgentRole: UUID] = [:]
@@ -693,6 +707,9 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         self.builderHandoffRepairAttempts = builderHandoffRepairAttempts
         self.builderHandoffRepairPass = builderHandoffRepairPass
         self.revisionLimitReached = revisionLimitReached
+        self.awaitingStallRecovery = awaitingStallRecovery
+        self.stallRecoveryAttempts = stallRecoveryAttempts
+        self.stallRecoveryStage = stallRecoveryStage
         self.startedAt = startedAt
         self.updatedAt = updatedAt
         self.participantSessionIDs = participantSessionIDs
@@ -708,6 +725,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         case latestHandoff, reviewSummary, revisionStartedAt
         case isPaused, pauseReason, awaitingBuilderHandoffRetry
         case builderHandoffRepairAttempts, builderHandoffRepairPass, revisionLimitReached
+        case awaitingStallRecovery, stallRecoveryAttempts, stallRecoveryStage
         case startedAt, updatedAt, participantSessionIDs
     }
 
@@ -785,6 +803,18 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
             Bool.self,
             forKey: .revisionLimitReached
         ) ?? false
+        awaitingStallRecovery = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .awaitingStallRecovery
+        ) ?? false
+        stallRecoveryAttempts = try container.decodeIfPresent(
+            Int.self,
+            forKey: .stallRecoveryAttempts
+        ) ?? 0
+        stallRecoveryStage = try container.decodeIfPresent(
+            ManagerWorkflowStage.self,
+            forKey: .stallRecoveryStage
+        )
         startedAt = try container.decode(Date.self, forKey: .startedAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
         participantSessionIDs = try container.decodeIfPresent(

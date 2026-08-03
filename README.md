@@ -199,6 +199,11 @@ persisted workflow with this sequence:
 7. bl00p completes the workflow directly from the recorded branch, test
    evidence, Reviewer result, Documenter summary, and draft PR URL.
 
+If a Claude Manager's planning turn produces a plan but also records denied
+read-only inspection commands, bl00p still presents the plan for approval
+instead of pausing the workflow behind a generic blocked state. Missing plan
+text still pauses the workflow normally.
+
 The Manager transcript presents each completed stage as a compact status card
 instead of copying the participant's full response. Builder, revision, Reviewer,
 and Documenter / PR Writer cards show the role outcome with a bounded summary

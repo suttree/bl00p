@@ -138,6 +138,14 @@ push, or publish in either mode. `allowedTools(for:)` intentionally keeps
 shell access out of the Manager's preapproved tool list so these requests keep
 flowing through the runtime policy. Codex Managers remain read-only.
 
+If a Claude Manager finishes the planning turn with non-empty plan text, any
+permission denials from read-only inspection commands are treated as
+non-blocking workflow noise rather than an actionable blocked state. This
+keeps the produced plan on the normal approval path instead of replacing it
+with a generic blocked pause. A planning turn with no non-empty assistant
+response still pauses as incomplete, so missing plans are not silently treated
+as approved-ready output.
+
 The persisted workflow stores the implementation plan and the ID of its
 approval timeline entry. The session stores the corresponding pending
 approval card with the title
@@ -182,6 +190,8 @@ The model tests covering these invariants include:
 - `relaunchDoesNotTurnARuntimeApprovalIntoAPlanApproval`
 - `relaunchAdoptsAPlanApprovalCardWhoseWorkflowIDWasNotSaved`
 - `relaunchDoesNotRestoreIncompleteOrResolvedManagerPlans`
+- `managerDenialsAreSuppressedWhenAPlanWasProduced`
+- `managerDenialsArePreservedWhenNoPlanWasProduced`
 
 The Builder handoff readiness gate is covered by:
 
@@ -213,6 +223,43 @@ Run the complete suite with:
 ```sh
 xcrun swift test --disable-sandbox
 ```
+
+For the stalled-workflow watchdog coverage specifically, run the exact
+watchdog tests by name rather than the broad `stalled` filter, which also
+matches unrelated `installed...` tests:
+
+```sh
+xcrun swift test --disable-sandbox \
+  --filter stalledBuilderResolvesViaBypassWhenBoundedRecoveryIsExhausted
+xcrun swift test --disable-sandbox \
+  --filter manualRetryRedispatchesAParticipantStillStuckAtWorking
+xcrun swift test --disable-sandbox \
+  --filter stalledReviewerBoundsAutomaticRecoveryAndPausesWithStallReason
+xcrun swift test --disable-sandbox \
+  --filter toolOutputEventsResetTheIdleWatchdog
+
+xcrun swift test --disable-sandbox --no-parallel \
+  --filter stalledBuilderResolvesViaBypassWhenBoundedRecoveryIsExhausted
+xcrun swift test --disable-sandbox --no-parallel \
+  --filter manualRetryRedispatchesAParticipantStillStuckAtWorking
+xcrun swift test --disable-sandbox --no-parallel \
+  --filter stalledReviewerBoundsAutomaticRecoveryAndPausesWithStallReason
+xcrun swift test --disable-sandbox --no-parallel \
+  --filter toolOutputEventsResetTheIdleWatchdog
+```
+
+## Managed worktree setup
+
+`GitWorktreeManager` must treat repository worktrees as isolated automation
+state, not as an interactive developer shell. Its internal git plumbing
+commands therefore force `core.hooksPath=/dev/null` so repository hooks such
+as `post-checkout` cannot break `worktree add`, cleanup, or status checks by
+depending on tools that are absent from bl00p's launch environment.
+
+This hook bypass is intentionally scoped to bl00p's own repository-management
+commands. It does not change the environment inside a prepared worktree when a
+Builder, Reviewer, or Documenter session later runs normal project commands.
+Keep that distinction intact if worktree setup is refactored.
 ## Structured evidence and automatic repair
 
 Builder-to-Reviewer handoffs require a new local commit, a clean worktree,
@@ -274,3 +321,85 @@ Negative coverage for unrelated pause reasons remains in the Builder handoff
 repair tests above: those resumes must not reset `revisionRounds` or clear
 `revisionLimitReached` unless the workflow had specifically paused because the
 revision cap was reached.
+
+## Turn supervision & stall recovery
+
+`AppModel.handleWorkflowStatus` only advances or pauses a workflow in
+response to a *status transition*. Without a backstop, a participant turn
+that never reports a terminal status leaves the workflow silently wedged on
+`working`/`launching` forever — the symptom is "the sub agent looks stuck and
+the whole managed workflow stops progressing." Two mechanisms guarantee that
+every participant turn in a non-completed workflow resolves into either an
+advance/handoff or a visible, resumable pause — never a silent wedge.
+
+**Stream-end reconciliation.** All three drain sites (the launch handshake,
+the turn-response loop, and the shared `consume` lifecycle channel in
+`AppModel`) route their natural stream-end through
+`reconcileNonTerminalStreamEnd`. If the stream finishes while its generation
+is still current and the session status is still `working`/`launching`, it
+synthesizes `.status(.failed)` with a system entry ("Agent ended without
+reporting a result") so the normal pause machinery in `handleWorkflowStatus`
+always runs, and then attempts bounded recovery. This covers a runtime bug or
+a disconnect where the transport closes without ever reporting a result.
+
+**Idle watchdog.** A transport that stays open but stops emitting events (a
+hung subprocess — the same class of bug fixed by the `git-subprocess-deadlock`
+commits) never trips stream-end reconciliation, since the stream never ends.
+`armIdleWatchdog` / `refreshIdleWatchdog` track a per-session idle deadline
+(`AppModel.stallIdleDeadline`, four minutes by default, injectable for tests)
+that resets on every event the drain loops process — including tool output —
+so a long-running test suite is never mistaken for a hang. The watchdog is
+scoped to workflow participants only (`containingManagerWorkflowID`);
+standalone chats are unaffected. On expiry, `handleIdleWatchdogExpiry` pauses
+the workflow with an actionable reason ("`<role>` appears stalled — no
+activity for N min") and attempts bounded recovery.
+
+The watchdog's test seam is `ManualIdleWatchdogGate` in
+`Tests/Bl00pTests/ModelTests.swift`. Keep it order-independent: tests must be
+able to request expiry before or after the next arm registers, and a cancelled
+arm must not consume a pending expiry that belongs to its live successor.
+Those tests intentionally drive expiry through the seam instead of waiting on
+wall-clock deadlines so watchdog coverage stays deterministic in normal,
+parallel, and release workflow runs.
+
+**Bounded auto-recovery.** `attemptStallRecovery` stops the wedged runtime,
+resets the stalled session out of `working`/`launching` (without routing
+through `apply`/`handleWorkflowStatus`, since that would re-announce and
+re-pause the workflow being recovered), and redispatches the same stage —
+restoring the pending git handoff first if the stage needs one
+(`restoreWorkflowHandoffIfNeeded`, shared with manual `resumeWorkflow`).
+Recovery is bounded per stalled stage via
+`ManagerWorkflow.stallRecoveryStage`/`stallRecoveryAttempts`: the counter
+resets only when the workflow has genuinely moved to a different stage, not
+merely because a redispatched turn reports `working` again, so retries cannot
+loop indefinitely on one stuck stage. State is persisted before the redispatch
+so a relaunch mid-recovery cannot duplicate a turn.
+
+`ManagerWorkflow.awaitingStallRecovery` generalizes the existing
+`awaitingBuilderHandoffRetry` bypass in `handleWorkflowStatus`: while set, a
+stall-paused workflow is re-evaluated on the *next* terminal status from its
+active participant, across every stage — not just `building`/`revising`
+`completed`/`blocked`. This covers the case where bounded recovery could not
+act (attempts exhausted, or the handoff could not be restored) but the
+original turn was not actually dead and later reports its own real result;
+that result still resolves the pause instead of requiring a manual retry.
+The flag is cleared by `resumeWorkflowIndicator`, alongside
+`awaitingBuilderHandoffRetry`, once the workflow shows real forward progress.
+
+Manual recovery still works through the same shared redispatch path: sending
+any message directly to the paused participant
+(`resumeWorkflowsForExplicitSend`) or using the manager banner action clears
+the pause before redispatching, independent of the automatic path. The banner
+shows `Resume` for an app-restart recovery (`resumeAvailableAfterRestart`) and
+`Retry` for a stalled participant (`awaitingStallRecovery`), matching the
+user-visible intent in each case.
+
+Runtime-level hardening (making `ClaudeRuntime`/`CodexAppServerRuntime`
+`stop()` always emit a terminal status) was considered but deliberately
+scoped out: both runtimes reuse the same continuation/generation across a
+`start()`-triggered self-stop and an explicit relaunch, so an unconditional
+terminal-status emission there risks racing a live drain loop into an
+incorrect `stopped` status mid-relaunch. `AppModel`-level reconciliation and
+the idle watchdog are the primary mechanism and already cover both runtimes
+uniformly; revisit runtime-level emission only alongside a broader
+continuation-lifecycle refactor.
