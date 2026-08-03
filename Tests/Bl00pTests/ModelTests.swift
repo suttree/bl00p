@@ -11397,6 +11397,54 @@ func failedMessageCanRetryInPlaceWithItsAttachments() async throws {
 
 @MainActor
 @Test
+func staleFailedTurnCannotReconcileAfterRetryStarts() async throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(
+            "bl00p-stale-retry-\(UUID().uuidString)",
+            isDirectory: true
+        )
+    let runtime = CoordinatedRetryRuntime()
+    let model = AppModel(
+        runtime: runtime,
+        store: AppStateStore(fileURL: directory.appendingPathComponent("state.json"))
+    )
+    let profileID = try #require(model.profiles.dropFirst().first?.id)
+    #expect(model.setRepositoryPath("/tmp", for: profileID))
+
+    model.send("Retry without stale reconciliation", to: profileID)
+    for _ in 0..<30 where model.session(for: profileID).status != .failed {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let entryID = try #require(
+        model.session(for: profileID).entries.first(where: { $0.kind == .user })?.id
+    )
+    #expect(model.session(for: profileID).status == .failed)
+    #expect(model.session(for: profileID).entries.first?.deliveryFailed == true)
+
+    model.retry(entryID, for: profileID)
+    for _ in 0..<30 where await runtime.responseCount < 2 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(await runtime.responseCount == 2)
+
+    await runtime.finishFailedResponse()
+    try await Task.sleep(for: .milliseconds(50))
+    #expect(model.session(for: profileID).status == .launching)
+    #expect(model.session(for: profileID).entries.first?.deliveryFailed != true)
+
+    await runtime.completeRetry()
+    for _ in 0..<30 where model.session(for: profileID).status != .completed {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(model.session(for: profileID).status == .completed)
+    #expect(model.session(for: profileID).entries.first?.deliveryFailed != true)
+    try? FileManager.default.removeItem(at: directory)
+}
+
+@MainActor
+@Test
 func pendingQuestionAndApprovalStatesBlockFailedMessageRetry() async throws {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent(
@@ -13734,6 +13782,65 @@ private actor FailOnceRuntime: AgentRuntime {
     }
 
     func stop(profile: BotProfile) async {}
+}
+
+private actor CoordinatedRetryRuntime: AgentRuntime {
+    private var failedResponseContinuation: AsyncStream<AgentEvent>.Continuation?
+    private var retryContinuation: AsyncStream<AgentEvent>.Continuation?
+    private(set) var responseCount = 0
+
+    func start(
+        profile: BotProfile,
+        resumeThreadID: String?
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { continuation in
+            continuation.yield(
+                .sessionID(resumeThreadID ?? "coordinated-retry-\(profile.id.uuidString)")
+            )
+            continuation.yield(.status(.needsAnswer))
+            continuation.finish()
+        }
+    }
+
+    func respond(
+        to message: String,
+        attachments: [ImageAttachment],
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        responseCount += 1
+        let pair = AsyncStream.makeStream(of: AgentEvent.self)
+        if responseCount == 1 {
+            failedResponseContinuation = pair.continuation
+            pair.continuation.yield(.status(.failed))
+        } else {
+            retryContinuation = pair.continuation
+        }
+        return pair.stream
+    }
+
+    func resolveApproval(
+        entryID: UUID,
+        approved: Bool,
+        profile: BotProfile
+    ) async -> AsyncStream<AgentEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func stop(profile: BotProfile) async {}
+
+    func finishFailedResponse() {
+        failedResponseContinuation?.finish()
+        failedResponseContinuation = nil
+    }
+
+    func completeRetry() {
+        retryContinuation?.yield(
+            .entry(.init(kind: .assistant, text: "Retry succeeded"))
+        )
+        retryContinuation?.yield(.status(.completed))
+        retryContinuation?.finish()
+        retryContinuation = nil
+    }
 }
 
 #if os(macOS)
