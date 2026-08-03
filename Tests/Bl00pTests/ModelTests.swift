@@ -5118,6 +5118,9 @@ func toolOutputEventsResetTheIdleWatchdog() async throws {
     // resets logically on each event, verified directly via the seam
     // instead of by racing a real turn against a real deadline.
     #expect(await gate.armCount >= 6)
+    // The final arm is left outstanding since this test never expires it;
+    // resolve it so its continuation isn't leaked at process exit.
+    await gate.finish()
 }
 
 /// A Reviewer that never reaches a terminal status — the same shape
@@ -12989,21 +12992,49 @@ private actor HeartbeatingRuntime: AgentRuntime {
 /// comes in just lets that already-cancelled `Task` fall through its
 /// `guard !Task.isCancelled` check harmlessly, avoiding a leaked
 /// continuation.
+///
+/// A caller observes a session settling at `.working`/`.launching` and
+/// only then calls `expireCurrentArm()` — but that observation races the
+/// freshly-spawned `Task { await sleeper(deadline) }` inside
+/// `armIdleWatchdog`, which may not have reached `sleeper(_:)` yet. If
+/// `expireCurrentArm()` ran while `current` was still nil, it used to be
+/// a silent no-op and the arm would suspend forever. `pendingExpiry`
+/// makes expiry order-independent: when no arm is outstanding yet, it
+/// records the expiry so the very next `sleeper(_:)` call consumes it
+/// immediately instead of suspending.
 private actor ManualIdleWatchdogGate {
     private(set) var armCount = 0
     private var current: CheckedContinuation<Void, Never>?
+    private var pendingExpiry = false
 
     func sleeper(_ duration: Duration) async {
         armCount += 1
         current?.resume()
+        current = nil
+        if pendingExpiry {
+            pendingExpiry = false
+            return
+        }
         await withCheckedContinuation { continuation in
             current = continuation
         }
     }
 
     /// Resolves whichever arm is currently outstanding, simulating its
-    /// idle deadline elapsing right now.
+    /// idle deadline elapsing right now. If no arm has reached `sleeper(_:)`
+    /// yet, records the expiry so that arm resolves the instant it arrives.
     func expireCurrentArm() {
+        if let current {
+            current.resume()
+            self.current = nil
+        } else {
+            pendingExpiry = true
+        }
+    }
+
+    /// Resolves any still-outstanding continuation so a test that never
+    /// calls `expireCurrentArm()` on its final arm doesn't leak it.
+    func finish() {
         current?.resume()
         current = nil
     }
