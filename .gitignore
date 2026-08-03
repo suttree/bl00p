@@ -2,3 +2,4 @@
 .build/
 .swiftpm/
 .claude/settings.local.json
+issue1-manager-denials-test.patch
