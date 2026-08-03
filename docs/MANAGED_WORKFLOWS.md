@@ -295,10 +295,13 @@ that result still resolves the pause instead of requiring a manual retry.
 The flag is cleared by `resumeWorkflowIndicator`, alongside
 `awaitingBuilderHandoffRetry`, once the workflow shows real forward progress.
 
-Manual recovery still works unchanged: sending any message directly to the
-paused participant (`resumeWorkflowsForExplicitSend`) or the app-restart
-`Resume` affordance (`resumeAvailableAfterRestart`) clears the pause before
-redispatching, independent of the automatic path.
+Manual recovery still works through the same shared redispatch path: sending
+any message directly to the paused participant
+(`resumeWorkflowsForExplicitSend`) or using the manager banner action clears
+the pause before redispatching, independent of the automatic path. The banner
+shows `Resume` for an app-restart recovery (`resumeAvailableAfterRestart`) and
+`Retry` for a stalled participant (`awaitingStallRecovery`), matching the
+user-visible intent in each case.
 
 Runtime-level hardening (making `ClaudeRuntime`/`CodexAppServerRuntime`
 `stop()` always emit a terminal status) was considered but deliberately
