@@ -112,6 +112,10 @@ All notable changes to bl00p are documented in this file.
 
 ### Fixed
 
+- Make the managed-workflow idle-watchdog tests deterministic by keeping the
+  `ManualIdleWatchdogGate` expiry seam order-independent, so cancelled arms
+  cannot consume a pending expiry meant for the next live arm and the release
+  workflow no longer flakes on the stalled-participant coverage.
 - Prevent macOS launch crashes after an update when the notification
   authorization result is delivered on a background callback queue.
 - Recover managed workflow handoffs when a Builder renames bl00p's checked-out

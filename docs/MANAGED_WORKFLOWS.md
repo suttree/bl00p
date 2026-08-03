@@ -224,6 +224,30 @@ Run the complete suite with:
 xcrun swift test --disable-sandbox
 ```
 
+For the stalled-workflow watchdog coverage specifically, run the exact
+watchdog tests by name rather than the broad `stalled` filter, which also
+matches unrelated `installed...` tests:
+
+```sh
+xcrun swift test --disable-sandbox \
+  --filter stalledBuilderResolvesViaBypassWhenBoundedRecoveryIsExhausted
+xcrun swift test --disable-sandbox \
+  --filter manualRetryRedispatchesAParticipantStillStuckAtWorking
+xcrun swift test --disable-sandbox \
+  --filter stalledReviewerBoundsAutomaticRecoveryAndPausesWithStallReason
+xcrun swift test --disable-sandbox \
+  --filter toolOutputEventsResetTheIdleWatchdog
+
+xcrun swift test --disable-sandbox --no-parallel \
+  --filter stalledBuilderResolvesViaBypassWhenBoundedRecoveryIsExhausted
+xcrun swift test --disable-sandbox --no-parallel \
+  --filter manualRetryRedispatchesAParticipantStillStuckAtWorking
+xcrun swift test --disable-sandbox --no-parallel \
+  --filter stalledReviewerBoundsAutomaticRecoveryAndPausesWithStallReason
+xcrun swift test --disable-sandbox --no-parallel \
+  --filter toolOutputEventsResetTheIdleWatchdog
+```
+
 ## Managed worktree setup
 
 `GitWorktreeManager` must treat repository worktrees as isolated automation
@@ -293,6 +317,14 @@ scoped to workflow participants only (`containingManagerWorkflowID`);
 standalone chats are unaffected. On expiry, `handleIdleWatchdogExpiry` pauses
 the workflow with an actionable reason ("`<role>` appears stalled — no
 activity for N min") and attempts bounded recovery.
+
+The watchdog's test seam is `ManualIdleWatchdogGate` in
+`Tests/Bl00pTests/ModelTests.swift`. Keep it order-independent: tests must be
+able to request expiry before or after the next arm registers, and a cancelled
+arm must not consume a pending expiry that belongs to its live successor.
+Those tests intentionally drive expiry through the seam instead of waiting on
+wall-clock deadlines so watchdog coverage stays deterministic in normal,
+parallel, and release workflow runs.
 
 **Bounded auto-recovery.** `attemptStallRecovery` stops the wedged runtime,
 resets the stalled session out of `working`/`launching` (without routing
