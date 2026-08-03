@@ -269,3 +269,8 @@ Tests covering the revision loop and resumption include:
 - `managedWorkflowPausesAfterTwoUnresolvedRevisionRounds`
 - `managedWorkflowResetsRevisionRoundsWhenResumingAfterLimitReached` — explicit send resume
 - `managedWorkflowResetsRevisionRoundsOnRelaunchResumeAfterLimitReached` — app-relaunch resume
+
+Negative coverage for unrelated pause reasons remains in the Builder handoff
+repair tests above: those resumes must not reset `revisionRounds` or clear
+`revisionLimitReached` unless the workflow had specifically paused because the
+revision cap was reached.
