@@ -1415,7 +1415,12 @@ final class AppModel: ObservableObject {
             || currentState.status == .failed
         let previousThreadID = currentState.sessionID
         let pendingHandoff = currentState.pendingHandoff
-        let generation = runGenerations[chatID] ?? UUID()
+        // Relaunching after a stopped or failed turn starts a new runtime
+        // lifecycle. Invalidate the previous generation so its trailing
+        // stream-end reconciliation cannot fail the new retry.
+        let generation = shouldLaunch
+            ? UUID()
+            : runGenerations[chatID] ?? UUID()
         runGenerations[chatID] = generation
 
         var updatedSession = currentState
