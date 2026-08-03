@@ -6402,10 +6402,17 @@ func managedWorkflowResetsRevisionRoundsOnRelaunchResumeAfterLimitReached() asyn
         ),
         store: AppStateStore(fileURL: storeURL)
     )
-    try await Task.sleep(for: .milliseconds(50))
+    for _ in 0..<100
+        where relaunched.workflow(for: harness.managerID)?
+            .resumeAvailableAfterRestart != true {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    workflow = try #require(
+        relaunched.workflow(for: harness.managerID)
+    )
+    #expect(workflow.resumeAvailableAfterRestart == true)
 
     relaunched.resumeWorkflow(harness.managerID)
-    try await Task.sleep(for: .milliseconds(50))
 
     workflow = try #require(
         relaunched.workflow(for: harness.managerID)
