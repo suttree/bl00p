@@ -2239,13 +2239,17 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func resumeWorkflowIndicator(_ managerID: UUID) {
+    func resumeWorkflowIndicator(_ managerID: UUID) {
         guard var workflow = managerWorkflows[managerID],
               workflow.isPaused else { return }
         workflow.isPaused = false
         workflow.pauseReason = nil
         workflow.resumeAvailableAfterRestart = false
         workflow.awaitingBuilderHandoffRetry = false
+        if workflow.revisionLimitReached {
+            workflow.revisionRounds = 0
+            workflow.revisionLimitReached = false
+        }
         workflow.updatedAt = .now
         managerWorkflows[managerID] = workflow
         save(immediately: true)
@@ -2776,6 +2780,9 @@ final class AppModel: ObservableObject {
         }
         let revisionRounds = workflow.revisionRounds ?? 0
         guard revisionRounds < Self.maximumRevisionRounds else {
+            workflow.revisionLimitReached = true
+            workflow.updatedAt = .now
+            managerWorkflows[managerID] = workflow
             pauseWorkflow(
                 managerID,
                 reason: "The review still has outstanding findings after \(revisionRounds) revision rounds."

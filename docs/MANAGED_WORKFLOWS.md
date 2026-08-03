@@ -238,3 +238,33 @@ Once exhausted, the workflow pauses with the unmet requirement, retry count,
 and latest evidence. A denied test action continues with an unverified caveat;
 a denied commit action remains paused so the required approval can be
 resolved, and permission-denial pauses do not consume automatic repair turns.
+
+## Revision round capping and resumption
+
+When the Reviewer detects issues that the Builder must fix, the workflow
+enters a revision loop. The automatic revision loop is capped at
+`maximumRevisionRounds = 2` consecutive `changesRequested` dispositions on
+any single revision pass (initial build or post-repair revision). If the
+Reviewer disposition is `changesRequested` on round `n` where
+`n >= maximumRevisionRounds`, the workflow pauses with a question card
+("Review loop needs attention") rather than dispatching another revision.
+
+When the workflow is resumed after hitting this cap (via the Manager or
+Reviewer sending an explicit message), `ManagerWorkflow.revisionLimitReached`
+is used to signal that the revision budget should be reset. The reset is
+scoped to this pause reason only—other pause reasons (`needsAnswer`,
+`needsApproval`, plan approval, different-repository rejection,
+`awaitingBuilderHandoffRetry`) do not touch `revisionRounds` or
+`revisionLimitReached` on resume. After the reset, `revisionRounds` returns
+to 0 and the automatic Builder ↔ Reviewer loop gets a fresh bounded budget
+(up to 2 more rounds) before pausing again if issues remain.
+
+The revision loop's bounded design prevents unbounded back-and-forth while
+human oversight can direct scope or strategy shifts that automatic retries
+cannot. A paused workflow does not automatically advance—it requires
+explicit human direction via the Manager or the Reviewer's next message.
+
+Tests covering the revision loop and resumption include:
+
+- `managedWorkflowPausesAfterTwoUnresolvedRevisionRounds`
+- `managedWorkflowResetsRevisionRoundsWhenResumingAfterLimitReached`

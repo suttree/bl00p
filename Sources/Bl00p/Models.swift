@@ -627,6 +627,9 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
     /// relaunch and bounds recovery for each initial or revision pass.
     var builderHandoffRepairAttempts: Int
     var builderHandoffRepairPass: BuilderHandoffRepairPass?
+    /// Set when the revision round limit is reached. Cleared when the workflow
+    /// is resumed so the automatic revision loop gets a fresh bounded budget.
+    var revisionLimitReached: Bool
     var startedAt: Date
     var updatedAt: Date
     var participantSessionIDs: [AgentRole: UUID]
@@ -658,6 +661,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         awaitingBuilderHandoffRetry: Bool = false,
         builderHandoffRepairAttempts: Int = 0,
         builderHandoffRepairPass: BuilderHandoffRepairPass? = nil,
+        revisionLimitReached: Bool = false,
         startedAt: Date = .now,
         updatedAt: Date = .now,
         participantSessionIDs: [AgentRole: UUID] = [:]
@@ -688,6 +692,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         self.awaitingBuilderHandoffRetry = awaitingBuilderHandoffRetry
         self.builderHandoffRepairAttempts = builderHandoffRepairAttempts
         self.builderHandoffRepairPass = builderHandoffRepairPass
+        self.revisionLimitReached = revisionLimitReached
         self.startedAt = startedAt
         self.updatedAt = updatedAt
         self.participantSessionIDs = participantSessionIDs
@@ -702,7 +707,7 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
         case verificationSummary, publisherSummary, revisionRounds
         case latestHandoff, reviewSummary, revisionStartedAt
         case isPaused, pauseReason, awaitingBuilderHandoffRetry
-        case builderHandoffRepairAttempts, builderHandoffRepairPass
+        case builderHandoffRepairAttempts, builderHandoffRepairPass, revisionLimitReached
         case startedAt, updatedAt, participantSessionIDs
     }
 
@@ -776,6 +781,10 @@ struct ManagerWorkflow: Identifiable, Codable, Hashable, Sendable {
             BuilderHandoffRepairPass.self,
             forKey: .builderHandoffRepairPass
         )
+        revisionLimitReached = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .revisionLimitReached
+        ) ?? false
         startedAt = try container.decode(Date.self, forKey: .startedAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
         participantSessionIDs = try container.decodeIfPresent(
